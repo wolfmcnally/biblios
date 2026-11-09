@@ -1,0 +1,8 @@
+AWS CloudFormation, AWS::EC2::Instance Ebs property (excerpt)
+Source: https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance-ebs.html
+Retrieved: 2026-11-07
+Minimal attributed quotation for reference; the page's own text, unchanged apart from whitespace.
+
+Important After the instance is running, you can modify only the DeleteOnTermination parameters for the attached volumes without interrupting the instance. Modifying any other parameter results in instance replacement .
+
+Encrypted Indicates whether the volume should be encrypted. The effect of setting the encryption state to true depends on the volume origin (new or from a snapshot), starting encryption state, ownership, and whether encryption by default is enabled. For more information, see Encryption by default in the Amazon Elastic Compute Cloud User Guide .

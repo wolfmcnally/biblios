@@ -1,0 +1,8 @@
+# The ingestion corpus is the operator's own documents and never travels in the repository.
+# This manifest records only kinds and sizes, written by the operator before a run; the
+# lanes report outcomes per kind against it. One row per file.
+schema: biblios.corpus-manifest/1
+as_of: null
+files: []
+# - kind: pdf        # pdf | office | image | text
+#   bytes: 0

@@ -1,0 +1,3 @@
+{
+  "app": "uv run --locked --managed-python python app.py"
+}

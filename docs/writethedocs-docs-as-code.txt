@@ -1,0 +1,4 @@
+Version Control (Git)
+Plain Text Markup (Markdown, reStructuredText, Asciidoc)
+Code Reviews
+Automated Tests

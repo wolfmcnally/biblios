@@ -1,0 +1,14 @@
+uv documentation, Caching and environment variables (excerpt)
+Source: https://docs.astral.sh/uv/concepts/cache/ and https://docs.astral.sh/uv/reference/environment/
+Retrieved: 2026-11-07
+Minimal attributed quotation for reference; the page's own text, unchanged apart from whitespace.
+
+A temporary cache directory, if --no-cache was requested. The specific cache directory specified via --cache-dir , UV_CACHE_DIR , or tool.uv.cache-dir . A system-appropriate cache directory, e.g., $XDG_CACHE_HOME/uv or $HOME/.cache/uv on Unix and %LOCALAPPDATA%\uv\cache on Windows Note uv always requires a cache directory.
+
+With --offline , an affected entry is unavailable until it can be refreshed online.
+
+UV_OFFLINE added in 0.5.9 Equivalent to the --offline command-line argument. If set, uv will disable network access. UV_OVERRIDE added in 0.2.22 Equivalent to the --overrides command-line argument. If set, uv will use this file as the overrides file.
+
+UV_PYTHON_INSTALL_DIR added in 0.2.22 Specifies the directory for storing managed Python installations. UV_PYTHON_INSTALL_MIRROR added in 0.2.35 Managed Python installations are downloaded from the Astral python-build-standalone project.
+
+UV_CACHE_DIR added in 0.0.5 Equivalent to the --cache-dir command-line argument. If set, uv will use this directory for caching instead of the default cache directory.

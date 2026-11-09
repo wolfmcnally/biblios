@@ -1,0 +1,205 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Identify the complete Git candidate tree used by kickoff evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+NAMESPACE = b"agentic-kickoff-candidate-v1\0"
+SCRIPT_PATH = Path(__file__).resolve()
+TOOL_ROOT = SCRIPT_PATH.parent
+if (TOOL_ROOT / "lib" / "agentic_starter" / "candidate_boundaries.py").is_file():
+    LIB_ROOT = TOOL_ROOT / "lib"
+else:
+    LIB_ROOT = TOOL_ROOT.parent / "lib"
+sys.path.insert(0, str(LIB_ROOT))
+
+from agentic_starter.candidate_boundaries import (  # noqa: E402
+    FILENAME,
+    BoundaryError,
+    Partition,
+    load_partition,
+)
+
+
+def default_root() -> Path:
+    """Resolve the repository when this tool runs from a pinned kickoff bundle."""
+    override = os.environ.get("KICKOFF_ENGINE_ROOT")
+    if override:
+        return Path(override)
+    tool_root = SCRIPT_PATH.parent
+    if tool_root.name == "tools":
+        try:
+            document = json.loads((tool_root.parent / "run.json").read_text())
+            recorded = document.get("repository_root")
+        except (OSError, TypeError, ValueError):
+            recorded = None
+        if isinstance(recorded, str) and recorded:
+            return Path(recorded)
+    return Path.cwd()
+
+
+def git(root: Path, *arguments: str) -> bytes:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), *arguments],
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(detail or "Git command failed") from exc
+
+
+def repository_root(start: Path) -> Path:
+    output = git(start, "rev-parse", "--show-toplevel")
+    return Path(os.fsdecode(output).strip()).resolve()
+
+
+def candidate_paths(root: Path, *, partition: Partition | None = None) -> list[Path]:
+    tracked = {
+        Path(os.fsdecode(p)) for p in git(root, "ls-files", "--cached", "-z").split(b"\0") if p
+    }
+    untracked = {
+        Path(os.fsdecode(p))
+        for p in git(root, "ls-files", "--others", "--exclude-standard", "-z").split(b"\0")
+        if p
+    }
+    paths = tracked | untracked
+    if partition is not None:
+        partition.require_tracked([p.as_posix() for p in tracked])
+        unknown = sorted(
+            p.as_posix() for p in untracked if partition.classify(p.as_posix()) is None
+        )
+        if unknown:
+            print(
+                "kickoff-tree-id: unclassified untracked paths retained as active: "
+                + ", ".join(unknown),
+                file=sys.stderr,
+            )
+        paths = {p for p in paths if partition.classify(p.as_posix()) != "bookkeeping"}
+    return sorted(paths, key=lambda item: os.fsencode(item.as_posix()))
+
+
+def mode_and_content(path: Path, root: Path) -> tuple[str, bytes]:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return "missing", b""
+    if stat.S_ISLNK(mode):
+        target = os.readlink(path)
+        target_path = Path(target)
+        resolved = (path.parent / target_path).resolve(strict=False)
+        if target_path.is_absolute() or not resolved.is_relative_to(root):
+            raise ValueError(f"candidate symlink escapes repository: {path.relative_to(root)}")
+        return "120000", os.fsencode(target)
+    if stat.S_ISREG(mode):
+        normalized = "100755" if mode & 0o111 else "100644"
+        return normalized, path.read_bytes()
+    if stat.S_ISDIR(mode):
+        gitlink = git(root, "ls-files", "--stage", "--", path.relative_to(root).as_posix())
+        fields = gitlink.decode("utf-8", errors="replace").split()
+        if fields and fields[0] == "160000" and len(fields) >= 2:
+            head = git(path, "rev-parse", "HEAD").strip()
+            if git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
+                raise ValueError(
+                    f"dirty submodule cannot be represented safely: {path.relative_to(root)}"
+                )
+            return "160000", head
+    raise ValueError(f"unsupported candidate entry type: {path.relative_to(root)}")
+
+
+def candidate_manifest(root: Path, *, product: bool = False) -> dict[str, Any]:
+    digest = hashlib.sha256(NAMESPACE)
+    entries: list[dict[str, str]] = []
+    partition = load_partition(root) if product else None
+    for relative in candidate_paths(root, partition=partition):
+        mode, content = mode_and_content(root / relative, root)
+        path_bytes = os.fsencode(relative.as_posix())
+        content_hash = hashlib.sha256(content).hexdigest()
+        digest.update(len(path_bytes).to_bytes(8, "big"))
+        digest.update(path_bytes)
+        digest.update(mode.encode("ascii") + b"\0")
+        digest.update(bytes.fromhex(content_hash))
+        entries.append(
+            {
+                "path": relative.as_posix(),
+                "mode": mode,
+                "content_sha256": content_hash,
+            }
+        )
+    manifest = {
+        "schema_version": 1,
+        "candidate_id": digest.hexdigest(),
+        "path_count": len(entries),
+        "entries": entries,
+    }
+
+    if partition is not None:
+        declaration = next((entry for entry in entries if entry["path"] == FILENAME), None)
+        if declaration is None or declaration["mode"] not in {"100644", "100755"}:
+            raise BoundaryError("candidate declaration must be a regular file")
+        # Require the parsed declaration to be the exact bytes included in the hash.
+        if (
+            partition.sha256 != declaration["content_sha256"]
+            or load_partition(root).sha256 != partition.sha256
+        ):
+            raise BoundaryError("candidate declaration changed during classification")
+        manifest["partition_sha256"] = partition.sha256
+    return manifest
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Hash tracked plus nonignored-untracked candidate state."
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=default_root(),
+        help="path inside the Git repository (default: recorded run root or cwd)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the candidate manifest instead of only its identifier",
+    )
+    parser.add_argument(
+        "--product",
+        action="store_true",
+        help="use the declared active/bookkeeping boundary",
+    )
+    return parser
+
+
+def main() -> int:
+    arguments = build_parser().parse_args()
+    try:
+        root = repository_root(arguments.root.resolve())
+        manifest = candidate_manifest(root, product=arguments.product)
+    except (BoundaryError, OSError, ValueError) as exc:
+        detail = str(exc)
+        if "not a git repository" in detail:
+            detail = f"{arguments.root} is not a git repository; pass --root explicitly"
+        print(f"kickoff-tree-id: {detail}", file=os.sys.stderr)
+        return 2
+    if arguments.json:
+        json.dump(manifest, os.sys.stdout, sort_keys=True, separators=(",", ":"))
+        print()
+    else:
+        print(manifest["candidate_id"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,12 @@
+{
+  "schema": "biblios.cost-assumptions/1",
+  "as_of": "2026-11-07",
+  "currency": "USD",
+  "note": "Hourly assumptions the runner prints in every confirmation packet; estimates, never billed cost. Sources, all read 2026-11-07: instance is m7g.xlarge on-demand in us-east-1 at twice the m7g.large rate (0.0816 USD/h) that Palace's run read from the AWS Pricing API, matching third-party price aggregators (an estimate for the xlarge size, not a Pricing API read of it); interface_endpoint is the per-endpoint-hour rate read from the AWS Pricing API by Palace's run (billed at whole-hour minimums per endpoint; PrivateLink data processing adds 0.01 USD/GB, under 1 GB per run); gp3_gib_month and s3_gib_month are aggregator estimates for us-east-1. The operator approved operational limits of 5 USD for the private run and 3 USD for the example on 2026-11-07; these are monitored targets, not AWS-enforced caps.",
+  "hourly_usd": {
+    "instance": 0.1632,
+    "interface_endpoint": 0.01,
+    "gp3_gib_month": 0.08,
+    "s3_gib_month": 0.023
+  }
+}

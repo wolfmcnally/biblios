@@ -1,0 +1,1515 @@
+"""Deterministic inventory, validation, red-witness receipts, and selection for proof estates."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import math
+import os
+import platform
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import xml.etree.ElementTree as ElementTree
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agentic_starter.execution_telemetry import (  # noqa: E402
+    TelemetryError,
+    require_persistent_directory,
+    retain_evidence,
+    verify_retained_evidence,
+)
+from agentic_starter.test_runner import run_command  # noqa: E402
+
+SCHEMA = "agentic.proof_estate.v5"
+BASELINE_SCHEMA = "agentic.proof_baseline.v2"
+REQUIRED_FAMILY_FIELDS = {
+    "id",
+    "kind",
+    "selectors",
+    "source_paths",
+    "covers",
+    "contract",
+    "risk_class",
+    "oracle",
+    "admission",
+    "nearest_overlap",
+    "tier",
+    "flake_rate",
+    "replacement_lineage",
+}
+TIERS = {"vital", "changed", "full"}
+TIMING_RECORD = ".kickoff/test-timing/full.xml"
+KINDS = {"pytest", "gate", "hook"}
+DISPOSITION_FIELDS = {
+    "record_type",
+    "proof_id",
+    "disposition",
+    "contract",
+    "oracle",
+    "red_witness",
+    "nearest_overlap",
+    "replacement",
+    "replacement_evidence",
+    "rationale",
+    "baseline_inventory_sha256",
+}
+ADMISSION_FIELDS = DISPOSITION_FIELDS
+RETIREMENT_FIELDS = DISPOSITION_FIELDS
+REPAIR_FIELDS = DISPOSITION_FIELDS
+SELF_BOUND_DISPOSITIONS = {"retain", "repair"}
+WITNESS_FIELDS = {
+    "record_type",
+    "proof_ids",
+    "defect",
+    "command",
+    "expect",
+    "paths",
+    "mutation_sha256",
+    "red_output_sha256",
+    "witnessed_on",
+}
+WITNESS_PENDING = ".kickoff/witness/pending"
+
+
+class GovernanceError(RuntimeError):
+    """A fail-closed proof-governance refusal."""
+
+
+class GovernanceIncomplete(GovernanceError):
+    """A child did not complete; this is not a correctness failure."""
+
+
+@dataclass(frozen=True)
+class Proof:
+    proof_id: str
+    family_id: str
+    kind: str
+    selector: str
+    source_path: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "id": self.proof_id,
+            "family": self.family_id,
+            "kind": self.kind,
+            "selector": self.selector,
+            "source_path": self.source_path,
+        }
+
+
+def _run(
+    command: Sequence[str], root: Path, *, check: bool = True
+) -> subprocess.CompletedProcess[str]:
+    result = run_command(command, cwd=root, capture=True, cleanup_grace=5)
+    if check and result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic"
+        if result.returncode == 124:
+            raise GovernanceIncomplete(detail)
+        raise GovernanceError(
+            f"command failed ({result.returncode}): {' '.join(command)}: {detail}"
+        )
+    return result
+
+
+def _pytest_family(node_id: str) -> str:
+    return re.sub(r"\[[^\n]*\]$", "", node_id)
+
+
+def collect_pytest(root: Path) -> list[Proof]:
+    result = _run(
+        [
+            str(root / "bin/python"),
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-q",
+            "--rootdir",
+            ".",
+            "project/tests",
+            "tests",
+        ],
+        root,
+    )
+    proofs: list[Proof] = []
+    for line in result.stdout.splitlines():
+        node_id = line.strip()
+        if not node_id.startswith(("project/tests/", "tests/")) or "::" not in node_id:
+            continue
+        family = _pytest_family(node_id)
+        source_path = node_id.split("::", 1)[0]
+        proofs.append(
+            Proof(
+                proof_id=f"pytest:{node_id}",
+                family_id=f"pytest:{family}",
+                kind="pytest",
+                selector=node_id,
+                source_path=source_path,
+            )
+        )
+    if not proofs:
+        raise GovernanceError("pytest collection produced no proof nodes")
+    return proofs
+
+
+_GATE_CALL = re.compile(r"^\s*run_(?:member_)?gate\s+([A-Za-z0-9_-]+)(?:\s|$)")
+
+
+def collect_check_gates(root: Path) -> list[Proof]:
+    path = root / "bin/check"
+    proofs: list[Proof] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        raise GovernanceError(f"cannot read bin/check: {exc}") from exc
+    for line_number, line in enumerate(lines, 1):
+        match = _GATE_CALL.match(line)
+        if not match:
+            continue
+        name = match.group(1)
+        if name.startswith("$"):
+            continue
+        proof_id = f"gate:{name}"
+        proofs.append(
+            Proof(
+                proof_id=proof_id,
+                family_id=proof_id,
+                kind="gate",
+                selector=name,
+                source_path=f"bin/check:{line_number}",
+            )
+        )
+    unique = {proof.proof_id: proof for proof in proofs}
+    return [unique[key] for key in sorted(unique)]
+
+
+def collect_hooks(root: Path) -> list[Proof]:
+    path = root / ".githooks/pre-commit"
+    if not path.is_file():
+        return []
+    proofs: list[Proof] = []
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        command = line.strip()
+        if command.startswith("./bin/"):
+            proof_id = f"hook:.githooks/pre-commit:{command}"
+            proofs.append(
+                Proof(
+                    proof_id=proof_id,
+                    family_id=proof_id,
+                    kind="hook",
+                    selector=proof_id,
+                    source_path=f".githooks/pre-commit:{line_number}",
+                )
+            )
+    return proofs
+
+
+def inventory(root: Path) -> dict[str, Any]:
+    proofs = collect_pytest(root) + collect_check_gates(root) + collect_hooks(root)
+    proof_ids = [proof.proof_id for proof in proofs]
+    if len(proof_ids) != len(set(proof_ids)):
+        duplicates = sorted({item for item in proof_ids if proof_ids.count(item) > 1})
+        raise GovernanceError(f"duplicate proof ids: {', '.join(duplicates[:10])}")
+    families = sorted({proof.family_id for proof in proofs})
+    by_kind: dict[str, dict[str, int]] = {}
+    for kind in sorted(KINDS):
+        members = [proof for proof in proofs if proof.kind == kind]
+        by_kind[kind] = {
+            "families": len({proof.family_id for proof in members}),
+            "leaves": len(members),
+        }
+    payload: dict[str, Any] = {
+        "schema": BASELINE_SCHEMA,
+        "counts": {"families": len(families), "leaves": len(proofs)},
+        "by_kind": by_kind,
+        "families": families,
+        "proofs": [proof.as_dict() for proof in proofs],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["inventory_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return payload
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        payload = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise GovernanceError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise GovernanceError(f"{path} must contain one YAML mapping")
+    return payload
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GovernanceError(f"cannot read {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise GovernanceError(f"{path} must contain one JSON object")
+    return payload
+
+
+def load_ledger(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text().splitlines()
+    except OSError as exc:
+        raise GovernanceError(f"cannot read {path}: {exc}") from exc
+    for line_number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise GovernanceError(f"{path}:{line_number}: invalid JSON: {exc}") from exc
+        if not isinstance(row, dict):
+            raise GovernanceError(f"{path}:{line_number}: row must be an object")
+        rows.append(row)
+    return rows
+
+
+def _matches(selector: str, proof: Proof) -> bool:
+    if proof.kind == "pytest":
+        family = proof.family_id.removeprefix("pytest:")
+        node = proof.proof_id.removeprefix("pytest:")
+        if selector.endswith(".py"):
+            return node.startswith(f"{selector}::")
+        return fnmatch.fnmatchcase(family, selector) or fnmatch.fnmatchcase(node, selector)
+    return fnmatch.fnmatchcase(proof.selector, selector) or fnmatch.fnmatchcase(
+        proof.proof_id, selector
+    )
+
+
+def _family_claims(family: dict[str, Any], proof: Proof) -> bool:
+    if family.get("kind") != proof.kind:
+        return False
+    selectors = family.get("selectors")
+    return isinstance(selectors, list) and any(
+        isinstance(selector, str) and _matches(selector, proof) for selector in selectors
+    )
+
+
+def _validate_family_shape(family: Any, index: int) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(family, dict):
+        return [f"families[{index}] must be a mapping"]
+    missing = sorted(REQUIRED_FAMILY_FIELDS - set(family))
+    if missing:
+        errors.append(f"families[{index}] missing: {', '.join(missing)}")
+    family_id = family.get("id", f"families[{index}]")
+    if family.get("kind") not in KINDS:
+        errors.append(f"{family_id}: invalid kind {family.get('kind')!r}")
+    if family.get("tier") not in TIERS:
+        errors.append(f"{family_id}: invalid tier {family.get('tier')!r}")
+    selectors = family.get("selectors")
+    if (
+        not isinstance(selectors, list)
+        or not selectors
+        or not all(isinstance(item, str) and item for item in selectors)
+    ):
+        errors.append(f"{family_id}: selectors must be a nonempty string list")
+    for field in (
+        "source_paths",
+        "covers",
+        "replacement_lineage",
+    ):
+        value = family.get(field)
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            errors.append(f"{family_id}: {field} must be a string list")
+    for field in ("contract", "risk_class", "oracle", "admission", "nearest_overlap"):
+        if not isinstance(family.get(field), str) or not family.get(field, "").strip():
+            errors.append(f"{family_id}: {field} must be nonempty text")
+    flake = family.get("flake_rate")
+    if not isinstance(flake, (int, float)) or not 0 <= flake <= 1:
+        errors.append(f"{family_id}: flake_rate must be between 0 and 1")
+    return errors
+
+
+def machine_fingerprint() -> str:
+    """A stable, non-identifying name for this machine; timings compare only within one."""
+    material = "|".join(
+        (platform.node(), platform.system(), platform.machine(), str(os.cpu_count()))
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
+
+
+def _runtime_errors(manifest: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    timeout = manifest.get("hang_timeout_seconds")
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout <= 0
+    ):
+        errors.append("hang_timeout_seconds must be finite and positive")
+    adoption = manifest.get("adoption")
+    if not isinstance(adoption, dict) or adoption.get("mode") not in {"complete", "bounded"}:
+        errors.append("adoption.mode must be complete or bounded")
+    elif adoption["mode"] == "bounded" and not str(adoption.get("reason", "")).strip():
+        errors.append("bounded adoption requires a concrete review reason and batch plan")
+    return errors
+
+
+def mutation_errors(manifest: dict[str, Any]) -> list[str]:
+    """Shape of the `mutation` declaration: a named tool with its scope and budget, or
+    an explicit statement that this repository takes no such measurement and why."""
+    declared = manifest.get("mutation")
+    if not isinstance(declared, dict):
+        return ["mutation must be a mapping"]
+    tool = declared.get("tool")
+    if tool is None:
+        if set(declared) != {"tool", "reason"}:
+            return ["an unmeasured mutation declaration carries only tool and reason"]
+        if not isinstance(declared["reason"], str) or not declared["reason"].strip():
+            return ["mutation.reason must say why no mutation tool is declared"]
+        return []
+    errors: list[str] = []
+    if set(declared) != {"tool", "paths", "budget_seconds"}:
+        errors.append("a measured mutation declaration carries tool, paths and budget_seconds")
+    if not isinstance(tool, str) or not tool.strip():
+        errors.append("mutation.tool must be null or the name of the tool the wrapper drives")
+    paths = declared.get("paths")
+    if not isinstance(paths, list) or not paths or not all(isinstance(i, str) for i in paths):
+        errors.append("mutation.paths must be a nonempty list of path patterns")
+    budget = declared.get("budget_seconds")
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+        errors.append("mutation.budget_seconds must be a positive number")
+    return errors
+
+
+def _source_file(reported: str, known: set[str]) -> str | None:
+    """Resolve a file pytest reported relative to its rootdir to one repository test file."""
+    parts = [part for part in reported.split("/") if part not in ("", ".")]
+    while parts and parts[0] == "..":
+        parts.pop(0)
+    relative = "/".join(parts)
+    if relative in known:
+        return relative
+    matches = [path for path in known if path.endswith("/" + relative)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _junit_sample(path: Path, known: set[str]) -> tuple[float, dict[str, float]] | None:
+    """The suite's wall time and each executed leaf's time, or None when the record is unusable."""
+    try:
+        document = ElementTree.parse(path).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    suites = [document] if document.tag == "testsuite" else list(document.iter("testsuite"))
+    try:
+        total = sum(float(suite.get("time", "")) for suite in suites)
+    except ValueError:
+        return None
+    if not math.isfinite(total) or total < 0:
+        return None
+    leaves: dict[str, float] = {}
+    for case in document.iter("testcase"):
+        file_name, classname, name = case.get("file"), case.get("classname", ""), case.get("name")
+        source = _source_file(file_name, known) if file_name and name else None
+        module = Path(source).stem if source else None
+        components = classname.split(".")
+        if source is None or module not in components:
+            return None
+        inner = "::".join(components[len(components) - components[::-1].index(module) :])
+        node = f"{source}::{inner}::{name}" if inner else f"{source}::{name}"
+        try:
+            duration = float(case.get("time", ""))
+            if not math.isfinite(duration) or duration < 0 or f"pytest:{node}" in leaves:
+                return None
+            leaves[f"pytest:{node}"] = duration
+        except ValueError:
+            return None
+    return (total, leaves) if suites and leaves else None
+
+
+def timing(root: Path) -> dict[str, Any]:
+    """Report full-run timing without deciding correctness or triggering reruns."""
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    shape_errors = _runtime_errors(manifest)
+    if shape_errors:
+        raise GovernanceError("runtime configuration invalid:\n- " + "\n- ".join(shape_errors))
+    record = root / TIMING_RECORD
+    current = {
+        proof["id"]: proof for proof in inventory(root)["proofs"] if proof["kind"] == "pytest"
+    }
+    known = {str(proof["source_path"]) for proof in current.values()}
+    sample = _junit_sample(record, known)
+    runs = [sample] if sample is not None else []
+    fingerprint = machine_fingerprint()
+    if not runs:
+        return {
+            "state": "unmeasured",
+            "reason": "no full-run timing record",
+            "machine": fingerprint,
+        }
+    if any(set(leaves) != set(current) for _, leaves in runs):
+        return {
+            "state": "unmeasured",
+            "reason": "the timing record predates the current pytest estate",
+            "machine": fingerprint,
+        }
+    total, durations = runs[0]
+    return {
+        "state": "measured",
+        "interpretation": "diagnostic only; correctness and hang outcomes are separate",
+        "machine": fingerprint,
+        "samples": len(runs),
+        "test_lane_seconds": round(total, 2),
+        "slowest": [
+            {"proof": proof_id, "seconds": round(seconds, 2)}
+            for proof_id, seconds in sorted(durations.items(), key=lambda item: -item[1])[:5]
+        ],
+    }
+
+
+def _is_iso_date(value: Any) -> bool:
+    try:
+        return isinstance(value, str) and date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def validate(
+    root: Path,
+    *,
+    proposed_manifest: dict[str, Any] | None = None,
+    proposed_ledger: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    _refuse_pending_witness(root)
+    captures = root / ".kickoff/witness/captures"
+    try:
+        for capture in (
+            load_ledger(captures / "index.jsonl") if (captures / "index.jsonl").exists() else []
+        ):
+            data = verify_retained_evidence(captures, capture["sha256"])
+            if len(data) != capture["bytes"]:
+                raise GovernanceError("witness capture size differs")
+    except (TelemetryError, KeyError) as exc:
+        raise GovernanceError(f"witness capture invalid: {exc}") from exc
+    manifest_path = root / "tests/proof-estate.yaml"
+    manifest = load_yaml(manifest_path) if proposed_manifest is None else proposed_manifest
+    errors: list[str] = []
+    if manifest.get("schema") != SCHEMA:
+        errors.append(f"manifest schema must be {SCHEMA}")
+    families = manifest.get("families")
+    if not isinstance(families, list) or not families:
+        raise GovernanceError("manifest families must be a nonempty list")
+    for index, family in enumerate(families):
+        errors.extend(_validate_family_shape(family, index))
+    family_ids = [family.get("id") for family in families if isinstance(family, dict)]
+    duplicates = sorted({item for item in family_ids if family_ids.count(item) > 1})
+    if duplicates:
+        errors.append(f"duplicate family ids: {', '.join(str(item) for item in duplicates)}")
+
+    current = inventory(root)
+    proofs = [
+        Proof(
+            proof_id=row["id"],
+            family_id=row["family"],
+            kind=row["kind"],
+            selector=row["selector"],
+            source_path=row["source_path"],
+        )
+        for row in current["proofs"]
+    ]
+    claimed_by: dict[str, list[str]] = {}
+    for proof in proofs:
+        claims = [family["id"] for family in families if _family_claims(family, proof)]
+        claimed_by[proof.proof_id] = claims
+        if not claims:
+            errors.append(f"undeclared executable proof: {proof.proof_id}")
+        elif len(claims) > 1:
+            errors.append(
+                f"multiply declared executable proof: {proof.proof_id}: {', '.join(claims)}"
+            )
+    for family in families:
+        if not any(family["id"] in claims for claims in claimed_by.values()):
+            errors.append(f"declared family selects no executable proof: {family['id']}")
+        for source_path in family.get("source_paths", []):
+            if (
+                not any(character in source_path for character in "*?[")
+                and not (root / source_path).exists()
+            ):
+                errors.append(f"{family['id']}: missing source path: {source_path}")
+
+    baseline_rel = manifest.get("baseline_report")
+    if not isinstance(baseline_rel, str) or not baseline_rel:
+        errors.append("baseline_report must be a repo-relative path")
+        baseline: dict[str, Any] = {}
+    else:
+        baseline = load_json(root / baseline_rel)
+        if baseline.get("schema") != BASELINE_SCHEMA:
+            errors.append(f"baseline schema must be {BASELINE_SCHEMA}")
+        canonical_baseline = dict(baseline)
+        declared_baseline_digest = canonical_baseline.pop("inventory_sha256", None)
+        observed_baseline_digest = hashlib.sha256(
+            json.dumps(canonical_baseline, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if declared_baseline_digest != observed_baseline_digest:
+            errors.append("baseline inventory digest is stale")
+    errors.extend(_runtime_errors(manifest))
+    errors.extend(mutation_errors(manifest))
+
+    current_ids = {proof.proof_id for proof in proofs}
+    critical = manifest.get("critical_risks")
+    if not isinstance(critical, dict) or not critical:
+        errors.append("critical_risks must be a nonempty mapping")
+        critical = {}
+    for risk_class, declaration in critical.items():
+        if not isinstance(declaration, dict):
+            errors.append(f"critical risk {risk_class} must be a mapping")
+            continue
+        state = declaration.get("state")
+        if state == "applicable":
+            direct_proof = declaration.get("direct_proof")
+            if direct_proof not in current_ids:
+                errors.append(
+                    f"critical risk {risk_class} direct proof is not retained: {direct_proof}"
+                )
+        elif state == "not-applicable":
+            if risk_class != "deploy":
+                errors.append(f"only deploy may be not-applicable: {risk_class}")
+            for field in ("rationale", "activation_trigger"):
+                if not isinstance(declaration.get(field), str) or not declaration[field]:
+                    errors.append(f"critical risk {risk_class} lacks {field}")
+        else:
+            errors.append(f"critical risk {risk_class} has invalid state")
+
+    ledger_rel = manifest.get("audit_ledger")
+    if not isinstance(ledger_rel, str) or not ledger_rel:
+        errors.append("audit_ledger must be a repo-relative path")
+        ledger: list[dict[str, Any]] = []
+    else:
+        ledger = load_ledger(root / ledger_rel) if proposed_ledger is None else proposed_ledger
+    baseline_ids = {row.get("id") for row in baseline.get("proofs", [])}
+    disposition_rows = [row for row in ledger if row.get("record_type") == "proof_disposition"]
+    admission_rows = [row for row in ledger if row.get("record_type") == "proof_admission"]
+    retirement_rows = [row for row in ledger if row.get("record_type") == "proof_retirement"]
+    repair_rows = [row for row in ledger if row.get("record_type") == "proof_repair"]
+    known_record_types = {
+        "proof_disposition",
+        "proof_admission",
+        "proof_retirement",
+        "proof_repair",
+        "proof_modification",
+    }
+    unknown_record_types = sorted(
+        {
+            str(row.get("record_type"))
+            for row in ledger
+            if row.get("record_type") not in known_record_types
+        }
+    )
+    if unknown_record_types:
+        errors.append(
+            "audit ledger contains unknown record types: " + ", ".join(unknown_record_types)
+        )
+    disposition_ids = [row.get("proof_id") for row in disposition_rows]
+    if len(disposition_ids) != len(set(disposition_ids)):
+        errors.append("audit ledger contains duplicate proof dispositions")
+    retired_baseline = {row.get("proof_id") for row in retirement_rows} & baseline_ids
+    missing_dispositions = sorted(baseline_ids - set(disposition_ids) - retired_baseline)
+    extra_dispositions = sorted(set(disposition_ids) - baseline_ids)
+    if missing_dispositions and manifest.get("adoption", {}).get("mode") != "bounded":
+        errors.append(f"audit ledger misses {len(missing_dispositions)} baseline proofs")
+    if extra_dispositions:
+        errors.append(f"audit ledger names {len(extra_dispositions)} non-baseline proofs")
+    admission_ids = [row.get("proof_id") for row in admission_rows]
+    if len(admission_ids) != len(set(admission_ids)):
+        errors.append("audit ledger contains duplicate proof admissions")
+    if not current_ids - baseline_ids <= set(admission_ids):
+        errors.append("audit ledger does not admit every active post-baseline proof")
+    for row in disposition_rows:
+        if set(row) != DISPOSITION_FIELDS:
+            errors.append(f"wrong disposition fields for {row.get('proof_id')}")
+            continue
+        if row.get("disposition") not in SELF_BOUND_DISPOSITIONS | {"delete", "consolidate"}:
+            errors.append(f"invalid disposition for {row.get('proof_id')}")
+            continue
+        for field in (
+            "contract",
+            "oracle",
+            "red_witness",
+            "nearest_overlap",
+            "replacement_evidence",
+            "rationale",
+        ):
+            if not isinstance(row.get(field), str) or not row[field]:
+                errors.append(f"missing disposition {field} for {row.get('proof_id')}")
+        if row.get("baseline_inventory_sha256") != baseline.get("inventory_sha256"):
+            errors.append(f"stale disposition baseline for {row.get('proof_id')}")
+        proof_id = row.get("proof_id")
+        replacement = row.get("replacement")
+        if row.get("disposition") in SELF_BOUND_DISPOSITIONS:
+            if replacement != proof_id:
+                errors.append(f"retained proof self-binding is wrong: {proof_id}")
+        elif row.get("disposition") == "consolidate":
+            if proof_id in current_ids or replacement not in baseline_ids | set(admission_ids):
+                errors.append(f"consolidated proof has invalid replacement: {proof_id}")
+        elif proof_id in current_ids or replacement is not None:
+            errors.append(f"deleted proof still exists or names a replacement: {proof_id}")
+    active = set(baseline_ids)
+    seen_retirement_targets: set[str] = set()
+    for row in ledger:
+        record_type = row.get("record_type")
+        if record_type == "proof_disposition":
+            proof_id = row.get("proof_id")
+            if proof_id not in active:
+                errors.append(f"disposition target is no longer active: {proof_id}")
+            if row.get("disposition") in {"delete", "consolidate"}:
+                active.discard(proof_id)
+            continue
+        if record_type == "proof_retirement":
+            proof_id = row.get("proof_id")
+            if set(row) != RETIREMENT_FIELDS:
+                errors.append(f"wrong retirement fields for {proof_id}")
+                continue
+            if proof_id in seen_retirement_targets:
+                errors.append(f"proof is retired more than once: {proof_id}")
+            seen_retirement_targets.add(str(proof_id))
+            if proof_id not in active:
+                errors.append(f"retirement target is not active: {proof_id}")
+                continue
+            disposition = row.get("disposition")
+            replacement = row.get("replacement")
+            if disposition == "consolidate":
+                if replacement == proof_id or replacement not in active:
+                    errors.append(f"retirement has invalid consolidation replacement: {proof_id}")
+            elif disposition == "delete":
+                if replacement is not None:
+                    errors.append(f"deleted retirement names a replacement: {proof_id}")
+            else:
+                errors.append(f"retirement must consolidate or delete: {proof_id}")
+            if row.get("baseline_inventory_sha256") != baseline.get("inventory_sha256"):
+                errors.append(f"stale retirement baseline for {proof_id}")
+            for field in (
+                "contract",
+                "oracle",
+                "red_witness",
+                "nearest_overlap",
+                "replacement_evidence",
+                "rationale",
+            ):
+                if not isinstance(row.get(field), str) or not row[field]:
+                    errors.append(f"missing retirement {field} for {proof_id}")
+            active.discard(str(proof_id))
+            continue
+        if record_type in {"proof_repair", "proof_modification"}:
+            proof_id = row.get("proof_id")
+            expected_fields = REPAIR_FIELDS | (
+                {"witness_receipts"} if record_type == "proof_modification" else set()
+            )
+            if set(row) != expected_fields:
+                errors.append(f"wrong repair fields for {proof_id}")
+                continue
+            if proof_id not in active:
+                errors.append(f"repair target is not active: {proof_id}")
+            if row.get("disposition") != "repair" or row.get("replacement") != proof_id:
+                errors.append(f"repair must self-bind with disposition repair: {proof_id}")
+            if row.get("baseline_inventory_sha256") != baseline.get("inventory_sha256"):
+                errors.append(f"stale repair baseline for {proof_id}")
+            for field in (
+                "contract",
+                "oracle",
+                "red_witness",
+                "nearest_overlap",
+                "replacement_evidence",
+                "rationale",
+            ):
+                if not isinstance(row.get(field), str) or not row[field]:
+                    errors.append(f"missing repair {field} for {proof_id}")
+            continue
+        if record_type != "proof_admission":
+            continue
+        if set(row) != ADMISSION_FIELDS:
+            errors.append(f"wrong admission fields for {row.get('proof_id')}")
+            continue
+        proof_id = row.get("proof_id")
+        if row.get("disposition") != "retain" or row.get("replacement") != proof_id:
+            errors.append(f"post-baseline admission must retain and self-bind: {proof_id}")
+        if proof_id in active:
+            errors.append(f"admission proof is already active: {proof_id}")
+        active.add(str(proof_id))
+        for field in (
+            "contract",
+            "oracle",
+            "red_witness",
+            "nearest_overlap",
+            "replacement_evidence",
+            "rationale",
+        ):
+            if not isinstance(row.get(field), str) or not row[field]:
+                errors.append(f"missing admission {field} for {proof_id}")
+    if active != current_ids:
+        missing = sorted(current_ids - active)
+        shadow = sorted(active - current_ids)
+        errors.append(
+            "replayed proof estate does not match inventory"
+            f" (unadmitted={missing[:3]}, shadow={shadow[:3]})"
+        )
+
+    try:
+        witness_failure_lines(manifest)
+    except GovernanceError as exc:
+        errors.append(str(exc))
+    witness_rel = manifest.get("witness_ledger")
+    if not isinstance(witness_rel, str) or not witness_rel:
+        errors.append("witness_ledger must be a repo-relative path")
+        receipts: list[dict[str, Any]] = []
+    else:
+        receipts = load_ledger(root / witness_rel)
+    ledger_ids = {row.get("proof_id") for row in ledger} | baseline_ids
+    witnessed: set[str] = set()
+    for number, row in enumerate(receipts, 1):
+        receipt_errors = _receipt_errors(row, number, ledger_ids)
+        errors.extend(receipt_errors)
+        if not receipt_errors:
+            witnessed.update(row["proof_ids"])
+    admitted_or_repaired = {
+        str(row.get("proof_id")) for row in admission_rows + repair_rows
+    } & active
+    for proof_id in sorted(admitted_or_repaired - witnessed):
+        errors.append(f"admitted or repaired proof has no witness receipt: {proof_id}")
+
+    used_modification_receipts: set[tuple[str, int]] = set()
+    for row in ledger:
+        if row.get("record_type") != "proof_modification":
+            continue
+        proof_id = row.get("proof_id")
+        references = row.get("witness_receipts")
+        if not isinstance(references, list) or not references:
+            errors.append(f"modification needs witness receipt references: {proof_id}")
+            continue
+        for number in references:
+            if type(number) is not int or not 1 <= number <= len(receipts):
+                errors.append(f"modification has invalid witness receipt number: {proof_id}")
+            elif proof_id not in receipts[number - 1].get("proof_ids", []):
+                errors.append(f"modification receipt does not witness its proof: {proof_id}")
+            elif (proof_id, number) in used_modification_receipts:
+                errors.append(f"modification reuses an earlier modification receipt: {proof_id}")
+            else:
+                used_modification_receipts.add((proof_id, number))
+
+    if errors:
+        raise GovernanceError("validation failed:\n- " + "\n- ".join(errors))
+    return {
+        "schema": SCHEMA,
+        "state": "valid",
+        "families": current["counts"]["families"],
+        "leaves": current["counts"]["leaves"],
+        "witness_receipts": len(receipts),
+        "pending_baseline_review": len(missing_dispositions),
+        "pending_baseline_proofs": missing_dispositions,
+        # A baseline proof with no receipt has only a written claim that it can fail.
+        "unwitnessed_baseline": len(active - admitted_or_repaired - witnessed),
+        "dispositions": {
+            state: sum(row.get("disposition") == state for row in disposition_rows)
+            for state in ("retain", "repair", "consolidate", "delete")
+        },
+        "admissions": len(admission_rows),
+        "post_reset_retirements": len(retirement_rows),
+        "post_reset_repairs": len(repair_rows),
+        "post_reset_modifications": sum(
+            row.get("record_type") == "proof_modification" for row in ledger
+        ),
+    }
+
+
+DOCUMENT_READER_ROOTS = ("tests", "lib", "bin")
+MAX_READER_BYTES = 4 * 1024 * 1024
+
+
+def _is_document(path: str) -> bool:
+    return path.endswith(".md")
+
+
+def _mentions(text: str, path: str) -> bool:
+    """Whether a file names a path: its repository path, or its file name beside its
+    parent directory's name (code that joins ``"policies" / "surfaces.md"``; a Python
+    module imported as ``package.module``). The stand-in over-selects on a shared name,
+    which costs only time; it misses a path reached through a computed name, which the
+    full gate before a push still catches."""
+    if path in text:
+        return True
+    name = path.rsplit("/", 1)[-1]
+    parent = path.rsplit("/", 2)[-2] if "/" in path else None
+    names = (name, name.removesuffix(".py")) if name.endswith(".py") else (name,)
+    return any(item in text for item in names) and (parent is None or parent in text)
+
+
+def _readers(root: Path, documents: list[str]) -> dict[str, list[str]] | None:
+    """Tracked test, library and executable files naming each path; None if unlistable."""
+    listed = _run(["git", "ls-files", "--", *DOCUMENT_READER_ROOTS], root, check=False)
+    if listed.returncode != 0:
+        return None
+    readers: dict[str, list[str]] = {document: [] for document in documents}
+    for candidate in listed.stdout.splitlines():
+        target = root / candidate
+        try:
+            if not target.is_file() or target.stat().st_size > MAX_READER_BYTES:
+                continue
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for document in documents:
+            if _mentions(text, document):
+                readers[document].append(candidate)
+    return readers
+
+
+def _families_for_reader(families: list[dict[str, Any]], reader: str) -> list[dict[str, Any]]:
+    """A reader's families: a test file by selectors or source paths, code by its covers."""
+    found = []
+    for family in families:
+        selector_files = {str(item).split("::", 1)[0] for item in family.get("selectors", [])}
+        patterns = [*family.get("covers", []), *family.get("source_paths", [])]
+        if reader in selector_files or any(
+            fnmatch.fnmatchcase(reader, pattern) for pattern in patterns
+        ):
+            found.append(family)
+    return found
+
+
+def selected_families(
+    root: Path, mode: str, base: str | None = None
+) -> tuple[list[dict[str, Any]], str | None]:
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    families = manifest.get("families")
+    if not isinstance(families, list) or not families:
+        raise GovernanceError("manifest families must be a nonempty list")
+    vital = [family for family in families if family.get("tier") == "vital"]
+    if mode == "vital":
+        return vital, None
+    if mode != "changed" or not base:
+        raise GovernanceError("changed selection requires --base <git-ref>")
+    resolved = _run(["git", "rev-parse", "--verify", f"{base}^{{commit}}"], root, check=False)
+    if resolved.returncode != 0:
+        return families, f"invalid-or-unavailable-base:{base}"
+    result = _run(
+        ["git", "diff", "--name-only", "--no-renames", base, "--"],
+        root,
+        check=False,
+    )
+    untracked = _run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        root,
+        check=False,
+    )
+    if result.returncode != 0 or untracked.returncode != 0:
+        return families, f"changed-path-enumeration-failed:{base}"
+    changed = sorted(
+        {line for line in (*result.stdout.splitlines(), *untracked.stdout.splitlines()) if line}
+    )
+    if not changed:
+        return vital, None
+    selected = {family["id"]: family for family in vital}
+    unmapped: list[str] = []
+    mapped_code: list[str] = []
+    for path in changed:
+        matches = [
+            family
+            for family in families
+            if any(fnmatch.fnmatchcase(path, pattern) for pattern in family.get("covers", []))
+            or any(fnmatch.fnmatchcase(path, pattern) for pattern in family.get("source_paths", []))
+        ]
+        if not matches:
+            unmapped.append(path)
+            continue
+        if len(matches) > 1 and not _is_document(path):
+            return families, f"ambiguous-change-map:{path}"
+        if not _is_document(path):
+            mapped_code.append(path)
+        # A document several families cover selects all of them: its readers, not one owner,
+        # are what it can break.
+        for family in matches:
+            selected[family["id"]] = family
+    # A document no family covers selects the families of the files that read it
+    # (none: the vital families
+    # alone); anything else unmapped still widens to the full suite.
+    documents = [path for path in unmapped if _is_document(path)]
+    unmapped = [path for path in unmapped if not _is_document(path)]
+    if unmapped:
+        return families, "unmapped-changes:" + ",".join(sorted(unmapped))
+    if documents:
+        readers = _readers(root, documents)
+        if readers is None:
+            return families, "document-readers-unlisted"
+        for document in documents:
+            for reader in readers[document]:
+                for family in _families_for_reader(families, reader):
+                    selected[family["id"]] = family
+    # Changed code also selects the families of the files that name it: a helper covered by
+    # one family is still exercised by the tests of every module and test that uses it.
+    if mapped_code:
+        readers = _readers(root, mapped_code)
+        if readers is None:
+            return families, "code-readers-unlisted"
+        for path in mapped_code:
+            for reader in readers[path]:
+                for family in _families_for_reader(families, reader):
+                    selected[family["id"]] = family
+    return list(selected.values()), None
+
+
+def pytest_selectors(families: Iterable[dict[str, Any]]) -> list[str]:
+    selectors: list[str] = []
+    for family in families:
+        if family.get("kind") != "pytest":
+            continue
+        selectors.extend(str(item) for item in family.get("selectors", []))
+    return sorted(set(selectors))
+
+
+def report(root: Path) -> dict[str, Any]:
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    baseline = load_json(root / str(manifest["baseline_report"]))
+    current = inventory(root)
+    return {
+        "baseline": baseline["counts"],
+        "current": current["counts"],
+        "by_kind": current["by_kind"],
+    }
+
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _receipt_errors(row: dict[str, Any], number: int, ledger_ids: set[Any]) -> list[str]:
+    label = f"witness receipt {number}"
+    if set(row) != WITNESS_FIELDS:
+        return [f"{label} has wrong fields"]
+    errors: list[str] = []
+    if row["record_type"] != "red_witness":
+        errors.append(f"{label} has the wrong record type")
+    for field in ("proof_ids", "paths"):
+        value = row[field]
+        if (
+            not isinstance(value, list)
+            or not value
+            or not all(isinstance(item, str) and item for item in value)
+        ):
+            errors.append(f"{label} {field} must be a nonempty string list")
+    for field in ("defect", "command", "expect"):
+        if not isinstance(row[field], str) or not row[field].strip():
+            errors.append(f"{label} {field} must be nonempty text")
+    for field in ("mutation_sha256", "red_output_sha256"):
+        if not _is_sha256(row[field]):
+            errors.append(f"{label} {field} must be a SHA-256 digest")
+    if not _is_iso_date(row["witnessed_on"]):
+        errors.append(f"{label} has no witness date")
+    if not errors:
+        unknown = sorted(set(row["proof_ids"]) - ledger_ids)
+        if unknown:
+            errors.append(f"{label} names a proof the audit ledger does not know: {unknown[0]}")
+    return errors
+
+
+def _pending_request(root: Path) -> Path:
+    return root / WITNESS_PENDING / "request.json"
+
+
+def _refuse_pending_witness(root: Path) -> None:
+    if _pending_request(root).exists():
+        raise GovernanceError(
+            "a red witness is pending and its planted defect may be in the tree; "
+            "run `./bin/test-governance witness finish` or `./bin/test-governance witness abort`"
+        )
+
+
+def _load_pending(root: Path) -> dict[str, Any]:
+    if not _pending_request(root).exists():
+        raise GovernanceError("no red witness is pending")
+    return load_json(_pending_request(root))
+
+
+def _witness_run(command: str, root: Path) -> tuple[int, str]:
+    try:
+        require_persistent_directory(root / ".kickoff/witness")
+        result = _run(shlex.split(command), root, check=False)
+    except (OSError, ValueError, TelemetryError) as exc:
+        raise GovernanceError(f"witness command cannot run: {command}: {exc}") from exc
+    output = result.stdout + "\n" + result.stderr
+    captures = root / ".kickoff" / "witness" / "captures"
+    captures.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(
+        {"command": command, "exit_code": result.returncode, "output": output},
+        sort_keys=True,
+    ).encode()
+    try:
+        digest = retain_evidence(captures, data)
+    except TelemetryError as exc:
+        raise GovernanceError(f"cannot retain witness output: {exc}") from exc
+    with (captures / "index.jsonl").open("a") as stream:
+        stream.write(json.dumps({"sha256": digest, "bytes": len(data)}) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    return result.returncode, output
+
+
+def _leave_second(paths: Sequence[Path], second: int) -> None:
+    """Give files a modification time in a later whole second than `second`.
+
+    Caches keyed on a source file's size and whole-second modification time (Python
+    bytecode, and build tools on coarse filesystems) cannot tell two same-sized versions
+    written in one second apart, and would keep serving the planted defect after a
+    byte-exact restore. One wait of at most a second covers every file.
+    """
+    if not paths:
+        return
+    deadline = time.time() + 1.0
+    while int(time.time()) <= second and time.time() < deadline:
+        time.sleep(0.02)
+    stamp = max(time.time(), second + 1)
+    for path in paths:
+        os.utime(path, (stamp, stamp))
+
+
+def _restore_witness(root: Path, request: dict[str, Any]) -> None:
+    pending = root / WITNESS_PENDING
+    rewritten: list[Path] = []
+    planted_second = 0
+    for entry in request["paths"]:
+        saved = (pending / entry["saved"]).read_bytes()
+        if _digest(saved) != entry["sha256"]:
+            raise GovernanceError(
+                f"witness journal is corrupt for {entry['path']}; restore that file by hand"
+            )
+        target = root / entry["path"]
+        # Rewrite only what changed, and into a later second than the planted version,
+        # so no cache can keep the mutated artifact for the restored file.
+        if target.is_symlink() or not target.is_file() or target.read_bytes() != saved:
+            if target.exists():
+                planted_second = max(planted_second, int(target.lstat().st_mtime))
+            if target.is_symlink():
+                target.unlink()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(saved)
+            rewritten.append(target)
+        target.chmod(entry["mode"])
+        if _digest(target.read_bytes()) != entry["sha256"]:
+            raise GovernanceError(f"witness restore did not verify for {entry['path']}")
+    _leave_second(rewritten, planted_second)
+
+
+def witness_begin(
+    root: Path,
+    *,
+    proof_ids: Sequence[str],
+    defect: str,
+    expect: str,
+    command: str,
+    paths: Sequence[str],
+    failure_exit: int = 1,
+) -> dict[str, Any]:
+    """Observe the command green and journal the files about to carry a planted defect."""
+    if type(failure_exit) is not int or not 1 <= failure_exit <= 123:
+        raise GovernanceError("failure-exit must identify a completed test failure from 1 to 123")
+    _refuse_pending_witness(root)
+    if not proof_ids or not all(item.strip() for item in proof_ids):
+        raise GovernanceError("witness needs at least one proof id")
+    for name, value in (("defect", defect), ("expect", expect), ("command", command)):
+        if not value.strip():
+            raise GovernanceError(f"witness {name} must be nonempty text")
+    relative = sorted(set(paths))
+    if not relative:
+        raise GovernanceError("witness needs at least one path to plant the defect in")
+    resolved_root = root.resolve()
+    for item in relative:
+        target = root / item
+        if (
+            Path(item).is_absolute()
+            or target.is_symlink()
+            or not target.is_file()
+            or resolved_root not in target.resolve().parents
+        ):
+            raise GovernanceError(
+                f"witness path must be a regular file inside the repository: {item}"
+            )
+    status, output = _witness_run(command, root)
+    if status != 0:
+        raise GovernanceError(
+            f"witness baseline is not green ({status}): {command}\n{output.strip()}"
+        )
+    if expect in output:
+        raise GovernanceError(
+            "the expected text already appears while the command passes, "
+            "so it cannot identify the failure"
+        )
+    pending = root / WITNESS_PENDING
+    shutil.rmtree(pending, ignore_errors=True)
+    (pending / "files").mkdir(parents=True)
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(relative):
+        data = (root / item).read_bytes()
+        (pending / "files" / str(index)).write_bytes(data)
+        entries.append(
+            {
+                "path": item,
+                "sha256": _digest(data),
+                "mode": stat.S_IMODE((root / item).stat().st_mode),
+                "saved": f"files/{index}",
+            }
+        )
+    request = {
+        "proof_ids": sorted(set(proof_ids)),
+        "defect": defect,
+        "failure_exit": failure_exit,
+        "expect": expect,
+        "command": command,
+        "paths": entries,
+    }
+    # The request file is written last and atomically: its presence means a complete journal.
+    temporary = pending / "request.json.tmp"
+    temporary.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n")
+    temporary.replace(_pending_request(root))
+    # A defect planted in the same second as the version the baseline just ran, and of
+    # the same size, would be invisible to such a cache; start the planting in a later one.
+    newest = max(int((root / item).stat().st_mtime) for item in relative)
+    deadline = time.time() + 1.0
+    while int(time.time()) == newest and time.time() < deadline:
+        time.sleep(0.02)
+    return {
+        "state": "pending",
+        "paths": relative,
+        "next": "plant the defect in these paths, then run `./bin/test-governance witness finish`",
+    }
+
+
+def witness_failure_lines(manifest: dict[str, Any]) -> re.Pattern[str] | None:
+    """Return the declared pattern for lines that report a test failure, if any.
+
+    A test runner can echo the failing source, assertion message included, before
+    it reports the failure. Matching the expected text only inside declared failure
+    lines keeps an echoed message from witnessing a run that failed for another reason.
+    """
+    declared = manifest.get("witness_failure_lines")
+    if declared is None:
+        return None
+    if not isinstance(declared, str) or not declared.strip():
+        raise GovernanceError("witness_failure_lines must be a nonempty regular expression")
+    try:
+        return re.compile(declared)
+    except re.error as exc:
+        raise GovernanceError(f"witness_failure_lines is not a valid regular expression: {exc}")
+
+
+def witness_finish(root: Path) -> dict[str, Any]:
+    """Require the planted defect to fail the command as named, restore, and record a receipt."""
+    request = _load_pending(root)
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    ledger_rel = manifest.get("witness_ledger")
+    if not isinstance(ledger_rel, str) or not ledger_rel:
+        raise GovernanceError("witness_ledger must be a repo-relative path")
+    failure_lines = witness_failure_lines(manifest)
+    planted = hashlib.sha256()
+    changed = False
+    for entry in request["paths"]:
+        target = root / entry["path"]
+        present = target.is_file() and not target.is_symlink()
+        data = target.read_bytes() if present else b""
+        changed = changed or not present or _digest(data) != entry["sha256"]
+        planted.update(entry["path"].encode() + b"\0" + data + b"\0")
+    if not changed:
+        raise GovernanceError(
+            "no journaled path has changed; plant the defect and finish, "
+            "or run `./bin/test-governance witness abort`"
+        )
+    try:
+        status, output = _witness_run(request["command"], root)
+    finally:
+        _restore_witness(root, request)
+    # The journal goes before the closing run: the restored bytes are verified, and a
+    # command that validates this estate must not meet its own pending witness.
+    shutil.rmtree(root / WITNESS_PENDING)
+    restored_status, restored_output = _witness_run(request["command"], root)
+    if restored_status != 0:
+        raise GovernanceError(
+            "the restored tree no longer passes the witness command; nothing was recorded\n"
+            + restored_output.strip()
+        )
+    if status == 0:
+        raise GovernanceError(
+            "NOT WITNESSED: the command still passed with the defect planted; nothing was recorded"
+        )
+    if status != request["failure_exit"]:
+        raise GovernanceError(
+            f"NOT WITNESSED: incomplete, interrupted or non-test-failure exit {status}; "
+            "nothing was recorded"
+        )
+    if request["expect"] not in output:
+        raise GovernanceError(
+            "NOT WITNESSED: the command failed, but not with the expected text; "
+            "nothing was recorded\n" + output.strip()
+        )
+    if failure_lines is not None and not any(
+        request["expect"] in line for line in output.splitlines() if failure_lines.search(line)
+    ):
+        raise GovernanceError(
+            "NOT WITNESSED: the expected text appears only outside the declared failure lines, "
+            "such as echoed source; nothing was recorded\n" + output.strip()
+        )
+    row = {
+        "record_type": "red_witness",
+        "proof_ids": request["proof_ids"],
+        "defect": f"Completed failure exit {status}: {request['defect']}",
+        "command": request["command"],
+        "expect": request["expect"],
+        "paths": [entry["path"] for entry in request["paths"]],
+        "mutation_sha256": planted.hexdigest(),
+        "red_output_sha256": _digest(output.encode()),
+        "witnessed_on": date.today().isoformat(),
+    }
+    ledger = root / ledger_rel
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.open("a") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    return row
+
+
+def witness_abort(root: Path) -> dict[str, Any]:
+    request = _load_pending(root)
+    _restore_witness(root, request)
+    shutil.rmtree(root / WITNESS_PENDING)
+    return {"state": "aborted", "restored": [entry["path"] for entry in request["paths"]]}
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def author_inputs(root: Path, source: Path, manifest_sha: str, ledger_sha: str) -> None:
+    """Compose real family edits and append-only decisions, checking the resulting estate."""
+    import fcntl
+
+    from agentic_starter.input_io import checked_write, destination, read_object
+
+    request = read_object(source)
+    if set(request) != {"families", "records"} or not all(
+        isinstance(request[key], list) for key in request
+    ):
+        raise GovernanceError("author input requires families and records arrays")
+    lock = destination(root, ".kickoff/input-writes/proof-estate.lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        manifest_path = destination(root, "tests/proof-estate.yaml")
+        manifest_bytes = manifest_path.read_bytes()
+        manifest = load_yaml(manifest_path)
+        ledger_path = destination(root, manifest["audit_ledger"])
+        ledger_bytes = ledger_path.read_bytes()
+        if _digest(manifest_bytes) != manifest_sha or _digest(ledger_bytes) != ledger_sha:
+            raise GovernanceError("proof authoring preimage mismatch")
+        baseline = load_json(destination(root, manifest["baseline_report"]))
+        families = {family["id"]: family for family in manifest["families"]}
+        if len(families) != len(manifest["families"]):
+            raise GovernanceError("existing duplicate families require an explicit correction")
+        seen: set[str] = set()
+        for family in request["families"]:
+            errors = _validate_family_shape(family, 0)
+            if errors:
+                raise GovernanceError("; ".join(errors))
+            if family["id"] in seen:
+                raise GovernanceError("duplicate authored family")
+            seen.add(family["id"])
+            families[family["id"]] = family
+        manifest["families"] = list(families.values())
+        appended = []
+        evidence = {
+            "contract",
+            "oracle",
+            "red_witness",
+            "nearest_overlap",
+            "replacement_evidence",
+            "rationale",
+        }
+        for semantic in request["records"]:
+            action = semantic.get("action")
+            types = {
+                "admit": "proof_admission",
+                "modify": "proof_modification",
+                "retire": "proof_retirement",
+                "disposition": "proof_disposition",
+            }
+            if action not in types:
+                raise GovernanceError("unknown proof authoring action")
+            allowed = evidence | {"action", "proof_id"}
+            if action in {"retire", "disposition"}:
+                allowed |= {"disposition", "replacement"}
+            if action == "modify":
+                allowed |= {"witness_receipts"}
+            if set(semantic) != allowed:
+                raise GovernanceError("proof input has missing or derived fields")
+            proof = semantic["proof_id"]
+            row = {key: semantic[key] for key in evidence}
+            row.update(
+                record_type=types[action],
+                proof_id=proof,
+                baseline_inventory_sha256=baseline["inventory_sha256"],
+            )
+            row["disposition"] = (
+                "retain"
+                if action == "admit"
+                else "repair"
+                if action == "modify"
+                else semantic["disposition"]
+            )
+            row["replacement"] = proof if action in {"admit", "modify"} else semantic["replacement"]
+            if action == "modify":
+                row["witness_receipts"] = semantic["witness_receipts"]
+            appended.append(row)
+        ledger = load_ledger(ledger_path) + appended
+        validate(root, proposed_manifest=manifest, proposed_ledger=ledger)
+        # All refusal checks precede publication. An I/O interruption is not success;
+        # retain both files and diagnose it, never rewrite prior ledger history.
+        if manifest_path.read_bytes() != manifest_bytes or ledger_path.read_bytes() != ledger_bytes:
+            raise GovernanceError("proof inputs changed during qualification")
+        data = yaml.safe_dump(manifest, sort_keys=False).encode()
+        if request["families"]:
+            checked_write(
+                root, "tests/proof-estate.yaml", data, lambda path: load_yaml(path), manifest_sha
+            )
+        if appended:
+            with ledger_path.open("ab") as stream:
+                if ledger_bytes and not ledger_bytes.endswith(b"\n"):
+                    stream.write(b"\n")
+                stream.write(
+                    "".join(json.dumps(row, sort_keys=True) + "\n" for row in appended).encode()
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        validate(root)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="test-governance")
+    parser.add_argument(
+        "--root",
+        "--repo-root",
+        dest="repo_root",
+        type=Path,
+        default=Path(__file__).resolve().parents[2],
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    inventory_parser = subparsers.add_parser("inventory")
+    inventory_parser.add_argument("--output", type=Path)
+    subparsers.add_parser("validate")
+    select_parser = subparsers.add_parser("select")
+    selection = select_parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--tier", choices=("vital",))
+    selection.add_argument("--changed-from")
+    select_parser.add_argument("--format", choices=("json", "lines"), default="json")
+    subparsers.add_parser("report")
+    witness_parser = subparsers.add_parser("witness")
+    witness_actions = witness_parser.add_subparsers(dest="witness_action", required=True)
+    begin_parser = witness_actions.add_parser("begin")
+    begin_parser.add_argument("--proof", dest="proof_ids", action="append", required=True)
+    begin_parser.add_argument("--defect", required=True)
+    begin_parser.add_argument("--expect", required=True)
+    begin_parser.add_argument("--failure-exit", type=int, default=1)
+    begin_parser.add_argument("--command", dest="witness_command", required=True)
+    begin_parser.add_argument("paths", nargs="+")
+    witness_actions.add_parser("finish")
+    witness_actions.add_parser("abort")
+    subparsers.add_parser("reassess")
+    subparsers.add_parser("timing")
+    author = subparsers.add_parser("author", help="compose family edits and append real decisions")
+    author.add_argument("--input-json", type=Path, required=True)
+    author.add_argument("--expect-manifest", required=True)
+    author.add_argument("--expect-ledger", required=True)
+    args = parser.parse_args(argv)
+    root = args.repo_root.resolve()
+    try:
+        if args.command == "author":
+            author_inputs(root, args.input_json, args.expect_manifest, args.expect_ledger)
+            print("PROOF INPUTS WRITTEN; prior ledger prefix preserved")
+        elif args.command == "inventory":
+            payload = inventory(root)
+            if args.output:
+                output = args.output if args.output.is_absolute() else root / args.output
+                _write_json(output, payload)
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        elif args.command == "validate":
+            print(json.dumps(validate(root), indent=2, sort_keys=True))
+        elif args.command == "select":
+            mode = "vital" if args.tier else "changed"
+            families, widened = selected_families(root, mode, args.changed_from)
+            if widened:
+                print(f"TEST GOVERNANCE WIDENED TO FULL: {widened}", file=sys.stderr)
+            if args.format == "lines":
+                print("FULL" if widened else "FOCUSED")
+                print(widened or f"locally admitted {mode} families")
+                for selector in pytest_selectors(families):
+                    print(selector)
+            else:
+                print(
+                    json.dumps(
+                        {"mode": mode, "widened": widened, "families": families},
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+        elif args.command == "report":
+            print(json.dumps(report(root), indent=2, sort_keys=True))
+        elif args.command == "witness":
+            if args.witness_action == "begin":
+                outcome = witness_begin(
+                    root,
+                    proof_ids=args.proof_ids,
+                    defect=args.defect,
+                    expect=args.expect,
+                    command=args.witness_command,
+                    failure_exit=args.failure_exit,
+                    paths=args.paths,
+                )
+            elif args.witness_action == "finish":
+                outcome = witness_finish(root)
+            else:
+                outcome = witness_abort(root)
+            print(json.dumps(outcome, indent=2, sort_keys=True))
+        elif args.command == "reassess":
+            summary = validate(root)
+            print(json.dumps({**summary, **report(root)}, indent=2, sort_keys=True))
+        elif args.command == "timing":
+            observed = timing(root)
+            print(json.dumps(observed, indent=2, sort_keys=True))
+            print(f"TEST TIME {observed['state'].upper()} (diagnostic only)")
+        return 0
+    except GovernanceIncomplete as exc:
+        print(f"TEST GOVERNANCE INCOMPLETE {exc}", file=sys.stderr)
+        return 124
+    except GovernanceError as exc:
+        print(f"TEST GOVERNANCE ERROR {exc}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
+        print(f"TEST GOVERNANCE REFUSED {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

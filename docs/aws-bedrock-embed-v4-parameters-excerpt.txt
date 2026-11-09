@@ -1,0 +1,16 @@
+{
+  "input_type": "search_document | search_query | classification | clustering",
+  "texts": ["..."],                      // optional; text-only
+
+  "embedding_types": ["float" | "int8" | "uint8" | "binary" | "ubinary"],
+  "output_dimension": 256 | 512 | 1024 | 1536,
+  "max_tokens": 128000,
+  "truncate": "NONE | LEFT | RIGHT"
+}
+
++ **texts** (optional) – Array of strings to embed. Max 96 per call. If you use `texts`, don't send `images` in the same call.
+
+If you requested a single embedding type (e.g., only `float`):
+
+"embeddings": [[ /* length = output_dimension */ ]],
+"response_type": "embeddings_floats",

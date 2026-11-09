@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# The infra lane: provision the locked CDK environment and the pinned CDK CLI
+# (`--install`), or run the offline synthesis check with AWS out of reach (default).
+#
+# Node is never taken from PATH: it is the version in infra/.node-version under the
+# nvm layout, or the absolute directory in BIBLIOS_NODE_BIN, and it must report that
+# version. The CLI must report the version package.json pins, and the locked environment
+# must already exist (the check never provisions). A missing or wrong piece is a refusal
+# with no fallback, so a green gate never rests on an ambient tool.
+
+set -euo pipefail
+
+entrypoint_path="${BASH_SOURCE[0]}"
+while [[ -L "$entrypoint_path" ]]; do
+  entrypoint_dir="$(cd "$(dirname "$entrypoint_path")" && pwd)"
+  entrypoint_path="$(readlink "$entrypoint_path")"
+  [[ "$entrypoint_path" == /* ]] || entrypoint_path="$entrypoint_dir/$entrypoint_path"
+done
+repo_root="$(cd "$(dirname "$entrypoint_path")/.." && pwd)"
+infra_root="$repo_root/infra"
+tools_root="$repo_root/.kickoff/infra-tools"
+
+usage() {
+  cat <<'EOF'
+Usage: ./bin/check-infra [--install]
+
+Default: run infra/check_qualification.py offline (credentials withheld, socket guard).
+--install: uv sync the locked infra environment and install the pinned CDK CLI under
+.kickoff/infra-tools with the pinned Node.
+EOF
+}
+
+mode="check"
+if [[ $# -gt 1 ]]; then usage >&2; exit 2; fi
+if [[ $# -eq 1 ]]; then
+  case "$1" in
+    --install) mode="install" ;;
+    --help|-h) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "CHECK-INFRA ERROR missing prerequisite: uv" >&2
+  exit 1
+fi
+for required in pyproject.toml uv.lock .node-version package.json package-lock.json app.py check_qualification.py; do
+  if [[ ! -f "$infra_root/$required" ]]; then
+    echo "CHECK-INFRA ERROR missing required file: infra/$required" >&2
+    exit 1
+  fi
+done
+
+node_version="$(tr -d '[:space:]' < "$infra_root/.node-version")"
+if [[ -n "${BIBLIOS_NODE_BIN:-}" ]]; then
+  node_bin="$BIBLIOS_NODE_BIN"
+  if [[ "$node_bin" != /* || ! -x "$node_bin/node" ]]; then
+    echo "CHECK-INFRA ERROR BIBLIOS_NODE_BIN must be an absolute directory holding node" >&2
+    exit 1
+  fi
+else
+  node_bin="$HOME/.nvm/versions/node/$node_version/bin"
+  if [[ ! -x "$node_bin/node" ]]; then
+    echo "CHECK-INFRA ERROR pinned Node $node_version is not installed at $node_bin (no fallback; see infra/README.md)" >&2
+    exit 1
+  fi
+fi
+
+reported_node="$("$node_bin/node" --version 2>/dev/null || true)"
+if [[ "$reported_node" != "$node_version" ]]; then
+  echo "CHECK-INFRA ERROR node at $node_bin reports '${reported_node:-nothing}', not the pinned $node_version" >&2
+  exit 1
+fi
+cdk_pin="$(sed -n 's/.*"aws-cdk": *"\([^"]*\)".*/\1/p' "$infra_root/package.json")"
+if [[ -z "$cdk_pin" ]]; then
+  echo "CHECK-INFRA ERROR infra/package.json does not pin aws-cdk" >&2
+  exit 1
+fi
+
+unset VIRTUAL_ENV
+export PATH="$node_bin:$PATH"
+export CDK_DISABLE_VERSION_CHECK=1
+
+if [[ "$mode" == "install" ]]; then
+  echo "CHECK-INFRA INSTALL START node=$node_version"
+  uv sync --project "$infra_root" --locked --managed-python
+  mkdir -p "$tools_root"
+  cp "$infra_root/package.json" "$tools_root/package.json"
+  cp "$infra_root/package-lock.json" "$tools_root/package-lock.json"
+  (cd "$tools_root" && "$node_bin/npm" ci --no-audit --no-fund --loglevel=error)
+  if [[ ! -x "$tools_root/node_modules/.bin/cdk" ]]; then
+    echo "CHECK-INFRA ERROR the pinned CDK CLI did not install" >&2
+    exit 1
+  fi
+  echo "CHECK-INFRA INSTALL PASS cdk=$("$tools_root/node_modules/.bin/cdk" --version)"
+  exit 0
+fi
+
+if [[ ! -x "$tools_root/node_modules/.bin/cdk" ]]; then
+  echo "CHECK-INFRA ERROR the pinned CDK CLI is not installed under .kickoff/infra-tools; run ./bin/setup" >&2
+  exit 1
+fi
+reported_cdk="$("$tools_root/node_modules/.bin/cdk" --version 2>/dev/null || true)"
+if [[ "$reported_cdk" != "$cdk_pin"* ]]; then
+  echo "CHECK-INFRA ERROR the installed CDK CLI reports '${reported_cdk:-nothing}', not the pinned $cdk_pin; run ./bin/setup" >&2
+  exit 1
+fi
+if [[ ! -x "$infra_root/.venv/bin/python" ]]; then
+  echo "CHECK-INFRA ERROR the locked infra environment is not provisioned (infra/.venv); run ./bin/setup" >&2
+  exit 1
+fi
+cd "$infra_root"
+exec uv run --project "$infra_root" --locked --no-sync --managed-python python check_qualification.py

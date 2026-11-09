@@ -1,0 +1,28 @@
+# The settings the Bedrock lane reads on the instance, composed through Biblios and Palace.
+# It names the one model, region and dimension the operator confirms in the Bedrock packet;
+# the lane refuses to run when the confirmation names anything else.
+#
+# Palace sends text to a remote embedding service only under a complete published-corpus
+# assertion: the flag, a note saying what is sent and where it already lives, and the time
+# the assertion was made. Palace's criterion is "published, not public": text already served
+# from internet-reachable infrastructure, gated or not (palace policies/local-first.md,
+# "Public vs. published"). The assertion below is exact and covers nothing else. The lane's
+# whole input is the fixed NOTES text of qualification/lanes.py (one invented
+# lighthouse-maintenance note, introduced in commit e39c4a565701b21969991d721ba6094ae4824a3d
+# and unchanged since) and one query. That file is served by GitHub from the private
+# repository wolfmcnally/biblios to authenticated readers: served, so published in Palace's
+# sense; private, so not public. Repository privacy is a fact about access; the contents are
+# synthetic test fixtures with no personal, private or third-party material. The assertion is
+# made under the operator's approval of a synthetic corpus for this qualification (relayed
+# 2026-11-07 17:40Z); no operator document ever reaches this lane.
+palace:
+  embedding:
+    provider: bedrock
+    model: cohere.embed-v4:0
+    region: us-east-1
+    dim: 1536
+    published_corpus: true
+    published_corpus_note: "Synthetic qualification fixture only: the fixed NOTES text of qualification/lanes.py (one invented lighthouse-maintenance note, introduced in commit e39c4a565701b21969991d721ba6094ae4824a3d, unchanged since) and one query, served by GitHub from the private repository wolfmcnally/biblios to authenticated readers (published in Palace's sense, not public); synthetic contents with no personal, private or third-party material; asserted under the operator's synthetic-corpus approval of 2026-11-07 for the AWS qualification's Bedrock lane"
+    published_corpus_asserted_at: "2026-11-07T19:57:12Z"
+drawbridge: {}
+vellric: {}

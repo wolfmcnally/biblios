@@ -1,0 +1,227 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# ///
+"""Fail closed when canonical agent surfaces and harness mirrors drift."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+DRIFT: list[str] = []
+
+
+def report(surface: str, relative: str, reason: str) -> None:
+    DRIFT.append(f"ERROR\t{surface}\t{relative}\t{reason}")
+
+
+def frontmatter(path: Path) -> dict[str, str]:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise ValueError("missing YAML frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as exc:
+        raise ValueError("unterminated YAML frontmatter") from exc
+    result: dict[str, str] = {}
+    index = 1
+    while index < end:
+        line = lines[index]
+        if not line or line.startswith(" "):
+            index += 1
+            continue
+        key, separator, value = line.partition(":")
+        if not separator:
+            raise ValueError(f"invalid frontmatter line {index + 1}")
+        value = value.strip()
+        if value in {">", ">-", "|", "|-"}:
+            parts: list[str] = []
+            index += 1
+            while index < end and (not lines[index] or lines[index].startswith(" ")):
+                if lines[index].strip():
+                    parts.append(lines[index].strip())
+                index += 1
+            result[key] = " ".join(parts)
+            continue
+        result[key] = value.strip("\"'")
+        index += 1
+    return result
+
+
+def check_instructions() -> None:
+    primary = ROOT / "AGENTS.md"
+    if primary.is_symlink() or not primary.is_file():
+        report("instructions", "AGENTS.md", "must be a regular primary file")
+    old = ROOT / "CLAUDE.md"
+    if old.exists() or old.is_symlink():
+        report("instructions", "CLAUDE.md", "legacy constitution remains")
+
+
+def check_skills() -> None:
+    canonical_root = ROOT / ".claude" / "skills"
+    mirror_root = ROOT / ".agents" / "skills"
+    canonical = {item.name for item in canonical_root.iterdir() if item.is_dir()}
+    mirrors = {item.name for item in mirror_root.iterdir()}
+    for name in sorted(canonical | mirrors):
+        relative = f".agents/skills/{name}"
+        if name not in canonical:
+            report("skills", relative, "orphan mirror")
+            continue
+        if name not in mirrors:
+            report("skills", relative, "missing mirror")
+            continue
+        link = mirror_root / name
+        expected = f"../../.claude/skills/{name}"
+        if not link.is_symlink():
+            report("skills", relative, "must be a directory symlink")
+        elif os.readlink(link) != expected:
+            report("skills", relative, f"wrong target; expected {expected}")
+        elif not link.is_dir():
+            report("skills", relative, "target does not resolve to a directory")
+        elif not (link / "SKILL.md").is_file():
+            report("skills", relative, "canonical skill has no SKILL.md")
+
+
+def check_agents() -> None:
+    canonical_root = ROOT / ".claude" / "agents"
+    mirror_root = ROOT / ".codex" / "agents"
+    canonical = {item.stem: item for item in canonical_root.glob("*.md")}
+    mirrors = {item.stem: item for item in mirror_root.glob("*.toml")}
+    for role in sorted(canonical.keys() | mirrors.keys()):
+        relative = f".codex/agents/{role}.toml"
+        if role not in canonical:
+            report("agents", relative, "orphan wrapper")
+            continue
+        if role not in mirrors:
+            report("agents", relative, "missing wrapper")
+            continue
+        try:
+            metadata = frontmatter(canonical[role])
+            wrapper = tomllib.loads(mirrors[role].read_text(encoding="utf-8"))
+        except (OSError, ValueError, tomllib.TOMLDecodeError) as exc:
+            report("agents", relative, f"unreadable metadata: {exc}")
+            continue
+        for reason in agent_errors(role, metadata, wrapper):
+            report("agents", relative, reason)
+
+
+def agent_errors(role: str, metadata: dict, wrapper: dict) -> list[str]:
+    errors = []
+    if wrapper.get("name") != metadata.get("name") or wrapper.get("name") != role:
+        errors.append("name does not match canonical role")
+    if wrapper.get("description") != metadata.get("description"):
+        errors.append("description does not match canonical frontmatter")
+    instructions = wrapper.get("developer_instructions")
+    pointer = f"Read .claude/agents/{role}.md in this repo and follow it."
+    if not isinstance(instructions, str) or pointer not in instructions:
+        errors.append("missing exact canonical pointer")
+    if isinstance(instructions, str) and "# " in instructions:
+        errors.append("wrapper appears to duplicate canonical body")
+    return errors
+
+
+def main() -> int:
+    global ROOT
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    writers = parser.add_mutually_exclusive_group()
+    writers.add_argument("--sync-role")
+    writers.add_argument("--sync-skill")
+    parser.add_argument("--expect-sha256")
+    parser.add_argument("--expect-target")
+    arguments = parser.parse_args()
+    source_lib = ROOT / "lib"
+    ROOT = arguments.root.resolve()
+    if arguments.sync_role or arguments.sync_skill:
+        try:
+            sys.path.insert(0, str(source_lib))
+            from agentic_starter.input_io import checked_write, destination
+
+            name = arguments.sync_role or arguments.sync_skill
+            if not name or Path(name).name != name or name in {".", ".."}:
+                raise ValueError("name must be one canonical role/skill basename")
+            if arguments.sync_role:
+                canonical = destination(ROOT, f".claude/agents/{name}.md")
+                metadata = frontmatter(canonical)
+                if metadata.get("name") != name or not metadata.get("description"):
+                    raise ValueError("canonical role metadata is incomplete/mismatched")
+                relative = f".codex/agents/{name}.toml"
+                path = destination(ROOT, relative)
+                if path.exists():
+                    previous = tomllib.loads(path.read_text())
+                    if set(previous) - {"name", "description", "developer_instructions"}:
+                        raise ValueError(
+                            "custom wrapper fields require owner adaptation; not overwritten"
+                        )
+                pointer = f"Read .claude/agents/{name}.md in this repo and follow it."
+                data = (
+                    "name = "
+                    + json.dumps(name, ensure_ascii=False)
+                    + "\ndescription = "
+                    + json.dumps(metadata["description"], ensure_ascii=False)
+                    + "\ndeveloper_instructions = "
+                    + json.dumps(pointer, ensure_ascii=False)
+                    + "\n"
+                ).encode()
+
+                def check(candidate: Path) -> None:
+                    value = tomllib.loads(candidate.read_text())
+                    errors = agent_errors(name, metadata, value)
+                    if errors:
+                        raise ValueError("; ".join(errors))
+
+                checked_write(ROOT, relative, data, check, arguments.expect_sha256)
+            else:
+                canonical = destination(ROOT, f".claude/skills/{name}/SKILL.md")
+                if not canonical.is_file():
+                    raise ValueError("canonical skill has no SKILL.md")
+                parent = destination(ROOT, ".agents/skills")
+                parent.mkdir(parents=True, exist_ok=True)
+                link = parent / name
+                expected = f"../../.claude/skills/{name}"
+
+                def preimage() -> None:
+                    if link.is_symlink():
+                        if os.readlink(link) != arguments.expect_target:
+                            raise ValueError("mirror target preimage mismatch")
+                    elif link.exists() or arguments.expect_target is not None:
+                        raise ValueError(
+                            "mirror collision or missing preimage; never remove a directory"
+                        )
+
+                preimage()
+                with tempfile.TemporaryDirectory(prefix=".input-", dir=parent.parent) as temporary:
+                    proposed = Path(temporary) / name
+                    proposed.symlink_to(expected)
+                    preimage()
+                    if arguments.expect_target is None:
+                        # Never replace a newly appearing entry on the create path.
+                        os.symlink(expected, link)
+                    else:
+                        os.replace(proposed, link)
+            print("HARNESS MIRROR WRITTEN; run parity validation before delivery")
+            return 0
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"HARNESS MIRROR REFUSED: {exc}", file=sys.stderr)
+            return 1
+    for check in (check_instructions, check_skills, check_agents):
+        try:
+            check()
+        except OSError as exc:
+            report("filesystem", ".", str(exc))
+    if DRIFT:
+        print("\n".join(sorted(DRIFT)))
+        return 1
+    print("HARNESS PARITY OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

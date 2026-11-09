@@ -1,0 +1,8 @@
+{
+  "name": "biblios-infra-tools",
+  "private": true,
+  "description": "Pins the AWS CDK CLI the qualification runner and the offline synthesis check invoke; installed by ./bin/setup under .kickoff/infra-tools.",
+  "dependencies": {
+    "aws-cdk": "2.1147.0"
+  }
+}

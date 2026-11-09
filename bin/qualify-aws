@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Stand up, qualify and tear down Biblios's AWS qualification environment.
+#
+# A thin entry point: resolves the repository, requires the locked infra environment,
+# and runs qualification/runner.py through it. Every account-touching step inside asks
+# for its own typed confirmation; `--dry-run` performs no AWS, model or CDK call.
+
+set -euo pipefail
+
+entrypoint_path="${BASH_SOURCE[0]}"
+while [[ -L "$entrypoint_path" ]]; do
+  entrypoint_dir="$(cd "$(dirname "$entrypoint_path")" && pwd)"
+  entrypoint_path="$(readlink "$entrypoint_path")"
+  [[ "$entrypoint_path" == /* ]] || entrypoint_path="$entrypoint_dir/$entrypoint_path"
+done
+repo_root="$(cd "$(dirname "$entrypoint_path")/.." && pwd)"
+infra_root="$repo_root/infra"
+
+if ! command -v uv >/dev/null 2>&1; then
+  echo "QUALIFY-AWS ERROR missing prerequisite: uv" >&2
+  exit 1
+fi
+for required in "$infra_root/pyproject.toml" "$infra_root/uv.lock" "$infra_root/.node-version" "$infra_root/package.json"; do
+  if [[ ! -f "$required" ]]; then
+    echo "QUALIFY-AWS ERROR missing required file: ${required#"$repo_root/"}" >&2
+    exit 1
+  fi
+done
+
+if [[ ! -x "$infra_root/.venv/bin/python" ]]; then
+  echo "QUALIFY-AWS ERROR the locked infra environment is not provisioned (infra/.venv); run ./bin/setup" >&2
+  exit 1
+fi
+
+unset VIRTUAL_ENV
+cd "$repo_root"
+exec uv run --project "$infra_root" --locked --no-sync --managed-python python "$repo_root/qualification/runner.py" "$@"

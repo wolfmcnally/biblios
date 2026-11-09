@@ -1,0 +1,802 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["PyYAML==6.0.3"]
+# ///
+"""Fail closed when durable-document catalogs, links, or citations drift.
+
+Covers catalog/file sync, the phase-ledger state machine, tracked internal
+link targets *and* their `#fragment` anchors, the one-way citation
+direction between briefs, policies, and the plan, and the `docs/` contract:
+every pinned third-party document is cataloged in `docs/README.md`, and no
+file under `docs/` links outside `docs/`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import posixpath
+import re
+import subprocess
+import sys
+from collections.abc import Iterable
+from datetime import date
+from pathlib import Path
+from urllib.parse import quote, unquote
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "lib"))
+from agentic_starter import multioperator  # noqa: E402
+
+DRIFT: list[str] = []
+ANCHOR_CACHE: dict[Path, frozenset[str] | None] = {}
+
+CATALOGED_DIRECTORIES = ("policies", "briefs")
+# policies/briefs-and-policies.md contract item 1: a policy or a plan file may
+# cite a brief, and a brief never cites a policy or a plan file. The thinking
+# predates the rule derived from it, so the citation runs one way only.
+CITATION_SOURCE_DIRECTORY = "briefs"
+CITATION_FORBIDDEN_DIRECTORIES = ("policies", "plan")
+# Operator-directed research-to-runbook navigation; no general evidence inversion.
+PROCEDURE_HANDOFFS = {
+    ("briefs/multi-operator-collaboration.md", "policies/multi-operator-migration.md"),
+}
+# policies/docs.md: pinned third-party material never references the project.
+# Every top-level entry under docs/ is linked from docs/README.md, and no file
+# under docs/ (other than that project-owned catalog) links outside docs/.
+DOCS_DIRECTORY = "docs"
+DOCS_CATALOG = "README.md"
+FENCE_PATTERN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# An inline code span is quotation, not prose: a link inside backticks is a
+# quoted edit target, not a live link, so it is exempt the same way fenced
+# blocks are. The pattern honors CommonMark's equal-length backtick delimiters.
+CODE_SPAN_PATTERN = re.compile(r"(?<!`)(`+)(?!`)(?:.+?)(?<!`)\1(?!`)")
+INLINE_LINK_PATTERN = re.compile(r"!?\[[^\]\n]*\]\((?P<destination>[^)\n]+)\)")
+REFERENCE_LINK_PATTERN = re.compile(r"^ {0,3}\[[^\]\n]+\]:\s*(?P<destination><[^>\n]+>|\S+)")
+URI_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+ATX_HEADING_PATTERN = re.compile(r"^ {0,3}#{1,6}\s+(?P<text>\S.*?)(?:\s+#+)?\s*$")
+# A heading's anchor is derived from its *rendered* text, so inline markup is
+# removed before slugging: link syntax collapses to its label, and code-span,
+# emphasis, and strong markers drop out.
+HEADING_LINK_PATTERN = re.compile(r"!?\[(?P<label>[^\]\n]*)\]\([^)\n]*\)")
+HEADING_MARKUP_PATTERN = re.compile(r"[`*]")
+ANCHOR_DISALLOWED_PATTERN = re.compile(r"[^\w\- ]")
+PLACEHOLDER_PATTERN = re.compile(r"<[^>]+>|\{[^}]+\}")
+STATUS_DECLARATION_PATTERN = re.compile(
+    r"^ {0,3}\*{0,2}status\*{0,2}\s*:\s*(⏳|⬅️|🚧|✅|not started|next|in progress|completed)",
+    re.IGNORECASE,
+)
+
+
+def report(surface: str, relative: str, reason: str) -> None:
+    DRIFT.append(f"ERROR\t{surface}\t{relative}\t{reason}")
+
+
+def check_catalog(directory: str, instructions: str) -> None:
+    base = ROOT / directory
+    on_disk = {item.name for item in base.glob("*.md")}
+    referenced = set(re.findall(rf"{directory}/([A-Za-z0-9._-]+\.md)", instructions))
+    for name in sorted(on_disk - referenced):
+        report(directory, f"{directory}/{name}", "file is not indexed in AGENTS.md")
+    for name in sorted(referenced - on_disk):
+        report(directory, f"{directory}/{name}", "AGENTS.md references a missing file")
+
+
+def check_instruction_delivery(instructions: str) -> None:
+    """Check the declared instruction form, not the meaning or model adherence."""
+    entry_relative = ".claude/skills/kickoff/SKILL.md"
+    entry = ROOT / entry_relative
+    try:
+        entry_text = entry.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report("instructions", entry_relative, f"required entry is unreadable: {exc}")
+        entry_text = ""
+    for relative, text, ceiling in (
+        ("AGENTS.md", instructions, 20480),
+        (entry_relative, entry_text, 10240),
+    ):
+        size = len(text.encode("utf-8"))
+        if size > ceiling:
+            report("instructions", relative, f"UTF-8 size {size} exceeds {ceiling} bytes")
+
+    markers = [
+        f"<!-- {name} -->"
+        for name in (
+            "PROJECT_CONTEXT_START",
+            "PROJECT_CONTEXT_END",
+            "METHODOLOGY_CONTRACT_START",
+            "METHODOLOGY_CONTRACT_END",
+        )
+    ]
+    if any(instructions.count(marker) != 1 for marker in markers):
+        report("instructions", "AGENTS.md", "zone markers must each occur exactly once")
+    elif [instructions.index(marker) for marker in markers] != sorted(
+        instructions.index(marker) for marker in markers
+    ):
+        report("instructions", "AGENTS.md", "zone markers must occur in declared order")
+
+    # Only rows of the declared table can discharge a resource's loading duty.
+    # A navigation link, quoted example, or instruction elsewhere cannot do so.
+    rows: dict[str, list[str]] = {}
+    in_table = False
+    separator_pending = False
+    operative_text = re.sub(r"<!--.*?-->", "", entry_text, flags=re.DOTALL)
+    for _, line in markdown_prose_lines(operative_text):
+        if not re.match(r"^ {0,3}\|", line):
+            in_table = False
+            separator_pending = False
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells == ["Execution condition", "Direct resource", "Load requirement"]:
+            separator_pending = True
+            in_table = False
+            continue
+        if separator_pending:
+            in_table = len(cells) == 3 and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+            separator_pending = False
+            continue
+        if not in_table or len(cells) != 3:
+            continue
+        condition, resource, requirement = cells
+        direct = re.fullmatch(r"\[[^\]\n]+\]\(([^)\n]+)\)", resource)
+        if direct is None or not CODE_SPAN_PATTERN.sub("", condition).strip():
+            continue
+        destination = link_destination(direct.group(1))
+        if destination is not None:
+            rows.setdefault(destination, []).append(requirement)
+
+    for name in (
+        "preflight.md",
+        "dispatch.md",
+        "planning.md",
+        "implementation.md",
+        "acceptance.md",
+        "close.md",
+        "recovery.md",
+    ):
+        relative = entry.parent.relative_to(ROOT) / name
+        try:
+            (ROOT / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            report(
+                "instructions",
+                relative.as_posix(),
+                f"required resource is unreadable: {exc}",
+            )
+        requirements = rows.get(name, [])
+        if len(requirements) != 1:
+            report(
+                "instructions",
+                entry_relative,
+                f"{name}: expected one operative row with a direct resource link",
+            )
+        elif not re.fullmatch(r"Read before \S.*", CODE_SPAN_PATTERN.sub("", requirements[0])):
+            report(
+                "instructions",
+                entry_relative,
+                f"{name}: row must declare Read before use",
+            )
+
+
+def frontmatter_lines(text: str) -> list[tuple[int, str]]:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return []
+    block: list[tuple[int, str]] = []
+    for line_number, line in enumerate(lines[1:], start=2):
+        if line.strip() in ("---", "..."):
+            return block
+        block.append((line_number, line))
+    return []
+
+
+def check_phase_ledger(ledger: Path | None = None) -> None:
+    try:
+        multioperator.validate(ROOT)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        report("plan", "plan/events", str(exc))
+
+
+def check_phase_files() -> None:
+    for path in sorted((ROOT / "plan/phases").glob("*.md")):
+        text = path.read_text()
+        metadata_lines = {number for number, _ in frontmatter_lines(text)}
+        for number, line in markdown_prose_lines(text):
+            if number not in metadata_lines and STATUS_DECLARATION_PATTERN.match(
+                CODE_SPAN_PATTERN.sub("", line)
+            ):
+                report(
+                    "plan",
+                    path.relative_to(ROOT).as_posix(),
+                    f"line {number}: phase state belongs only in predecessor-bound events",
+                )
+
+
+def check_closing_phase(
+    phase: str, ledger: Path | None = None, next_marker_reason: str | None = None
+) -> None:
+    try:
+        if ledger is None:
+            state = multioperator.validate(ROOT)
+            if state["heads"][phase]["state"] != "completed":
+                raise ValueError("closing phase has no accepted completion event")
+        else:
+            multioperator.completion_plan(ROOT, phase, json.loads(ledger.read_text()))
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        report("plan-close", "plan/events", str(exc))
+
+
+def candidate_markdown_files() -> list[Path]:
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            "*.md",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        report("links", ".", f"git ls-files failed (exit {result.returncode}): {message}")
+        return []
+    candidates = [ROOT / item.decode("utf-8") for item in result.stdout.split(b"\0") if item]
+    return [path for path in candidates if path.is_file()]
+
+
+def markdown_prose_lines(text: str) -> Iterable[tuple[int, str]]:
+    fence_character: str | None = None
+    fence_length = 0
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        match = FENCE_PATTERN.match(line)
+        if match:
+            marker = match.group(1)
+            if fence_character is None:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif marker[0] == fence_character and len(marker) >= fence_length:
+                fence_character = None
+                fence_length = 0
+            continue
+        if fence_character is None:
+            yield line_number, line
+
+
+def link_destination(raw_destination: str) -> str | None:
+    raw = raw_destination.strip()
+    if not raw:
+        return None
+    if raw.startswith("<"):
+        closing = raw.find(">")
+        if closing == -1:
+            return None
+        suffix = raw[closing + 1 :].strip()
+        if suffix and not suffix.startswith(('"', "'", "(")):
+            return None
+        destination = raw[1:closing]
+    else:
+        destination = raw.split(maxsplit=1)[0]
+    return unquote(destination.replace("\\(", "(").replace("\\)", ")"))
+
+
+def heading_slug(text: str) -> str:
+    """Slugify heading text the way Markdown hosts derive a heading anchor."""
+    rendered = HEADING_LINK_PATTERN.sub(lambda match: match.group("label"), text)
+    rendered = HEADING_MARKUP_PATTERN.sub("", rendered)
+    return ANCHOR_DISALLOWED_PATTERN.sub("", rendered.strip().lower()).replace(" ", "-")
+
+
+def anchors_from_text(text: str) -> frozenset[str]:
+    frontmatter_numbers = {line_number for line_number, _ in frontmatter_lines(text)}
+    seen: dict[str, int] = {}
+    collected: set[str] = set()
+    for line_number, line in markdown_prose_lines(text):
+        if line_number in frontmatter_numbers:
+            continue
+        match = ATX_HEADING_PATTERN.match(line)
+        if match is None:
+            continue
+        slug = heading_slug(match.group("text"))
+        if not slug:
+            continue
+        # Repeated heading text disambiguates as slug, slug-1, slug-2…
+        occurrence = seen.get(slug, 0)
+        seen[slug] = occurrence + 1
+        collected.add(slug if occurrence == 0 else f"{slug}-{occurrence}")
+    return frozenset(collected)
+
+
+def document_anchors(path: Path) -> frozenset[str] | None:
+    """Anchors a Markdown document defines, or None when they cannot be derived.
+
+    Only Markdown targets have a mechanically derivable anchor set. A fragment
+    into any other file kind is skipped rather than guessed at — a declared
+    blind spot, not a silent pass for Markdown.
+    """
+    key = path.resolve(strict=False)
+    if key in ANCHOR_CACHE:
+        return ANCHOR_CACHE[key]
+
+    anchors: frozenset[str] | None = None
+    if path.suffix.lower() == ".md":
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            anchors = None
+        else:
+            anchors = anchors_from_text(text)
+
+    ANCHOR_CACHE[key] = anchors
+    return anchors
+
+
+def check_fragment(source: Path, line_number: int, target: Path, fragment: str) -> None:
+    anchors = document_anchors(target)
+    if anchors is None or fragment in anchors:
+        return
+    resolved_target = target.resolve(strict=False)
+    try:
+        shown = resolved_target.relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        shown = resolved_target.as_posix()
+    report(
+        "links",
+        source.relative_to(ROOT).as_posix(),
+        f"line {line_number}: missing anchor #{fragment} in {shown}",
+    )
+
+
+def check_citation_direction(
+    source: Path, line_number: int, relative_target: Path, destination: str
+) -> None:
+    """Refuse downward citations except the one explicit procedural navigation edge.
+
+    Direction is judged before the target's existence: citing a policy that does
+    not exist inverts the dependency order just the same.
+    """
+    relative_source = source.relative_to(ROOT)
+    if relative_source.parts[:1] != (CITATION_SOURCE_DIRECTORY,):
+        return
+    if not relative_target.parts or relative_target.parts[0] not in CITATION_FORBIDDEN_DIRECTORIES:
+        return
+    if (relative_source.as_posix(), relative_target.as_posix()) in PROCEDURE_HANDOFFS:
+        return
+    report(
+        "citations",
+        relative_source.as_posix(),
+        f"line {line_number}: brief cites {relative_target.as_posix()} ({destination}); "
+        "state the constraint in the brief's own words and let the policy carry the link back",
+    )
+
+
+def check_docs_containment(
+    source: Path, line_number: int, relative_target: Path, destination: str
+) -> None:
+    """A pinned third-party document never links outside docs/ (policies/docs.md).
+
+    The catalog docs/README.md is project-owned and exempt; it may cite the
+    governing policy. Direction is judged before the target's existence.
+    """
+    relative_source = source.relative_to(ROOT)
+    if relative_source.parts[:1] != (DOCS_DIRECTORY,):
+        return
+    if relative_source == Path(DOCS_DIRECTORY, DOCS_CATALOG):
+        return
+    if relative_target.parts[:1] == (DOCS_DIRECTORY,):
+        return
+    report(
+        "docs",
+        relative_source.as_posix(),
+        f"line {line_number}: pinned document links outside {DOCS_DIRECTORY}/ "
+        f"({destination}); third-party material never references the project",
+    )
+
+
+def docs_catalog_links(catalog: Path) -> set[str]:
+    """Top-level docs/ entry names that catalog rows link to."""
+    referenced: set[str] = set()
+    try:
+        text = catalog.read_text(encoding="utf-8")
+    except OSError as exc:
+        report("docs", catalog.relative_to(ROOT).as_posix(), str(exc))
+        return referenced
+    docs_root = (ROOT / DOCS_DIRECTORY).resolve()
+    for _line_number, raw_line in markdown_prose_lines(text):
+        line = CODE_SPAN_PATTERN.sub("", raw_line)
+        destinations = [match.group("destination") for match in INLINE_LINK_PATTERN.finditer(line)]
+        reference_match = REFERENCE_LINK_PATTERN.match(line)
+        if reference_match:
+            destinations.append(reference_match.group("destination"))
+        for raw_destination in destinations:
+            destination = link_destination(raw_destination)
+            if destination is None or URI_SCHEME_PATTERN.match(destination):
+                continue
+            file_part = destination.partition("#")[0].split("?", 1)[0]
+            if not file_part:
+                continue
+            if file_part.startswith("/"):
+                candidate = ROOT / file_part.lstrip("/")
+            else:
+                candidate = catalog.parent / file_part
+            try:
+                relative = candidate.resolve(strict=False).relative_to(docs_root)
+            except ValueError:
+                continue
+            if relative.parts:
+                referenced.add(relative.parts[0])
+    return referenced
+
+
+def check_docs_catalog() -> None:
+    """Every top-level docs/ entry is linked from docs/README.md (policies/docs.md).
+
+    Missing link targets are reported by the ordinary link check; this check
+    owns the converse — an entry on disk that no catalog row names — and the
+    README's presence whenever the directory holds anything else.
+    """
+    base = ROOT / DOCS_DIRECTORY
+    if not base.is_dir():
+        return
+    entries = sorted(
+        item.name
+        for item in base.iterdir()
+        if item.name != DOCS_CATALOG and not item.name.startswith(".")
+    )
+    catalog = base / DOCS_CATALOG
+    if not catalog.is_file():
+        if entries:
+            report(
+                "docs",
+                f"{DOCS_DIRECTORY}/{DOCS_CATALOG}",
+                f"catalog is missing while {DOCS_DIRECTORY}/ holds {len(entries)} entries",
+            )
+        return
+    referenced = docs_catalog_links(catalog)
+    for name in entries:
+        if name not in referenced:
+            report(
+                "docs",
+                f"{DOCS_DIRECTORY}/{name}",
+                f"entry is not linked from any {DOCS_DIRECTORY}/{DOCS_CATALOG} catalog row",
+            )
+
+
+def verify_historical_commit(commit: str) -> None:
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+        raise ValueError("invalid historical source identity")
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", commit, "HEAD"], capture_output=True
+    )
+    if result.returncode:
+        raise ValueError("historical source is not a verified repository ancestor")
+
+
+def historical_context(source: Path) -> tuple[str, str] | None:
+    relative = source.relative_to(ROOT)
+    if relative.parts[:2] == ("log", "entries"):
+        metadata, body = multioperator.read_log(source.read_bytes())
+        if "source_offset" not in metadata:
+            return None
+        manifest = json.loads((ROOT / "collaboration/manifest.json").read_text())
+        commit = manifest["source_commit"]
+        verify_historical_commit(commit)
+        original = subprocess.run(
+            ["git", "-C", str(ROOT), "show", commit + ":LOG.md"], capture_output=True
+        )
+        if original.returncode:
+            raise ValueError("declared historical log bytes are unavailable")
+        offset = metadata["source_offset"]
+        if (
+            type(offset) is not int
+            or offset < 0
+            or original.stdout[offset : offset + len(body)] != body
+        ):
+            raise ValueError("imported log differs from the declared Git source bytes")
+        return commit, "LOG.md"
+    if relative.parts[0] not in {"lessons-archived", "user-actions-archived"}:
+        return None
+    manifest = json.loads((ROOT / "collaboration/manifest.json").read_text())
+    commit = manifest["source_commit"]
+    verify_historical_commit(commit)
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-tree", "--name-only", commit, "--", relative.as_posix()],
+        capture_output=True,
+    )
+    if listed.returncode:
+        raise ValueError("cannot query declared historical source tree")
+    if not listed.stdout.strip():
+        return None  # A new archive path has no imported-source declaration.
+    archived = subprocess.run(
+        ["git", "-C", str(ROOT), "show", commit + ":" + relative.as_posix()], capture_output=True
+    )
+    if archived.returncode:
+        raise ValueError("declared historical bytes are unavailable")
+    return (commit, relative.as_posix()) if archived.stdout == source.read_bytes() else None
+
+
+def check_historical_link(
+    source: Path, number: int, destination: str, context: tuple[str, str]
+) -> None:
+    commit, original = context
+    target, marker, fragment = destination.partition("#")
+    target = target.split("?", 1)[0]
+    relative = (
+        posixpath.normpath(posixpath.join(posixpath.dirname(original), target))
+        if target
+        else original
+    )
+    if target.startswith("/"):
+        relative = target.lstrip("/")
+    if relative == ".." or relative.startswith("../"):
+        report(
+            "links",
+            source.relative_to(ROOT).as_posix(),
+            f"line {number}: historical link escapes repository",
+        )
+        return
+    checked = subprocess.run(
+        ["git", "-C", str(ROOT), "show", commit + ":" + relative], capture_output=True
+    )
+    if checked.returncode:
+        report(
+            "links",
+            source.relative_to(ROOT).as_posix(),
+            f"line {number}: missing historical target {relative}",
+        )
+        return
+    if marker and fragment and relative.lower().endswith(".md"):
+        anchors = anchors_from_text(checked.stdout.decode())
+        if fragment not in anchors:
+            report(
+                "links",
+                source.relative_to(ROOT).as_posix(),
+                f"line {number}: missing historical anchor #{fragment} in {relative}",
+            )
+
+
+def check_link(
+    source: Path, line_number: int, destination: str, proposed: Path | None = None
+) -> None:
+    if (
+        not destination
+        or destination.startswith("//")
+        or URI_SCHEME_PATTERN.match(destination)
+        or PLACEHOLDER_PATTERN.search(destination)
+    ):
+        return
+
+    try:
+        context = historical_context(source)
+        if context is not None:
+            check_historical_link(source, line_number, destination, context)
+            return
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        report(
+            "links",
+            source.relative_to(ROOT).as_posix(),
+            f"line {line_number}: historical provenance refused: {exc}",
+        )
+        return
+    file_part, has_fragment, fragment = destination.partition("#")
+    fragment = fragment.strip()
+    file_destination = file_part.split("?", 1)[0]
+    if not file_destination:
+        # A same-document link resolves against the source file's own headings.
+        if has_fragment and fragment:
+            check_fragment(source, line_number, source, fragment)
+        return
+    if file_destination.startswith("/"):
+        candidate = ROOT / file_destination.lstrip("/")
+    else:
+        candidate = source.parent / file_destination
+    resolved_root = ROOT.resolve()
+    resolved_candidate = candidate.resolve(strict=False)
+    try:
+        relative_candidate = resolved_candidate.relative_to(resolved_root)
+    except ValueError:
+        report(
+            "links",
+            source.relative_to(ROOT).as_posix(),
+            f"line {line_number}: link escapes repository: {destination}",
+        )
+        return
+    check_citation_direction(source, line_number, relative_candidate, destination)
+    check_docs_containment(source, line_number, relative_candidate, destination)
+    proposed_self = proposed is not None and resolved_candidate == source.resolve(strict=False)
+    if not candidate.exists() and not proposed_self:
+        report(
+            "links",
+            source.relative_to(ROOT).as_posix(),
+            f"line {line_number}: missing target {relative_candidate.as_posix()}",
+        )
+        return
+    if has_fragment and fragment:
+        check_fragment(source, line_number, candidate, fragment)
+
+
+def check_markdown_links() -> None:
+    for source in candidate_markdown_files():
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            report("links", source.relative_to(ROOT).as_posix(), str(exc))
+            continue
+        check_source_links(source, text)
+
+
+def check_source_links(source: Path, text: str, proposed: Path | None = None) -> None:
+    if proposed is not None:
+        ANCHOR_CACHE[source.resolve(strict=False)] = anchors_from_text(text)
+    for line_number, raw_line in markdown_prose_lines(text):
+        line = CODE_SPAN_PATTERN.sub("", raw_line)
+        destinations = [match.group("destination") for match in INLINE_LINK_PATTERN.finditer(line)]
+        reference_match = REFERENCE_LINK_PATTERN.match(line)
+        if reference_match:
+            destinations.append(reference_match.group("destination"))
+        for raw_destination in destinations:
+            destination = link_destination(raw_destination)
+            if destination is not None:
+                check_link(source, line_number, destination, proposed)
+
+
+def author_document(arguments: argparse.Namespace) -> None:
+    import yaml
+    from agentic_starter.input_io import checked_write, destination, read_object
+
+    creating = arguments.create_input is not None
+    supplied = read_object(arguments.create_input if creating else arguments.register_input)
+    relative = supplied.get("path")
+    if not isinstance(relative, str):
+        raise ValueError("document path is required")
+    path = destination(ROOT, relative)
+    parts = Path(relative).parts
+    if not parts or parts[0] not in {"briefs", "policies", "docs"}:
+        raise ValueError("only brief, policy and pinned-document destinations are supported")
+    if parts[0] in {"briefs", "policies"} and not re.fullmatch(
+        r"(?:briefs|policies)/[A-Za-z0-9._-]+\.md", relative
+    ):
+        raise ValueError("use a catalog-supported top-level Markdown filename")
+    if creating:
+        required = {"path", "title", "body"}
+        if parts[0] == "briefs":
+            required |= {"scope", "status"}
+        if set(supplied) != required or path.suffix != ".md":
+            raise ValueError("skeleton requires path/title/body and brief scope/status")
+        title, meaning = supplied["title"], supplied["body"]
+        if (
+            not all(isinstance(item, str) and item.strip() for item in (title, meaning))
+            or "\n" in title
+        ):
+            raise ValueError("supply one title line and substantive body")
+        if parts[0] in {"briefs", "policies"} and len(parts) != 2:
+            raise ValueError("briefs and policies use top-level Markdown files")
+        prefix = "# " + ("Policy: " if parts[0] == "policies" else "") + title + "\n\n"
+        if parts[0] == "briefs":
+            if supplied["status"] not in {"draft", "methodology", "implemented", "historical"}:
+                raise ValueError("invalid supplied brief status")
+            if not isinstance(supplied["scope"], str) or not supplied["scope"].strip():
+                raise ValueError("brief scope is required")
+            prefix = (
+                "---\n"
+                + yaml.safe_dump(
+                    {
+                        "title": title,
+                        "date": arguments.on.isoformat(),
+                        "status": supplied["status"],
+                        "scope": supplied["scope"],
+                    },
+                    sort_keys=False,
+                )
+                + "---\n\n"
+                + prefix
+            )
+        data = (prefix + meaning.rstrip("\n") + "\n").encode()
+
+        def check(proposed: Path) -> None:
+            check_source_links(path, proposed.read_text(), proposed)
+            if DRIFT:
+                raise ValueError("; ".join(DRIFT))
+
+        checked_write(ROOT, relative, data, check)
+    else:
+        if not path.exists():
+            raise ValueError("register an existing document; create its skeleton first")
+        catalog = "docs/README.md" if parts[0] == "docs" else "AGENTS.md"
+        required = {"path", "label"} | ({"zone"} if parts[0] == "briefs" else set())
+        if set(supplied) != required:
+            raise ValueError("registration requires path/label and brief project|methodology zone")
+        label = supplied["label"]
+        if not isinstance(label, str) or not label.strip() or any(c in label for c in "\n\r[]"):
+            raise ValueError("catalog label must be one plain nonempty line")
+        catalog_path = destination(ROOT, catalog)
+        original = catalog_path.read_text()
+        link = (
+            quote(relative.removeprefix("docs/"), safe="/-._~") if parts[0] == "docs" else relative
+        )
+        if re.search(r"\]\(" + re.escape(link) + r"(?:[#)])", original):
+            raise ValueError("document is already registered")
+        row = f"- [{label}]({link})\n"
+        if catalog == "AGENTS.md":
+            zone = supplied.get("zone", "methodology")
+            headings = {"project": "## Project briefs", "methodology": "## Methodology briefs"}
+            heading = "## Policies catalog" if parts[0] == "policies" else headings.get(zone)
+            if heading is None or original.count(heading + "\n") != 1:
+                raise ValueError("missing/ambiguous catalog section")
+            start = original.index(heading + "\n") + len(heading) + 1
+            following = re.search(r"(?m)^(?:#{1,2} |<!-- .*_END -->)", original[start:])
+            end = start + following.start() if following else len(original)
+            data = (original[:end].rstrip("\n") + "\n" + row + "\n" + original[end:]).encode()
+        else:
+            data = (original.rstrip("\n") + "\n\n" + row).encode()
+
+        def check(proposed: Path) -> None:
+            if catalog == "AGENTS.md":
+                check_instruction_delivery(proposed.read_text())
+                for directory in CATALOGED_DIRECTORIES:
+                    check_catalog(directory, proposed.read_text())
+            check_link(catalog_path, 1, link)
+            if DRIFT:
+                raise ValueError("; ".join(DRIFT))
+
+        checked_write(ROOT, catalog, data, check, arguments.expect_sha256)
+    print("DOCUMENT INPUT WRITTEN; run the complete catalog check before delivery")
+
+
+def main() -> int:
+    global ROOT
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--closing-phase")
+    parser.add_argument("--root", type=Path, default=ROOT)
+    author = parser.add_mutually_exclusive_group()
+    author.add_argument("--create-input", type=Path)
+    author.add_argument("--register-input", type=Path)
+    parser.add_argument("--expect-sha256")
+    parser.add_argument("--on", type=date.fromisoformat, default=date.today())
+    parser.add_argument("--ledger-file", type=Path, help="validate a prospective phase ledger")
+    parser.add_argument(
+        "--next-marker-reason",
+        help="record why a child close queues work outside the closing parent's subtree",
+    )
+    arguments = parser.parse_args()
+    ROOT = arguments.root.resolve()
+    if arguments.create_input or arguments.register_input:
+        try:
+            author_document(arguments)
+            return 0
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            print(f"DOCUMENT INPUT REFUSED: {exc}", file=sys.stderr)
+            return 1
+    try:
+        instructions = (ROOT / "AGENTS.md").read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        report("instructions", "AGENTS.md", str(exc))
+        instructions = ""
+    check_instruction_delivery(instructions)
+    if instructions:
+        for directory in CATALOGED_DIRECTORIES:
+            check_catalog(directory, instructions)
+    check_docs_catalog()
+    check_phase_ledger(arguments.ledger_file)
+    if arguments.closing_phase:
+        check_closing_phase(
+            arguments.closing_phase, arguments.ledger_file, arguments.next_marker_reason
+        )
+    check_phase_files()
+    check_markdown_links()
+    if DRIFT:
+        print("\n".join(sorted(DRIFT)))
+        return 1
+    print("CATALOGS OK")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

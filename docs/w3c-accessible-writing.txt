@@ -1,0 +1,3 @@
+Use headings to convey meaning and structure
+Make link text meaningful
+Write meaningful text alternatives for images

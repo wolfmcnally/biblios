@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Canonical repository build-gate entry point.
+
+set -euo pipefail
+
+entrypoint_path="${BASH_SOURCE[0]}"
+while [[ -L "$entrypoint_path" ]]; do
+  entrypoint_dir="$(cd "$(dirname "$entrypoint_path")" && pwd)"
+  entrypoint_path="$(readlink "$entrypoint_path")"
+  [[ "$entrypoint_path" == /* ]] || entrypoint_path="$entrypoint_dir/$entrypoint_path"
+done
+repo_root="$(cd "$(dirname "$entrypoint_path")/.." && pwd)"
+project_root="$repo_root/project"
+
+usage() {
+  cat <<'EOF'
+Usage: ./bin/check [all|lint|format|test|policy|vital|changed <ref>]
+
+Run the repository's build gates. The default and authoritative mode is "all".
+Vital and changed are governed lanes (changed is the local-commit and
+implementation-candidate gate) and never produce a full-gate receipt.
+EOF
+}
+
+if [[ $# -gt 2 ]]; then
+  usage >&2
+  exit 2
+fi
+
+gate_mode="${1:-all}"
+case "$gate_mode" in
+  all|lint|format|test|policy|vital)
+    if [[ $# -gt 1 ]]; then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  changed)
+    if [[ $# -ne 2 || -z "${2:-}" ]]; then
+      usage >&2
+      exit 2
+    fi
+    ;;
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  *)
+    echo "CHECK ERROR unknown mode: $gate_mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+toolchain_helper="$repo_root/bin/_python-toolchain"
+if [[ ! -r "$toolchain_helper" ]]; then
+  echo "CHECK ERROR missing required file: bin/_python-toolchain" >&2
+  exit 1
+fi
+source "$toolchain_helper"
+python_toolchain_init CHECK
+
+if [[ ! -x "$repo_root/bin/test" ]]; then
+  echo "CHECK ERROR missing required executable: bin/test" >&2
+  exit 1
+fi
+
+for evidence_executable in \
+  kickoff-tree-id kickoff-evidence kickoff-config check-receipt execution-telemetry \
+  check-execution-dashboards check-harness-parity check-toolchain-callers \
+  lessons treatise check-catalogs check-hooks-installed check-shell-syntax new-name \
+  test-governance multioperator kickoff-command-zero \
+  normalize-final-newline check-candidate-partition docs; do
+  if [[ ! -x "$repo_root/bin/$evidence_executable" ]]; then
+    echo "CHECK ERROR missing required executable: bin/$evidence_executable" >&2
+    exit 1
+  fi
+done
+
+run_gate() {
+  local gate_name="$1"
+  shift
+  echo "CHECK $gate_name START"
+  if "$@"; then
+    echo "CHECK $gate_name PASS"
+  else
+    local command_exit=$?
+    if [[ "$command_exit" -eq 124 || "$command_exit" -ge 128 ]]; then
+      echo "CHECK $gate_name INCOMPLETE (exit $command_exit; correctness unknown)" >&2
+    else
+      echo "CHECK $gate_name FAIL (exit $command_exit)" >&2
+    fi
+    return "$command_exit"
+  fi
+}
+
+run_lint() {
+  (
+    cd "$project_root"
+    run_gate lint uv run --locked "${python_toolchain_uv_args[@]}" ruff check \
+      biblios tests ../lib ../bin/kickoff-config ../bin/kickoff-evidence \
+      ../bin/kickoff-tree-id ../bin/check-receipt ../bin/execution-telemetry \
+      ../bin/check-execution-dashboards ../bin/check-harness-parity \
+      ../bin/check-toolchain-callers ../bin/lessons ../bin/treatise ../bin/check-catalogs \
+      ../bin/check-hooks-installed ../bin/check-shell-syntax ../bin/new-name \
+      \
+      ../bin/check-plan-concreteness ../bin/check-plan-delivery ../bin/review-verdicts \
+      ../bin/kickoff-command-zero \
+      ../bin/normalize-final-newline ../bin/check-candidate-partition ../tests ../infra ../qualification
+  )
+}
+
+run_format() {
+  (
+    cd "$project_root"
+    run_gate format uv run --locked "${python_toolchain_uv_args[@]}" ruff format --check \
+      biblios tests ../lib ../bin/kickoff-config ../bin/kickoff-evidence \
+      ../bin/kickoff-tree-id ../bin/check-receipt ../bin/execution-telemetry \
+      ../bin/check-execution-dashboards ../bin/check-harness-parity \
+      ../bin/check-toolchain-callers ../bin/lessons ../bin/treatise ../bin/check-catalogs \
+      ../bin/check-hooks-installed ../bin/check-shell-syntax ../bin/new-name \
+      \
+      ../bin/check-plan-concreteness ../bin/check-plan-delivery ../bin/review-verdicts \
+      ../bin/kickoff-command-zero \
+      ../bin/normalize-final-newline ../bin/check-candidate-partition ../tests ../infra ../qualification
+  )
+}
+
+run_test() {
+  run_gate test "$repo_root/bin/test"
+}
+
+run_vital() {
+  run_gate vital "$repo_root/bin/test" --vital
+}
+
+run_changed() {
+  run_gate changed "$repo_root/bin/test" --changed-from "$1"
+}
+
+run_log() {
+  run_gate policy-log "$repo_root/bin/multioperator" validate --root "$repo_root"
+}
+
+run_policy() {
+  (
+    cd "$repo_root"
+    run_gate policy-harness-parity ./bin/check-harness-parity || return $?
+    run_gate policy-toolchain-callers ./bin/check-toolchain-callers || return $?
+    run_gate policy-execution-dashboards ./bin/check-execution-dashboards || return $?
+    run_gate policy-config ./bin/kickoff-config show || return $?
+    run_gate policy-catalogs ./bin/check-catalogs || return $?
+    run_gate policy-lessons ./bin/lessons validate || return $?
+    run_gate policy-treatise ./bin/treatise validate || return $?
+    run_gate policy-hooks-installed ./bin/check-hooks-installed || return $?
+    run_gate policy-shell-syntax ./bin/check-shell-syntax || return $?
+    run_log || return $?
+    run_gate policy-candidate-partition ./bin/check-candidate-partition || return $?
+    run_gate policy-docs ./bin/docs check || return $?
+    run_gate policy-infra ./bin/check-infra || return $?
+    run_gate policy-test-governance ./bin/test-governance validate || return $?
+    run_gate policy-test-time ./bin/test-governance timing || return $?
+    echo "CHECK policy PASS"
+  )
+}
+
+run_all() {
+  # Fail cheaply before tests; run_policy still revalidates at the final seam.
+  run_log || return $?
+  run_lint || return $?
+  run_format || return $?
+  run_test || return $?
+  run_policy || return $?
+}
+
+run_all_with_receipt() {
+  local receipt_tool="$repo_root/bin/check-receipt"
+  local candidate_before
+  local candidate_after
+  local candidate_exit
+  local log_path
+  local gate_exit
+  local log_exit
+  local final_exit
+  local outcome
+  local -a pipeline_status
+
+  candidate_before="$("$receipt_tool" candidate --root "$repo_root")"
+  log_path="$("$receipt_tool" begin --root "$repo_root" --candidate "$candidate_before")"
+  echo "CHECK RECEIPT LOG ${log_path#"$repo_root"/}"
+
+  set +e
+  run_all 2>&1 | tee "$log_path"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  gate_exit="${pipeline_status[0]}"
+  log_exit="${pipeline_status[1]}"
+
+  set +e
+  candidate_after="$("$receipt_tool" candidate --root "$repo_root")"
+  candidate_exit=$?
+  set -e
+
+  final_exit="$gate_exit"
+  outcome="failed"
+  if [[ "$log_exit" -ne 0 ]]; then
+    final_exit="$log_exit"
+    outcome="log-failed"
+    echo "CHECK ERROR durable log write failed (exit $log_exit): $log_path" >&2
+  elif [[ "$candidate_exit" -ne 0 ]]; then
+    candidate_after="ERROR"
+    final_exit=1
+    outcome="identity-error"
+    echo "CHECK ERROR could not identify the candidate after the full gate" >&2
+  elif [[ "$candidate_before" != "$candidate_after" ]]; then
+    final_exit=1
+    outcome="candidate-drift"
+    echo "CHECK ERROR candidate changed during the full gate" >&2
+  elif [[ "$gate_exit" -eq 0 ]]; then
+    final_exit=0
+    outcome="passed"
+  fi
+
+  set +e
+  "$receipt_tool" complete \
+    --root "$repo_root" \
+    --log "$log_path" \
+    --candidate-before "$candidate_before" \
+    --candidate-after "$candidate_after" \
+    --exit-code "$final_exit" \
+    --outcome "$outcome"
+  local receipt_exit=$?
+  set -e
+  if [[ "$receipt_exit" -ne 0 ]]; then
+    echo "CHECK ERROR could not persist the full-gate result (exit $receipt_exit)" >&2
+    if [[ "$final_exit" -eq 0 ]]; then
+      return "$receipt_exit"
+    fi
+  fi
+  return "$final_exit"
+}
+
+cd "$repo_root"
+python_toolchain_probe
+
+case "$gate_mode" in
+  lint) run_lint ;;
+  format) run_format ;;
+  test) run_test ;;
+  policy) run_policy ;;
+  vital) run_vital ;;
+  changed) run_changed "$2" ;;
+  all) run_all_with_receipt ;;
+esac

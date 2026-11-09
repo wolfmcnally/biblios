@@ -1,0 +1,35 @@
+# Policy: Phase Identity, State and Selection
+
+## One authority for each fact
+
+`plan/phases/<id>.md` defines a phase; `plan/events/<event-id>.json` records its lifecycle. The permanent id is a unique three-word lowercase slug. Frontmatter contains `id`, `title`, rational-string `order`, nullable `parent`, and lists `depends_on` and `informs`, plus declared review/evidence properties when applicable. References use ids, never paths or display positions. Definitions contain no `status` or `owner` field. `plan/INDEX.md` is handwritten discovery/context, not a second status ledger.
+
+The current state is the unique folded event head: `not-started`, `next`, `in-progress` or `completed`. Each append names its exact predecessor and prior state, writer and reason. Starting work requires a named owner and an actual coordinated claim reference. A caller-written label records attribution; it grants no custody, authentication or access. A handoff changing an existing owner requires explicit release and new claim evidence. A fork is a conflict to resolve through the existing ownership procedure, never a choice for a renderer.
+
+Imported genesis records retain the original declared state and attribution limits; a historical completed marker is not newly accepted product evidence. Historical ids, review claims, failed or accepted packets and original tools remain exact. An identity change never resets a consumed allowance.
+
+## Select and start work
+
+Use `./bin/multioperator status --root .` for canonical heads and `./bin/multioperator render --root .` for disposable local views. Select next work with `./bin/multioperator select --root . --owner <operator>` or add `--phase <id>` for explicitly authorized work. Selection is read-only and refuses absent, completed, differently owned or dependency-blocked work. It does not acquire a lease. Verify the existing external coordination claim and safe command/native boundary before appending an `in-progress` event with `./bin/multioperator event --root . --file <event.json>`.
+
+There is at most one `next` selection per owner; independent operators can select independent work. An unassigned imported selection may be picked explicitly after custody verification. Active work need not queue another phase. No global single-arrow convention or numeric renumbering survives this structure. A truthful park leaves the phase in progress and appends a PARK log entry; it neither completes the phase nor spends or restores review allowance.
+
+## Insert and order phases
+
+Create a new permanent id with `./bin/multioperator add --root . --document <phase.md> --writer <operator>`. The definition and its not-started genesis form one qualified Git change. Change an exact rational order key with `./bin/multioperator order --root . --phase <id> --value <rational>`. Ordering uses the rational key and permanent id as a deterministic tie-breaker. Dependency order and acyclic parent/dependency graphs are checked; changing presentation order does not rename history or rewrite existing references. Consequential scope and dependencies still require their normal operator ruling.
+
+## Complete only accepted work
+
+Completion is a new immutable event, never an edit to an existing event or definition. The ordinary pinned evidence run captures the active phase definition and owner/claim event at initialization. Accepted close requires unchanged governing authority, real required advice and primary dispositions for its selected lane, actual candidate-bound gates, finalized telemetry and retained qualification bytes. Required evidence lives in ignored durable project storage. Neither a digest without bytes, arbitrary receipt JSON nor an imported completed genesis is new acceptance.
+
+Prepare `--ledger-after` as JSON with schema `agentic.phase-transition.v1`, `events` and nullable `parent_continuation`. Each prospective event has exactly `id`, `phase`, `previous`, `from`, `state`, `owner`, `writer`, `claim` and `reason`; it completes the current in-progress phase under its captured owner/claim. The proposal is graph analysis, not published approval. `bin/kickoff-evidence close` validates it against the accepted run, appends the actual terminal log once, seals the retained inputs and publishes completion with the real closure path/digest. Run the same close with `--verify-handoff` afterward. A failed or interrupted publication remains visible and supports exact idempotent retry; it is never permission to rewrite the earlier event or closure.
+
+A parent completes only after all children are complete and it has its own independently accepted implementation run. `--parent-run` carries that acceptance and any real ancestor acceptance chain, without fabricating another review or aliasing the child's acceptance. A last-child close that leaves its parent active needs a truthful remaining-work reason; another actual incomplete child also supplies continuation. Parent acceptance alone can close the implementation without publishing phase completion until the children finish. Neither branch silently closes the parent or invents a successor.
+
+Historical completion validation verifies retained closure, log, qualification inputs, original budget prefix and captured owner/claim. Fresh completion additionally runs the receiving qualified acceptance validator against current candidate and original tools; it never executes a validator selected by the artifact. Missing or changed bytes refuse. Later unrelated phase activity does not invalidate a historical accepted product, while mutation of its retained acceptance still does.
+
+## Validation and views
+
+`./bin/multioperator validate --root .` checks definitions, graph, event chains, owner/claim transitions, completion references and immutable log sequences. `./bin/check-catalogs` calls the same record validator and checks active links and phase narrative declarations. The opt-in staged hook invokes `./bin/multioperator validate --root . --staged` against indexed blobs, protecting previously committed immutable records. Do not install or change hook trust by inference from this policy.
+
+`./bin/multioperator render --root . --check` verifies ignored `.collaboration-views/PLAN.md` and `.collaboration-views/LOG.md`. Regeneration is deterministic. These views are never edited or committed as authority. After accepted close, perform required ripple, lessons, sanitized reporting and one bare final full gate on the actual handoff tree. Delivery and human acceptance remain separate under [human-in-the-loop.md](human-in-the-loop.md).

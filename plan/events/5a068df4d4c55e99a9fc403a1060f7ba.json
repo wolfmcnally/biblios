@@ -1,0 +1,10 @@
+{
+  "id": "5a068df4d4c55e99a9fc403a1060f7ba",
+  "phase": "mcp-server-plane",
+  "previous": null,
+  "from": null,
+  "state": "not-started",
+  "owner": null,
+  "writer": "public-baseline",
+  "reason": "Unstarted future roadmap; no historical acceptance or selected successor is claimed"
+}

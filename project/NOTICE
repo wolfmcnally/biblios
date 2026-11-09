@@ -1,0 +1,5 @@
+Biblios original work is Copyright (c) 2026 Wolf McNally and is distributed under the MIT License in LICENSE.
+
+Biblios composes Castle, Conric, Drawbridge and Palace. These are installed separately from the exact public Git revisions declared in pyproject.toml; each declares its own MIT license. Their dependencies retain their respective licenses. The Biblios wheel does not bundle those libraries, models or executables. Consult the installed distributions' license files and metadata for their terms.
+
+Drawbridge's optional external converters and model services are separate prerequisites. In particular, Vellric has its own AGPL terms; Biblios does not bundle or relicense it. Installing Biblios does not install an OCR engine, a model server or model weights. Review the relevant tool's terms before installing or distributing it.

@@ -1,0 +1,119 @@
+# kickoff.yaml — human-editable kickoff execution configuration.
+#
+# Validated and updated by bin/kickoff-config. Direct edits are supported.
+# Commands update only their owned section, preserve comments and extension
+# keys, validate before writing, and replace this file atomically.
+
+version: 1
+
+# Authority and deployment selection; explicit pins describe the invoking model.
+workflow:
+  mode: auto
+  primary_models: {claude: opus, codex: sol}
+  eligible_primary_models: [opus, sol, fable, astra]
+  review_preference: cross-vendor
+  adviser_models:
+    claude:
+      reviewer: [sol]
+      critic: [sol]
+    codex:
+      reviewer: [opus]
+      critic: [opus]
+  allowed_harnesses: [claude, codex]
+  targets: {}
+
+# Optional project- or harness-specific keys may be added here. The current
+# manager preserves unknown extension data without interpreting it.
+extensions: {}
+
+# Delegated role defaults. Primary mode plans/codes inline and prefers cross-provider advice.
+# Which model and implied harness runs each canonical role. A harness section
+# overrides `default` when that harness orchestrates kickoff.
+role_models:
+  default:
+    planner:
+      model: default
+    reviewer:
+      model: default
+    coder:
+      model: default
+    critic:
+      model: default
+  claude:
+    planner:
+      model: opus
+      effort: high
+    reviewer:
+      model: opus
+      effort: high
+    coder:
+      model: opus
+      effort: high
+    critic:
+      model: opus
+      effort: high
+  codex:
+    planner:
+      model: sol
+      effort: high
+    reviewer:
+      model: sol
+      effort: high
+    coder:
+      model: sol
+      effort: high
+    critic:
+      model: sol
+      effort: high
+
+# Per-role originating-search budgets. Retrieval of resources already named in
+# an approved plan or brief is not charged here. Planner and reviewer may
+# originate research; coder and critic are retrieval-only. Installed MCP
+# servers and plugins remain available unless a project or phase narrows them.
+research_budgets:
+  planner: 12
+  reviewer: 6
+  coder: 0
+  critic: 0
+
+# Per-invocation execution budgets. These are hang guards, not performance
+# targets. `claude_max_turns` is a Claude CLI circuit breaker; Codex and native
+# roles use the three clocks because those venues expose no equivalent flag.
+# Target repos may recalibrate the clocks from their own local telemetry.
+role_timeouts:
+  first_event_timeout_seconds: 120
+  minimum_samples_for_recalibration: 30
+  recalibration_multiplier: 2.0
+  roles:
+    planner:
+      hard_timeout_seconds: 1800
+      idle_timeout_seconds: 600
+      claude_max_turns: 100
+      hard_floor_seconds: 1800
+      idle_floor_seconds: 600
+    reviewer:
+      hard_timeout_seconds: 1800
+      idle_timeout_seconds: 600
+      claude_max_turns: 100
+      hard_floor_seconds: 1800
+      idle_floor_seconds: 600
+    coder:
+      hard_timeout_seconds: 7200
+      idle_timeout_seconds: 1200
+      claude_max_turns: 200
+      hard_floor_seconds: 7200
+      idle_floor_seconds: 1200
+    critic:
+      hard_timeout_seconds: 2700
+      idle_timeout_seconds: 600
+      claude_max_turns: 100
+      hard_floor_seconds: 2700
+      idle_floor_seconds: 600
+
+# Per-phase self-resume budget between operator contacts — the runtime
+# doctrine's "small budget" (policies/fail-closed-resume.md). Any operator
+# relay restores it to this value. 0 is a valid pin meaning every park waits
+# for the operator. A phase file may narrow the budget for its own run; it may
+# not widen it above this value.
+run_budgets:
+  self_resume: 3

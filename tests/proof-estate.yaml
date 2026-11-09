@@ -1,0 +1,1698 @@
+schema: agentic.proof_estate.v5
+baseline_report: reports/test-governance/biblios-baseline.json
+audit_ledger: reports/test-governance/biblios-ledger.jsonl
+witness_ledger: reports/test-governance/biblios-witnesses.jsonl
+witness_failure_lines: ^E\s
+adoption:
+  mode: bounded
+  reason: 'Fresh stamp from the agentic starter template on 2026-11-06. Every inherited
+    methodology proof is retained and executable; none has a recorded disposition
+    yet. Review plan: the first product phase (shelf-core-library) admits its own
+    proofs with witnesses; the first governed sweep after that phase reviews inherited
+    families in batches grouped by contract, starting with the toolchain and gate
+    families this repository adapted (atomic-check, toolchain-entrypoints, full-gate-receipt).'
+hang_timeout_seconds: 1800
+mutation:
+  tool: cosmic-ray
+  paths:
+  - project/biblios/*.py
+  budget_seconds: 300
+critical_risks:
+  custody:
+    state: applicable
+    direct_proof: pytest:tests/test_check_receipt.py::test_passed_run_is_durable_and_reusable_for_exact_clean_head
+  security:
+    state: applicable
+    direct_proof: pytest:project/tests/test_hermeticity.py::test_real_network_egress_fails_loudly
+  authority:
+    state: applicable
+    direct_proof: pytest:tests/test_kickoff_evidence.py::test_change_manifest_is_candidate_bound_and_detects_authority_drift
+  concurrency:
+    state: applicable
+    direct_proof: pytest:tests/test_execution_telemetry.py::test_concurrent_process_mutations_do_not_lose_spans
+  atomicity:
+    state: applicable
+    direct_proof: pytest:tests/test_kickoff_config.py::test_invalid_edit_is_atomic
+  corruption:
+    state: applicable
+    direct_proof: pytest:tests/test_kickoff_evidence.py::test_validate_detects_corrupt_evidence
+  recovery:
+    state: applicable
+    direct_proof: pytest:tests/test_execution_telemetry.py::test_lifecycle_idempotency_finalization_and_crash_recovery
+  public-contract:
+    state: applicable
+    direct_proof: pytest:project/tests/test_shelf.py::test_init_creates_the_layout_and_declares_the_embedder_to_palace_only
+  schema:
+    state: applicable
+    direct_proof: pytest:tests/test_test_governance.py::test_live_reset_validates
+  core-success:
+    state: applicable
+    direct_proof: pytest:tests/test_check.py::test_all_is_default_locked_ordered_and_cwd_independent
+  deploy:
+    state: applicable
+    direct_proof: pytest:tests/test_documentation.py::test_deploy_binds_clean_latest_release_and_preserves_manual_mode
+families:
+- id: shelf-manifest-seed
+  kind: pytest
+  selectors:
+  - project/tests/test_shelf.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_shelf.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_shelf.py
+  contract: init creates the five-part shelf layout, declares the embedder to Palace
+    alone, and a manifest of another schema or with bad fields is refused.
+  risk_class: product-contract
+  oracle: Over a temporary shelf the layout files exist, the selector file names the
+    declared provider, no manifest field or key mentions an embedder, and open or
+    construction refuses a wrong schema, an empty id and an unknown mode.
+  admission: Replaces the stamped seed proof with layout proofs over a shelf on disk
+    (first product phase).
+  nearest_overlap: shelf-curation exercises the same shelf object but asserts nothing
+    about layout or manifest refusal.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: network-hermeticity
+  kind: pytest
+  selectors:
+  - project/tests/test_hermeticity.py
+  source_paths:
+  - project/tests/conftest.py
+  - project/tests/test_hermeticity.py
+  covers:
+  - project/tests/conftest.py
+  - project/tests/test_hermeticity.py
+  contract: Routine product tests cannot silently regain network access.
+  risk_class: isolation
+  oracle: A real socket connection attempt fails through the armed pytest guard.
+  admission: Hermeticity is checked with the complete product suite.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: atomic-check
+  kind: pytest
+  selectors:
+  - tests/test_check.py
+  source_paths:
+  - bin/check
+  - tests/test_check.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - bin/check
+  - tests/test_check.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: The repository gate stays atomic, cwd-independent, locked, and fail-closed.
+  risk_class: gate-custody
+  oracle: Stubbed child calls expose exact order, arguments, and preserved exit status.
+  admission: This is the direct proof for the authoritative gate and iteration lanes.
+  nearest_overlap: Toolchain entrypoint tests cover runtime choice but not gate composition.
+  tier: vital
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: catalog-integrity
+  kind: pytest
+  selectors:
+  - tests/test_check_catalogs.py
+  source_paths:
+  - bin/check-catalogs
+  - tests/test_check_catalogs.py
+  - '*.md'
+  - .claude/skills/kickoff/**
+  - briefs/**
+  - policies/**
+  - plan/**
+  covers:
+  - bin/check-catalogs
+  - tests/test_check_catalogs.py
+  - '*.md'
+  - .claude/skills/kickoff/**
+  - briefs/**
+  - policies/**
+  - plan/**
+  contract: The methodology's indexed authority surfaces cannot drift silently.
+  risk_class: documentation-authority
+  oracle: Synthetic repositories report each missing, dangling, or misdirected declaration.
+  admission: Broad catalog changes use the authoritative suite.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-liveness
+  kind: pytest
+  selectors:
+  - tests/test_check_hooks_installed.py
+  source_paths:
+  - bin/check-hooks-installed
+  - tests/test_check_hooks_installed.py
+  - .githooks/**
+  covers:
+  - bin/check-hooks-installed
+  - tests/test_check_hooks_installed.py
+  - .githooks/**
+  contract: Hook installation state is observable and never defaults to reassurance.
+  risk_class: hook-custody
+  oracle: Fixture repositories distinguish absent, unconfigured, correct, and conflicting
+    states.
+  admission: Hook custody is verified in the complete policy gate.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: plan-concreteness
+  kind: pytest
+  selectors:
+  - tests/test_check_plan_concreteness.py
+  source_paths:
+  - bin/check-plan-concreteness
+  - tests/test_check_plan_concreteness.py
+  - plan/**
+  covers:
+  - bin/check-plan-concreteness
+  - tests/test_check_plan_concreteness.py
+  - plan/**
+  contract: Plans reach review with mechanically resolvable implementation instructions.
+  risk_class: planning-evidence
+  oracle: Concrete fixture plans pass and every unresolved proxy fails with a named
+    reason.
+  admission: Planning mechanics remain full-suite evidence.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: plan-delivery
+  kind: pytest
+  selectors:
+  - tests/test_check_plan_delivery.py
+  source_paths:
+  - bin/check-plan-delivery
+  - tests/test_check_plan_delivery.py
+  - plan/**
+  covers:
+  - bin/check-plan-delivery
+  - tests/test_check_plan_delivery.py
+  - plan/**
+  contract: Implementation delivery cannot silently narrow an approved plan.
+  risk_class: delivery-evidence
+  oracle: The checker names every omitted member and distinguishes declared deviations.
+  admission: Delivery completeness is checked at its explicit gate.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: full-gate-receipt
+  kind: pytest
+  selectors:
+  - tests/test_check_receipt.py
+  source_paths:
+  - bin/check-receipt
+  - tests/test_check_receipt.py
+  - .githooks/pre-push
+  - bin/check
+  covers:
+  - bin/check-receipt
+  - tests/test_check_receipt.py
+  - .githooks/pre-push
+  - bin/check
+  contract: Only an exact clean candidate with durable successful evidence can reuse
+    a receipt.
+  risk_class: release-custody
+  oracle: Candidate, log, runtime, or receipt drift forces the full gate or refuses
+    reuse.
+  admission: Receipt identity is the sole proof consumed by pre-push.
+  nearest_overlap: Atomic-check proves gate execution but not durable reuse custody.
+  tier: vital
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: execution-dashboard
+  kind: pytest
+  selectors:
+  - tests/test_execution_dashboard.py
+  source_paths:
+  - lib/agentic_starter/execution_dashboard.py
+  - bin/check-execution-dashboards
+  - reports/execution/**
+  - tests/test_execution_dashboard.py
+  covers:
+  - lib/agentic_starter/execution_dashboard.py
+  - bin/check-execution-dashboards
+  - reports/execution/**
+  - tests/test_execution_dashboard.py
+  contract: Phase reports are deterministic, local, privacy-safe projections of accepted
+    telemetry.
+  risk_class: reporting
+  oracle: Frozen fixtures render byte-identically and malformed or private payloads
+    are rejected.
+  admission: Reporting changes retain their full fixture matrix.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: execution-telemetry
+  kind: pytest
+  selectors:
+  - tests/test_execution_telemetry.py
+  source_paths:
+  - lib/agentic_starter/execution_telemetry.py
+  - bin/execution-telemetry
+  - tests/test_execution_telemetry.py
+  covers:
+  - lib/agentic_starter/execution_telemetry.py
+  - bin/execution-telemetry
+  - tests/test_execution_telemetry.py
+  contract: Execution telemetry stays exact, append-safe, fail-closed, and candidate-linked.
+  risk_class: orchestration-runtime
+  oracle: Behavioral fixtures exercise success, failure, interruption, drift, and
+    recovery paths.
+  admission: Concurrency and recovery proofs remain a complete family.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-installation
+  kind: pytest
+  selectors:
+  - tests/test_install_hooks.py
+  source_paths:
+  - bin/install-hooks
+  - tests/test_install_hooks.py
+  - .githooks/**
+  covers:
+  - bin/install-hooks
+  - tests/test_install_hooks.py
+  - .githooks/**
+  contract: Cloning never changes Git configuration and opting in never overwrites
+    silently.
+  risk_class: local-configuration
+  oracle: Temporary Git repositories expose the resulting core.hooksPath and exit
+    status.
+  admission: Installation behavior runs with the complete hook proofs.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: kickoff-configuration
+  kind: pytest
+  selectors:
+  - tests/test_kickoff_config.py
+  source_paths:
+  - bin/kickoff-config
+  - kickoff.yaml
+  - lib/agentic_starter/workflow.py
+  - tests/test_kickoff_config.py
+  - .claude/agents/**
+  - .codex/agents/**
+  covers:
+  - bin/kickoff-config
+  - kickoff.yaml
+  - lib/agentic_starter/workflow.py
+  - tests/test_kickoff_config.py
+  - .claude/agents/**
+  - .codex/agents/**
+  contract: Human configuration remains strict, comment-preserving, and executable
+    on each venue.
+  risk_class: orchestration-configuration
+  oracle: Config fixtures validate schemas and exact generated child invocations.
+  admission: Configuration interactions retain the full matrix.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: orchestration-evidence
+  kind: pytest
+  selectors:
+  - tests/test_kickoff_evidence.py
+  source_paths:
+  - bin/kickoff-evidence
+  - lib/agentic_starter/finding_schema.py
+  - lib/agentic_starter/advisory.py
+  - tests/test_kickoff_evidence.py
+  - policies/orchestration-evidence.md
+  - briefs/incremental-orchestration.md
+  - bin/check-catalogs
+  - tests/test_check_catalogs.py
+  - .claude/skills/kickoff/**
+  - .claude/agents/**
+  - plan/**
+  - AGENTS.md
+  - lib/agentic_starter/multioperator.py
+  - tests/structured_fixtures.py
+  covers:
+  - bin/kickoff-evidence
+  - lib/agentic_starter/finding_schema.py
+  - lib/agentic_starter/advisory.py
+  - tests/test_kickoff_evidence.py
+  - policies/orchestration-evidence.md
+  - briefs/incremental-orchestration.md
+  - bin/check-catalogs
+  - tests/test_check_catalogs.py
+  - .claude/skills/kickoff/**
+  - .claude/agents/**
+  - plan/**
+  - AGENTS.md
+  - lib/agentic_starter/multioperator.py
+  - tests/structured_fixtures.py
+  contract: Every review and gate remains bound to the exact candidate and declared
+    authority.
+  risk_class: orchestration-custody
+  oracle: Synthetic runs accept only complete internally consistent evidence graphs.
+  admission: The evidence graph is validated as a complete family. It is large because
+    its proofs drive whole synthetic phases through the real evidence tool; one thorough
+    lifecycle carries the general checks and three scenario proofs (primary mode,
+    child marker transitions, a nested parent chain) carry only what distinguishes
+    them.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: kickoff-control-plane
+  kind: pytest
+  selectors:
+  - tests/test_kickoff_control_plane.py
+  source_paths:
+  - lib/agentic_starter/kickoff_runbook.py
+  - lib/agentic_starter/candidate_boundaries.py
+  - bin/kickoff-command-zero
+  - tests/test_kickoff_control_plane.py
+  covers:
+  - lib/agentic_starter/kickoff_runbook.py
+  - lib/agentic_starter/candidate_boundaries.py
+  - bin/kickoff-command-zero
+  - tests/test_kickoff_control_plane.py
+  contract: Expensive kickoff gates run only after an immutable manifest admits their
+    exact command and cheap preflight succeeds.
+  risk_class: orchestration-custody
+  oracle: Synthetic manifests and commands prove exact admission, ordered preflight,
+    and first-failure stopping.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: Orchestration-evidence tests bind review artifacts, but did not
+    own executable command authority.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: log-control-plane
+  kind: pytest
+  selectors:
+  - tests/test_log_control_plane.py
+  source_paths:
+  - bin/normalize-final-newline
+  - lib/agentic_starter/candidate_boundaries.py
+  - tests/test_log_control_plane.py
+  covers:
+  - bin/normalize-final-newline
+  contract: Shared final-newline normalization remains executable only for its closed
+    bookkeeping set; active context refuses without mutation.
+  risk_class: chronology-custody
+  oracle: Run actual normalizer on an execution ledger and an independently declared
+    but inadmissible active path.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: Immutable activity construction is owned by the multioperator family;
+    this proof retains only the shared repair boundary.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: candidate-identity
+  kind: pytest
+  selectors:
+  - tests/test_kickoff_tree_id.py
+  source_paths:
+  - candidate-partition.yaml
+  - bin/check-candidate-partition
+  - lib/agentic_starter/candidate_boundaries.py
+  - bin/kickoff-tree-id
+  - tests/test_kickoff_tree_id.py
+  covers:
+  - candidate-partition.yaml
+  - bin/check-candidate-partition
+  - lib/agentic_starter/candidate_boundaries.py
+  - bin/kickoff-tree-id
+  - tests/test_kickoff_tree_id.py
+  contract: Candidate identity changes for every material live-tree change and fails
+    on unsafe escapes.
+  risk_class: candidate-custody
+  oracle: Fixture worktrees produce stable identities and intentional mutations change
+    them.
+  admission: Identity mode coverage remains intact in full.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: lessons-ledger
+  kind: pytest
+  selectors:
+  - tests/test_lessons.py
+  source_paths:
+  - bin/lessons
+  - policies/lessons.md
+  - lessons/**
+  - lessons-archived/**
+  - tests/test_lessons.py
+  covers:
+  - bin/lessons
+  - policies/lessons.md
+  - lessons/**
+  - lessons-archived/**
+  - tests/test_lessons.py
+  contract: Process observations stay attributable and only human-ratified lessons
+    graduate.
+  risk_class: methodology-memory
+  oracle: Valid ledgers round-trip and every malformed state fails with a specific
+    error.
+  admission: Ledger governance remains in the complete suite.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: harness-parity
+  kind: pytest
+  selectors:
+  - tests/test_mirror_parity.py
+  source_paths:
+  - bin/check-harness-parity
+  - .claude/agents/**
+  - .codex/agents/**
+  - .claude/skills/**
+  - .agents/skills/**
+  - tests/test_mirror_parity.py
+  - tests/test_check_catalogs.py
+  covers:
+  - bin/check-harness-parity
+  - .claude/agents/**
+  - .codex/agents/**
+  - .claude/skills/**
+  - .agents/skills/**
+  - tests/test_mirror_parity.py
+  - tests/test_check_catalogs.py
+  contract: Supported harnesses expose one methodology without silent surface drift.
+  risk_class: cross-harness
+  oracle: Repository and fixture parity scans report missing, stray, or divergent
+    peers.
+  admission: Parity is enforced by its dedicated policy gate.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: ledger-slugs
+  kind: pytest
+  selectors:
+  - tests/test_new_name.py
+  source_paths:
+  - bin/new-name
+  - tests/test_new_name.py
+  - lessons/**
+  - lessons-archived/**
+  - user-actions/**
+  - user-actions-archived/**
+  covers:
+  - bin/new-name
+  - tests/test_new_name.py
+  - lessons/**
+  - lessons-archived/**
+  - user-actions/**
+  - user-actions-archived/**
+  contract: New ledger slugs are valid and unique across live and archived namespaces.
+  risk_class: ledger-identity
+  oracle: Generated names satisfy shape and collision fixtures across all ledger roots.
+  admission: Slug generation is already a small focused family.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: pre-commit-contract
+  kind: pytest
+  selectors:
+  - tests/test_pre_commit.py
+  source_paths:
+  - .githooks/pre-commit
+  - tests/test_pre_commit.py
+  - bin/test-governance
+  covers:
+  - .githooks/pre-commit
+  - tests/test_pre_commit.py
+  - bin/test-governance
+  contract: Pre-commit runs parity, caller, and proof-estate structure checks without
+    masking failure.
+  risk_class: hook-custody
+  oracle: Stub executables record exact order and a governance refusal reaches Git
+    unchanged.
+  admission: The hook proof runs with the complete hook family.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: research-authority
+  kind: pytest
+  selectors:
+  - tests/test_research_authority.py
+  source_paths:
+  - policies/research-authority.md
+  - kickoff.yaml
+  - bin/kickoff-config
+  - .claude/agents/**
+  - .codex/agents/**
+  - tests/test_research_authority.py
+  covers:
+  - policies/research-authority.md
+  - kickoff.yaml
+  - bin/kickoff-config
+  - .claude/agents/**
+  - .codex/agents/**
+  - tests/test_research_authority.py
+  contract: Research is allow-by-default for installed resources without assuming
+    any one exists.
+  risk_class: external-retrieval
+  oracle: Generated commands and config mutations enforce the declared role authority
+    matrix.
+  admission: Research authority uses its complete cross-surface matrix.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: review-verdict-harvest
+  kind: pytest
+  selectors:
+  - tests/test_review_verdicts.py
+  source_paths:
+  - bin/review-verdicts
+  - tests/test_review_verdicts.py
+  - .claude/skills/sweep-planning/**
+  - .claude/skills/sweep-coding/**
+  covers:
+  - bin/review-verdicts
+  - tests/test_review_verdicts.py
+  - .claude/skills/sweep-planning/**
+  - .claude/skills/sweep-coding/**
+  contract: Longitudinal sweeps receive genuine, scoped, nonduplicated review evidence.
+  risk_class: review-telemetry
+  oracle: Synthetic trace roots expose inclusion, exclusion, deduplication, and filtering
+    behavior.
+  admission: Harvest logic retains its cross-harness fixture set.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shell-syntax
+  kind: pytest
+  selectors:
+  - tests/test_shell_syntax.py
+  source_paths:
+  - bin/check-shell-syntax
+  - bin/**
+  - .githooks/**
+  - .claude/hooks/**
+  - .codex/hooks/**
+  - tests/test_shell_syntax.py
+  covers:
+  - bin/check-shell-syntax
+  - bin/**
+  - .githooks/**
+  - .claude/hooks/**
+  - .codex/hooks/**
+  - tests/test_shell_syntax.py
+  contract: A shell syntax error cannot enter the authoritative gate or hook surface.
+  risk_class: executable-structure
+  oracle: Shell candidates are parsed by their declared interpreter and syntax errors
+    name the file.
+  admission: Shell syntax also runs as a direct policy check.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: test-governance-manager
+  kind: pytest
+  selectors:
+  - tests/test_test_governance.py
+  source_paths:
+  - lib/agentic_starter/test_governance.py
+  - lib/agentic_starter/test_runner.py
+  - bin/test-governance
+  - tests/proof-estate.yaml
+  - tests/test_test_governance.py
+  - reports/test-governance/**
+  - policies/test-suite-governance.md
+  - briefs/test-suite-value-governance.md
+  covers:
+  - lib/agentic_starter/test_governance.py
+  - lib/agentic_starter/test_runner.py
+  - bin/test-governance
+  - tests/proof-estate.yaml
+  - tests/test_test_governance.py
+  - reports/test-governance/**
+  - policies/test-suite-governance.md
+  - briefs/test-suite-value-governance.md
+  contract: Fast feedback exists only when the live local estate and its witness receipts
+    validate.
+  risk_class: proof-governance
+  oracle: Valid fixture estates pass and malformed ownership, runner, baseline, or
+    evidence fails closed.
+  admission: This family is the direct fail-closed witness for every governed selection.
+  nearest_overlap: Atomic-check dispatches lanes but does not validate their proof
+    ownership.
+  tier: vital
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: mutation-survey
+  kind: pytest
+  selectors:
+  - tests/test_mutation.py
+  source_paths:
+  - lib/agentic_starter/mutation.py
+  - bin/mutate
+  - tests/test_mutation.py
+  covers:
+  - lib/agentic_starter/mutation.py
+  - bin/mutate
+  - tests/test_mutation.py
+  contract: The mutation survey reports the faults tests miss, in a copy, and never
+    reports a failed or unfinished survey as a clean one.
+  risk_class: proof-governance
+  oracle: The real mutation tool run over a small fixture repository with one weak
+    and one strong proof.
+  admission: The survey is the only measure of which planted faults the estate misses;
+    its three states and its failure need direct proof.
+  nearest_overlap: The governance manager validates the declaration's shape but never
+    runs a survey.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: toolchain-caller-policy
+  kind: pytest
+  selectors:
+  - tests/test_toolchain_callers.py
+  source_paths:
+  - bin/check-toolchain-callers
+  - bin/**
+  - .githooks/**
+  - .claude/skills/**
+  - policies/**
+  - plan/**
+  - tests/test_toolchain_callers.py
+  covers:
+  - bin/check-toolchain-callers
+  - bin/**
+  - .githooks/**
+  - .claude/skills/**
+  - policies/**
+  - plan/**
+  - tests/test_toolchain_callers.py
+  contract: Dependency-bearing callers cannot silently use an ambient or versioned
+    interpreter.
+  risk_class: runtime-custody
+  oracle: Synthetic caller text distinguishes executable bypasses from allowed descriptions.
+  admission: Caller policy also runs as a direct policy gate.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: toolchain-entrypoints
+  kind: pytest
+  selectors:
+  - tests/test_toolchain_entrypoints.py
+  source_paths:
+  - bin/_python-toolchain
+  - bin/setup
+  - bin/test
+  - bin/python
+  - tests/test_toolchain_entrypoints.py
+  - project/.python-version
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - bin/_python-toolchain
+  - bin/setup
+  - bin/test
+  - bin/python
+  - tests/test_toolchain_entrypoints.py
+  - project/.python-version
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Every dependency-bearing command runs through the repository-selected
+    locked runtime.
+  risk_class: runtime-custody
+  oracle: Stubbed uv calls expose exact cwd, project, runtime, and child arguments.
+  admission: This family proves the runtime contract behaviorally from every supported
+    invocation.
+  nearest_overlap: Toolchain-caller policy scans text but does not execute the entrypoints.
+  tier: vital
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: treatise-governance
+  kind: pytest
+  selectors:
+  - tests/test_treatise.py
+  source_paths:
+  - bin/treatise
+  - policies/treatise.md
+  - briefs/**
+  - tests/test_treatise.py
+  covers:
+  - bin/treatise
+  - policies/treatise.md
+  - briefs/**
+  - tests/test_treatise.py
+  contract: Outward explanations derive from a validated canonical brief and dated
+    editorial record.
+  risk_class: publication-governance
+  oracle: Fixture briefs distinguish valid, missing, malformed, stale, and orphaned
+    editorial state.
+  admission: Publication governance remains in its complete family.
+  nearest_overlap: No other retained family exercises this contract directly; retained
+    for the bounded applicability review.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-changed
+  kind: gate
+  selectors:
+  - changed
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-format
+  kind: gate
+  selectors:
+  - format
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-lint
+  kind: gate
+  selectors:
+  - lint
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-catalogs
+  kind: gate
+  selectors:
+  - policy-catalogs
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-config
+  kind: gate
+  selectors:
+  - policy-config
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-execution-dashboards
+  kind: gate
+  selectors:
+  - policy-execution-dashboards
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-harness-parity
+  kind: gate
+  selectors:
+  - policy-harness-parity
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-hooks-installed
+  kind: gate
+  selectors:
+  - policy-hooks-installed
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-log
+  kind: gate
+  selectors:
+  - policy-log
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The authoritative policy lane refuses historical log rewrites and chronology
+    regressions.
+  risk_class: lifecycle-custody
+  oracle: The named gate remains wired into bin/check and propagates the log validator's
+    exit status.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: The log-control-plane family proves behavior but not authoritative
+    gate composition.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-lessons
+  kind: gate
+  selectors:
+  - policy-lessons
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-shell-syntax
+  kind: gate
+  selectors:
+  - policy-shell-syntax
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-test-governance
+  kind: gate
+  selectors:
+  - policy-test-governance
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-test-time
+  kind: gate
+  selectors:
+  - policy-test-time
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The full gate produces the diagnostic timing report and refuses invalid
+    runtime configuration.
+  risk_class: lifecycle-custody
+  oracle: The named gate command remains present; slow completed tests are diagnostic
+    and missing timing is explicitly unmeasured.
+  admission: Retained as direct lifecycle wiring for runtime reporting, separate from
+    correctness and hang supervision.
+  nearest_overlap: The timing behavioral proof exercises the judgment; this proof
+    uniquely proves the gate runs it.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-toolchain-callers
+  kind: gate
+  selectors:
+  - policy-toolchain-callers
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-treatise
+  kind: gate
+  selectors:
+  - policy-treatise
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-test
+  kind: gate
+  selectors:
+  - test
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: core-success
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-vital
+  kind: gate
+  selectors:
+  - vital
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-githooks-pre-commit-bin-check-harness-parity
+  kind: hook
+  selectors:
+  - hook:.githooks/pre-commit:./bin/check-harness-parity
+  source_paths:
+  - .githooks/pre-commit
+  covers:
+  - .githooks/pre-commit
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-githooks-pre-commit-bin-check-toolchain-callers
+  kind: hook
+  selectors:
+  - hook:.githooks/pre-commit:./bin/check-toolchain-callers
+  source_paths:
+  - .githooks/pre-commit
+  covers:
+  - .githooks/pre-commit
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-githooks-pre-commit-multioperator-staged
+  kind: hook
+  selectors:
+  - hook:.githooks/pre-commit:./bin/multioperator validate --root . --staged
+  source_paths:
+  - .githooks/pre-commit
+  covers:
+  - .githooks/pre-commit
+  contract: Commit hook calls structured staged-byte validation, retaining immutable
+    history and real acceptance inputs.
+  risk_class: lifecycle-custody
+  oracle: Tracked hook command and the executable hook-order proof detect omission;
+    real record family tests reject indexed history and acceptance faults.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: The policy gate checks working bytes; this proof uniquely covers
+    staged custody.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-githooks-pre-commit-bin-test-governance-validate
+  kind: hook
+  selectors:
+  - hook:.githooks/pre-commit:./bin/test-governance validate
+  source_paths:
+  - .githooks/pre-commit
+  covers:
+  - .githooks/pre-commit
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves lifecycle wiring.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-candidate-partition
+  kind: gate
+  selectors:
+  - policy-candidate-partition
+  source_paths:
+  - bin/check
+  covers:
+  - bin/check
+  contract: Every tracked path has an explicit candidate classification and the declaration
+    remains active.
+  risk_class: lifecycle-custody
+  oracle: The live gate or staged hook refuses an absent, invalid, or incomplete declaration.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: Behavioral identity tests prove matching; this proof establishes
+    lifecycle enforcement.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: hook-candidate-partition
+  kind: hook
+  selectors:
+  - hook:.githooks/pre-commit:./bin/check-candidate-partition --staged
+  source_paths:
+  - .githooks/pre-commit
+  covers:
+  - .githooks/pre-commit
+  contract: Every tracked path has an explicit candidate classification and the declaration
+    remains active.
+  risk_class: lifecycle-custody
+  oracle: The live gate or staged hook refuses an absent, invalid, or incomplete declaration.
+  admission: Adopted with the universal control plane it proves; applicability is
+    recorded pending the bounded review.
+  nearest_overlap: Behavioral identity tests prove matching; this proof establishes
+    lifecycle enforcement.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: documentation-boundaries
+  kind: pytest
+  selectors:
+  - tests/test_documentation.py
+  source_paths:
+  - bin/docs
+  - lib/agentic_starter/documentation.py
+  - tests/test_documentation.py
+  - documentation.toml
+  - manual/**
+  - policies/software-documentation.md
+  covers:
+  - bin/docs
+  - lib/agentic_starter/documentation.py
+  - tests/test_documentation.py
+  - documentation.toml
+  - manual/**
+  - policies/software-documentation.md
+  contract: Curated documentation and its deployment stay bound to public input and
+    a validated release candidate.
+  risk_class: publication-custody
+  oracle: Violating source/output/release inputs refuse before publication; exact
+    tools install locally and CI identity is checked.
+  admission: Five bounded in-process scenarios; no network, compilation, persistent
+    server or external API use.
+  nearest_overlap: Existing treatise proofs govern editorial authority; no prior proof
+    exercises a rendered manual or Pages dispatch custody.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-documentation
+  kind: gate
+  selectors:
+  - policy-docs
+  source_paths:
+  - bin/check
+  - bin/docs
+  - documentation.toml
+  - manual/**
+  covers:
+  - bin/check
+  - bin/docs
+  - manual/**
+  contract: The repository gate builds and validates its current public manual.
+  risk_class: publication-drift
+  oracle: A missing local page makes the real documentation command fail with its
+    broken-link diagnostic.
+  admission: One actual renderer build per full gate; fixture tests cannot prove the
+    live manual renders.
+  nearest_overlap: In-process documentation proofs do not render the real source or
+    run the pinned plugin.
+  tier: full
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: multioperator-migration
+  kind: pytest
+  selectors:
+  - tests/test_multioperator.py
+  source_paths:
+  - bin/multioperator
+  - lib/agentic_starter/multioperator.py
+  - lib/agentic_starter/multioperator_transition.py
+  - tests/test_multioperator.py
+  - briefs/multi-operator-collaboration.md
+  - policies/multi-operator-migration.md
+  - policies/phase-status.md
+  - tests/structured_fixtures.py
+  covers:
+  - bin/multioperator
+  - lib/agentic_starter/multioperator.py
+  - lib/agentic_starter/multioperator_transition.py
+  - tests/test_multioperator.py
+  - briefs/multi-operator-collaboration.md
+  - policies/multi-operator-migration.md
+  - policies/phase-status.md
+  - tests/structured_fixtures.py
+  contract: Committed-source transition retains exact history and retires obsolete
+    tools; current maintenance binds immutable chains, coordinated ownership and actual
+    acceptance without fabricating adoption.
+  risk_class: migration-custody
+  oracle: Actual CLI conversion, new records, concurrent writes, staged byte checks
+    and retained acceptance inputs reject falsified history, custody or completion.
+  admission: One committed-tree export and finite local filesystem/Git operations
+    per scenario; no model, network, external lease service or live policy change.
+  nearest_overlap: Shared normalization and actual kickoff acceptance remain separately
+    tested; this family owns conversion and record maintenance, not native instruction
+    loading.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-configuration
+  kind: pytest
+  selectors:
+  - project/tests/test_config.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_config.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_config.py
+  contract: Biblios validates its own Conric section and leaves the drawbridge and
+    vellric sections untouched; a composition without an embedder or with an unknown
+    provider is refused.
+  risk_class: product-contract
+  oracle: A composed file with foreign section content loads into Settings carrying
+    only the embedder; a missing embedder, an unknown provider and a missing section
+    each raise Conric's ConfigError with the named reason.
+  admission: 'First product phase: configuration is the first contract the shelf depends
+    on.'
+  nearest_overlap: No other family loads a composition with foreign sections.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-curation
+  kind: pytest
+  selectors:
+  - project/tests/test_curation.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_curation.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_curation.py
+  contract: 'Every curation operation is one atomic Castle namespace mutation keyed
+    by a stable entry id and answered with a typed Mutation: paths resolve at answer
+    time, duplicate content is reported, a retry with the same operation id returns
+    the original outcome even after the path changed or the entry disappeared, a reused
+    id with another request is a conflict, a directory copy replays its root, an interrupted
+    removal finishes its cleanup on retry, and a relative shelf root still removes
+    index rows.'
+  risk_class: product-contract
+  oracle: 'Over temporary shelves: Mutation kinds, entry ids and revisions compare
+    as documented; DuplicateContentError names the holder; replays carry replayed=True
+    with the original ids and revisions; mismatched reuse raises; Palace file rows
+    and mirrors are gone after remove and after its retry.'
+  admission: First product phase; extended after the advisory code review.
+  nearest_overlap: shelf-reconcile curates too but proves derived layers, not the
+    mutations themselves.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-reconcile
+  kind: pytest
+  selectors:
+  - project/tests/test_reconcile.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_reconcile.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_reconcile.py
+  contract: 'reconcile derives mirrors and the Palace index from the live namespace
+    only: replacement and rename behave as the phase states, unconvertible files are
+    marked and never indexed, identity discipline refuses before any write, interrupted
+    builds recover, and a configured Drawbridge stage''s rendering becomes the mirror.'
+  risk_class: product-contract
+  oracle: 'Over a temporary shelf with the deterministic embedder: the phase scenario''s
+    hits, re-embedding counts and Castle bytes; unconverted labels and empty index
+    rows; UndeclaredEmbedderError and a byte-identical store after a failed probe;
+    rebuild after an identity-less database and completion after an interrupted build;
+    the semantic rendering read back when stages are configured.'
+  admission: 'First product phase: the derived layers are the product.'
+  nearest_overlap: shelf-verify reads the same derived state but only reports disagreement;
+    shelf-search consumes the index.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-verify
+  kind: pytest
+  selectors:
+  - project/tests/test_verify.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_verify.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_verify.py
+  contract: verify reports a tampered mirror, a conversion recorded over replaced
+    bytes, a missing Palace file row and a stamp that disagrees with the declared
+    selector.
+  risk_class: product-contract
+  oracle: Each of the four disagreements planted in a reconciled shelf appears in
+    VerifyReport.problems and ok is False; a clean shelf reports ok.
+  admission: 'First product phase: a verification that can only say good is not a
+    verification.'
+  nearest_overlap: shelf-reconcile asserts verify().ok on healthy shelves only.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-search
+  kind: pytest
+  selectors:
+  - project/tests/test_search.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_search.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_search.py
+  contract: Search hits carry the shelf id, entry id, current path, heading, chunk,
+    scores and rerank status; a chunk naming no live entry is refused; read follows
+    a hit to a page; rerank can be disabled without constructing a reranker and degrades
+    to fused order on failure.
+  risk_class: product-contract
+  oracle: 'Over a reconciled temporary shelf: hit fields match the entry; a deleted
+    entry''s chunk lands in refused and never in hits; read by page selects the named
+    section and refuses an absent one; disabled rerank leaves the reranker uncalled
+    with status disabled and a RerankUnavailableError yields status failed with hits.'
+  admission: 'First product phase: search is the shelf''s purpose.'
+  nearest_overlap: shelf-reconcile searches too but asserts presence and absence,
+    not hit shape or rerank status.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-index-progress
+  kind: pytest
+  selectors:
+  - project/tests/test_progress.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_progress.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_progress.py
+  contract: 'The index is visibly derived state: bytes and listing are readable before
+    any conversion, reconcile reports per-entry progress smallest first and yields
+    between entries, the watermark advances only after a complete step that no other
+    writer interrupted, search answers from the index as it stands and says when it
+    is behind, a replacement is refused until its new chunks are indexed, and readers
+    in another thread see only committed tree views.'
+  risk_class: product-contract
+  oracle: 'Over temporary shelves with the deterministic embedder: status counts and
+    stage rows before and after reconcile; the order of searchable rows and the chunk
+    totals against the embedder''s calls; yielded and failed steps leaving the watermark
+    and resuming without re-embedding; search results on fresh, lagging and bootstrapping
+    stores; stale and vanished chunks refused; a worker thread''s step observed from
+    the test thread with complete counts and a reader blocked behind Castle''s handle
+    lock.'
+  admission: 'Second product phase: the operator''s ruling that the index lags and
+    must say so.'
+  nearest_overlap: shelf-reconcile proves what a complete step produces; shelf-search
+    proves hit fields on a current index; this family proves the step's behaviour
+    in time and the lag it reports.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-stack
+  kind: pytest
+  selectors:
+  - project/tests/test_stack.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_stack.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_stack.py
+  contract: A stack over opened shelves refuses empty, duplicate, undeclared-selector
+    and mixed-identity declarations before any query, admits lagging and unbuilt members
+    and names them in the answer, searches the built stores through Palace with one
+    rerank over the union, attributes every hit to its shelf and current path, refuses
+    dead chunks by shelf and entry, and routes citations by shelf id.
+  risk_class: product-contract
+  oracle: 'Over two or three temporary shelves with the deterministic embedder and
+    reranker: hits from both shelves with correct ids and paths after a rename and
+    exactly one reranker call; MixedIdentityError naming both identities and the odd
+    shelf with no embedder or reranker call; a lagging member named in indexing and
+    its hits appearing once reconciled; a deleted entry''s chunk in refused; resolve,
+    read and download reaching the right shelf and an unknown shelf id refused.'
+  admission: 'Second product phase: federated search is the stack''s purpose.'
+  nearest_overlap: shelf-search proves single-shelf hits; shelf-index-progress proves
+    single-shelf lag; this family proves the union and its attribution.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: shelf-seal
+  kind: pytest
+  selectors:
+  - project/tests/test_seal.py
+  source_paths:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_seal.py
+  covers:
+  - project/biblios/**
+  - project/pyproject.toml
+  - project/tests/test_seal.py
+  contract: A seal refuses before any write unless the shelf is dynamic, identity-checked,
+    built and current; it takes a Castle snapshot, moves the watermark, puts the store
+    on the rollback journal with no sidecars, publishes the manifest and then the
+    record; a failure leaves a usable or repairable shelf; a sealed shelf refuses
+    every write on the original handle and on a reopened one while admitting readers;
+    a copy placed anywhere verifies, searches and serves citations without writing;
+    unseal restores dynamic mode and a moved copy is rebuilt.
+  risk_class: product-contract
+  oracle: 'Over a temporary shelf and copies of it with the deterministic embedder:
+    refusals on an unbuilt store, a lagging index, from inside a running step and
+    on a disagreeing stamp with unchanged bytes; fault injection on the manifest and
+    record publications; sidecars, journal mode, record fields, refused writes through
+    Biblios and Castle, a second reader, tampered digests; search, read, download
+    and a stack over the copy with an unchanged listing; unseal and the rebuild of
+    a moved store.'
+  admission: 'Third product phase: the static artifact is the shelf''s second form.'
+  nearest_overlap: shelf-verify proves the derived layers' integrity on a dynamic
+    shelf; shelf-index-progress proves the lag the seal refuses; this family proves
+    the transition and the artifact.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: aws-qualification-runner
+  kind: pytest
+  selectors:
+  - tests/test_qualify_aws.py
+  source_paths:
+  - qualification/runner.py
+  - qualification/results.py
+  - qualification/lanes.py
+  - qualification/audit.py
+  - qualification/bundle.py
+  - bin/qualify-aws
+  - tests/test_qualify_aws.py
+  covers:
+  - qualification/runner.py
+  - qualification/results.py
+  - qualification/lanes.py
+  - qualification/audit.py
+  - qualification/bundle.py
+  - bin/qualify-aws
+  - tests/test_qualify_aws.py
+  contract: The AWS qualification runner touches the account only behind one typed
+    confirmation per step whose packet names the resources, calls, data and cost;
+    a dry run makes no AWS, model or CDK call; deploy orders the stacks and names
+    role creation; teardown refuses without retained evidence, empties the bucket,
+    destroys in reverse and reads the tag inventory back; the results brief carries
+    no observed identifier; the instance command names every requested lane and the
+    run's own prefixes. The Bedrock lane, the runner's judge and the results brief
+    share one judgment of Palace's audit records (a complete audit holds a successful
+    retention check and an embedding request), and a passed Bedrock lane without its
+    retained, complete audit artifact is a failed qualification in the judge and a
+    stated absence in the brief.
+  risk_class: operator-boundary
+  oracle: A recording transport observes every call while the runner is driven in-process
+    with injected confirmations; a journal and a rendered brief are inspected for
+    identifiers.
+  admission: 'Fourth product phase: the qualification harness is the first code that
+    can reach an account.'
+  nearest_overlap: The infra gate proves synthesized templates; this family proves
+    the runner's boundaries around them.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: gate-policy-infra
+  kind: gate
+  selectors:
+  - policy-infra
+  source_paths:
+  - bin/check
+  - bin/check-infra
+  - infra/check_qualification.py
+  covers:
+  - bin/check
+  - bin/check-infra
+  - infra/check_qualification.py
+  contract: The structural proof remains executable in the authoritative repository
+    lifecycle.
+  risk_class: lifecycle-custody
+  oracle: The named gate or hook command remains present and fails the lifecycle step
+    on error.
+  admission: Retained as direct lifecycle wiring rather than a substitute for behavioral
+    proof.
+  nearest_overlap: Behavioral families prove implementations; this proof uniquely
+    proves the offline synthesis check is wired into the full gate.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: infra-offline-check
+  kind: pytest
+  selectors:
+  - tests/test_check_infra.py
+  source_paths:
+  - bin/check-infra
+  - infra/check_qualification.py
+  - infra/qualification_stack.py
+  - infra/example_stack.py
+  - infra/app.py
+  - tests/test_check_infra.py
+  covers:
+  - bin/check-infra
+  - infra/check_qualification.py
+  - infra/qualification_stack.py
+  - infra/example_stack.py
+  - infra/app.py
+  - tests/test_check_infra.py
+  contract: The infra lane runs the offline synthesis check with credentials withheld
+    and the pinned Node, passes only when every safety property holds and every planted
+    mutant and the planted lookup are refused, and refuses with no fallback when the
+    pinned Node cannot be found.
+  risk_class: lifecycle-custody
+  oracle: The lane's exit status and pass line through a subprocess, once with the
+    real toolchain and once with a bad BIBLIOS_NODE_BIN.
+  admission: 'Fourth product phase: the first gate lane that depends on a non-Python
+    toolchain.'
+  nearest_overlap: gate-policy-infra proves the lane is wired into ./bin/check; this
+    family proves what the lane does.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: cli-thin-plane
+  kind: pytest
+  selectors:
+  - project/tests/test_cli.py
+  source_paths:
+  - project/biblios/cli.py
+  - project/biblios/__main__.py
+  - project/pyproject.toml
+  - project/tests/test_cli.py
+  covers:
+  - project/biblios/cli.py
+  - project/biblios/__main__.py
+  - project/pyproject.toml
+  - project/uv.lock
+  - project/tests/test_cli.py
+  contract: Shell parsing preserves settled library operations, complete output, explicit
+    configuration and resource lifetime; console/module wiring reaches that interface.
+  risk_class: public-contract
+  oracle: Public typed result data and exact input bytes/call arguments, independent
+    persisted shelf reads, stderr/stdout capture and actual console/module child results.
+  admission: Finite local argument cases, temporary shelves and deterministic test
+    providers; no production test seam, network or model calls. Two help children
+    have 20-second limits. Observed assertion-specific faults are recorded before
+    admission.
+  nearest_overlap: Existing library suites prove domain behavior but never parse CLI
+    arguments, present CLI streams or execute the installed/module entry points.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []

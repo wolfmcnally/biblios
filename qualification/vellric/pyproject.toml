@@ -1,0 +1,13 @@
+[project]
+name = "biblios-qualification-vellric"
+version = "0"
+description = "The Vellric CLI the ingestion lane runs on the instance, installed offline from the bundle's staged cache; the release pinned here (0.2.5) emits the vellric.document/1.1 envelope the pinned Drawbridge 0.3.0 expects"
+requires-python = ">=3.12"
+dependencies = ["vellric"]
+
+[tool.uv]
+package = false
+python-preference = "only-managed"
+
+[tool.uv.sources]
+vellric = { git = "https://github.com/wolfmcnally/vellric.git", rev = "eb36f64d96417400f5ba508801ef32f70bd61908", subdirectory = "project" }

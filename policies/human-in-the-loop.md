@@ -1,0 +1,117 @@
+# Policy: Human In The Loop
+
+Authority mode follows [four-canonical-agents.md](four-canonical-agents.md). Product primary mode uses independent advice and primary acceptance; delegated product mode retains approval verdicts and bounded revision loops. References below to reviewer assent or mandatory re-review govern delegated work only. Required objective gates and truthful evidence apply in both modes. All methodology work, including teach/learn, follows [review-lanes.md](review-lanes.md): one-shot by the primary, no delegated production or review, and commit/fast-forward-push authority after required checks.
+
+The methodology assumes a human's judgment governs the work. This policy says exactly where that judgment binds — and, because it does not bind everywhere, where the orchestrator proceeds without asking.
+
+The human gate lives at the **seam**: the phase boundary, where the human reads the END block, runs the demo protocol, and decides whether the work is right. It does not live on the commit. A clerical Git handoff is not judgment; it is the place judgment used to be parked.
+
+## The acceptance boundary
+
+Every acceptance criterion is one of two kinds, and the kind decides who closes it.
+
+**Objective criteria close autonomously.** A criterion is objective when all four hold:
+
+- It is **executable** — a shell command, a named test, an analyzer output — with a success condition defined before it was run.
+- It satisfies the applicable **review contract**: product advice and primary dispositions, delegated approval, or primary self-inspection for methodology work (`four-canonical-agents.md`, `review-lanes.md`).
+- A **complete gate** proved it (`build-gates.md`), against the exact candidate accepted by the applicable authority (`orchestration-evidence.md`).
+- Its result is **recorded** and candidate-bound, not asserted.
+
+**Subjective and owner-only criteria always park.** No amount of green closes them:
+
+- Named manual checks (`acceptance-empirical.md` § When acceptance can't be automated).
+- Perceptual, aesthetic, UX, and readability judgment.
+- Product decisions — whether this is the right feature, not whether it works.
+- Custody: credentials, billing, third-party accounts, anything behind a console, dashboard, or GUI the orchestrator cannot reach.
+- An unrun `User Demo:` protocol (`user-demo-protocols.md`). The demo is the human's acceptance surface; the orchestrator surfaces it and never answers it.
+
+**Delivery is not acceptance, and it does not wait on acceptance.** A phase's commit is bookkeeping that follows the handoff gate; outside phases, a local commit follows the checks its change could break, and the full gate runs once before the push (`build-gates.md` § Targeted tests for local commits). Either way the commit changes no tracked content and settles no judgment. A phase whose gates are green is delivered even though its parked criteria are still open — that is the normal state at a seam, not an anomaly. Being committed does not mean the phase was liked. If the user judges it wrong afterward, the correction is an ordinary follow-up commit; nothing about delivery makes a rejection harder, because the destructive git surface stayed with the user the whole time.
+
+**What blocks a phase is an unresolved gate, not an open judgment.** A failed build gate, an unmet executable criterion, or an open `DECIDE` ripple stops the phase from closing at all — so nothing is delivered. A parked manual, perceptual, product, or custody criterion is not a gate: it is judgment the user has not yet exercised, and the phase closes and delivers around it. Conflating the two is what made the old posture expensive: it charged the user's attention for a `git commit` in order to collect it for a demo.
+
+## What the orchestrator does
+
+- **Delivers gate-proved work.** After the phase closes with every gate green, `kickoff` re-reads `git status` and the complete final diff, stages **only the phase's explicit paths**, verifies the staged candidate and resulting file set under [`commit-staging.md`](commit-staging.md), creates an ordinary factual commit with no agent credit and never `--no-verify`, and makes a non-force push only when the branch has exactly one unambiguous configured upstream and the update is a fast-forward. It then fetches and proves that `HEAD`, the tracking ref, and the remote tip agree and the tree is clean. This authority is **orchestrator-only**: delegated roles never commit or push.
+- **Never advances past unresolved gates.** A failed build gate, an unmet empirical criterion, or an unresolved `DECIDE` ripple stops the phase. Convergence-bounded revision loops escalate to the human rather than spinning.
+- **Never claims subjective acceptance.** It surfaces manual criteria and demo protocols verbatim; it does not say "I listened and it sounds great" — it cannot.
+- **Never adds work the plan doesn't authorize.** Drift is contained to the plan that was actually approved. Anything extra is reported as a Note.
+- **Never silently reopens closed phases.** A `✅` phase keeps its status and historical blocks. For high-risk or large/cross-cutting corrections, recommend an inserted phase, normally a current-phase sub-phase, under [`review-lanes.md`](review-lanes.md). Honor the operator's ruling: a chosen phase/sub-phase has its own formal planning/reviews and START/END records; a chosen inter-phase implementation has no formal review and appends an `END (correction)` record. New consequential scope needs explicit authorization; route choice never waives validation/tests, safety/permissions or original history.
+- **Never modifies `policies/` or top-level `AGENTS.md` without explicit instruction.** Those are the rules of the road; the orchestrator and the four canonical agents serve them, they do not amend them.
+
+## What parks delivery
+
+Any of these stops the commit or the push, is reported truthfully, and is never worked around:
+
+- An **unexpected path** in `git status`, or a shared file whose hunks cannot be attributed safely — this checkout may be shared with a concurrent session, so `git add -A` and `git add .` are forbidden outright. The complete staging rule is [`commit-staging.md`](commit-staging.md).
+- A **hook refusal** whose cause or safe correction is unresolved, or whose correction would exceed existing authorization. Never retried around, never bypassed. A diagnosed, agent-owned refusal is finished under § Correcting a diagnosed hook refusal below.
+- A **missing or ambiguous upstream**, a **rejected push**, **divergence**, or **residual dirt** after the push.
+
+An open parked criterion is **not** on that list. It does not park delivery; it stays open for the user after the phase is delivered, and the END block records it as such.
+
+None of those authorizes the orchestrator to select a remote, create an upstream, force, tag, reconcile history, or bypass a hook. Those are destructive or custody-bearing Git boundaries and they belong to the human, always.
+
+## Delivery resource disposition
+
+Operator-ratified 2026-10-28. Delivery completion includes disposing of temporary worktrees, temporary branches and generated outputs created for that scope. Inventory them explicitly, even when none exist. Each is **retired**, **retained for a named current purpose**, or **blocked with an exact reason**. Source delivery may succeed while cleanup is blocked; report both states. Dirty flags alone neither prove unique work nor justify indefinite retention, and age alone never authorizes a purge.
+
+Before routine retirement, verify integration into the intended main repository/branch, obtain current released ownership, await terminal commands/reviewers and read back actual state. Reconcile dirty paths and unique commits against the integrated result, not just a clean/dirty flag. Preserve required unique evidence in its canonical durable home and verify its bytes there before removing its temporary container. Do not create redundant archives when the required bytes already exist. Preserve immutable tools, qualifying preimages, failed/incomplete histories and valid rejected records required by policy. Uncertain custody, active work, unmerged unique history, forced deletion or irrecoverable loss blocks retirement.
+
+Incrementally updated build directories are explicitly allowed to remain. Retain useful dependency caches and environments with a named current purpose; do not purge them or force rebuilds just to satisfy cleanup. A retain reason names what uses the resource now; a blocker names the missing fact, owner decision or safe boundary and next action.
+
+The orchestrator may perform scope-owned routine completion cleanup under the authorized delivery scope: ordinary nonforced worktree removal and `git branch -d` for a verified integrated temporary branch, after the checks above. Never use `--force`, `-D`, broad recursive deletion or `git clean` as a substitute for resolving unique content or ownership. Remove only enumerated disposable generated outputs, through their existing safe cleanup command or exact owned paths. Platform restrictions, custom action approvals and grants still bind; this authority grants none. Tags, history rewriting, remote changes and all other destructive Git actions remain human-owned. A nonforced command refusal is evidence to diagnose, not permission to force it.
+
+Record completion privately in durable ignored storage or outside the reviewable tree. Use the existing evidence manager after the actual cleanup/readback:
+
+```sh
+./bin/kickoff-evidence verify-completion --repository "$REPOSITORY" --record "$COMPLETION_RECORD"
+```
+
+The JSON record has exactly `scope` (nonempty text), `inventory_complete` (literal true, the owning writer's explicit inventory attestation), and `resources` (a list, possibly empty). Each resource has exactly `kind` (`worktree`, `branch`, `generated-output`), `target` (absolute path or local branch name), `disposition` (`retired`, `retained`, `blocked`), `reason` (named current purpose or exact retirement/blocker reason), `required_evidence` (list of canonical retained-byte references, explicitly empty only when no required evidence belongs to it), and `retirement` (null unless retired).
+
+A retired resource's `retirement` has exactly `integration`, `released_ownership` and `terminal` (references to actual integration, current ownership-release and terminal-command evidence), plus `tip` and `integrated_into` (exact original/integrated commit identities for a branch; null for other kinds). Every evidence reference is an object with absolute `path` and `sha256`; it points to the existing canonical bytes, not a new redundant copy. The checker verifies retained bytes, branch ancestry and actual target absence/registration for retirement, and target presence for retention; a blocked disposition returns exit 2 with `complete: false`. Query errors refuse rather than becoming absence. Its stdout binds the record digest and actual result; retain that output with the record.
+
+This is read-only validation, not a deletion service, process inventory, authentication mechanism or proof that the writer enumerated every resource or interpreted its evidence correctly. The owning orchestrator must inspect the factual evidence and current custody before each action. Preparing a record is not executing cleanup; a queued action or message is not terminal/readback evidence. Post-delivery records never rewrite accepted phase evidence or require a fabricated new run. If a tracked completion summary is wanted, write it before the handoff gate and keep subsequent actual outcomes in the private record and user report.
+
+## Correcting a diagnosed hook refusal
+
+When a hook rejects a commit, read its complete diagnostic and name the failed requirement before deciding whether to stop. If the cause is understood, the defect is in the agent's own work, and the correction is safe and within the authorization already granted, correct it and finish ordinary delivery without asking again. A known formatting or validation mistake is work to finish, not by itself a decision for the user.
+
+Preserve the rejection as evidence. Make the smallest attributable correction, leave other writers' work and committed history untouched, stage the corrected paths, and rerun the rejecting check against the staged content where the check supports it. Renew every required check the correction could break, then retry the ordinary commit with all hooks enabled; the full gate still runs on the exact tree before any push. Run a staged hook requirement directly before paying for expensive qualification when it can be run directly.
+
+This authorizes correction, never circumvention. Do not disable, weaken or bypass a hook, conceal its findings, manufacture a passing result, or retry unchanged input hoping for a different outcome. If the cause, the ownership, the remedy, or the authority stays uncertain — or the same refusal recurs without a newly justified correction — park and report the unresolved condition. Permission, custody, remote selection and the destructive Git boundaries are unchanged.
+
+## What the human does
+
+- **Judges the phase at the seam.** Reads the END block, runs the `User Demo:` protocol, audits the diff and artifacts, and either accepts, asks for revisions, or rejects the phase wholesale.
+- **Owns the parked criteria.** Nothing closes them but the human.
+- **Authors and amends briefs.** Briefs document the human's intent. Agents propose in their reports; the human is the editor of record.
+- **Authors and amends policies.** Agents propose policies; humans approve them.
+- **Owns the destructive and custody-bearing Git surface** — force, history rewrite, tags, remotes and branch deletion outside the narrowly authorized nonforced routine completion above.
+- **Decides when to break a phase, merge phases, or abandon a phase.** Methodology step 11 ("stay agile") belongs to the human.
+
+## Why this is the trade
+
+The methodology's value proposition is that the human's judgment is in the loop *cheaply*. Each phase is small enough to review fast; each END block is structured enough to be grep-able. Spending that attention on a `git commit` the human has no basis to refuse — the gate is green, the review is independent, the evidence is candidate-bound — buys nothing and costs the reviewer's attention at exactly the moment the demo needs it.
+
+So the attention moves rather than disappearing. This is not unattended code generation: every phase still terminates at a seam where a human decides whether the work was right, and the parked set above is deliberately large. A project that wants no human judgment at all wants a different methodology; this one is wrong for that.
+
+## "Authorization stands for the scope specified"
+
+When the human approves a phase, the approval is for *that phase*. The orchestrator does not extrapolate ("the human approved Phase 2.3, so they probably want 2.4 as well") — it closes, delivers, and stops. The next phase requires the next `kickoff` invocation.
+
+Similarly, when the human asks `kickoff` to "run all the remaining phases," that is a one-shot escalation, not a permanent policy change. The next session starts back at single-phase orchestration.
+
+## When the human is away
+
+Gate-proved work continues to its seam and delivers; that is the point of the boundary above. Parked criteria queue for the human's return, and the orchestrator does not interpret silence as approval, does not downgrade a subjective criterion to an objective one, and does not run a demo on the human's behalf. A phase closes `✅` on its gates; the queued judgment is recorded, not converted. What stops at `🚧` with a pause reason is a phase whose *gates* did not close.
+
+## Restriction clause
+
+The human may restrict delivery for a named scope: "don't push this one," "keep Phase 3 local," "hand me the diff for this run." Restrictions are:
+
+- **Explicit.** Stated in the current session, not inferred.
+- **Scoped.** They apply to a named phase or a named action.
+- **Logged.** The orchestrator records the restriction in the END block ("Delivery: local-only per user").
+- **One-shot.** They do not amend the policy. The next phase reverts to the default unless the human restricts again.
+
+A restriction narrows delivery only. It never relaxes a gate, and it never closes a parked criterion.

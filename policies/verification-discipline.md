@@ -1,0 +1,105 @@
+# Policy: Verification Discipline
+
+Authority mode follows [four-canonical-agents.md](four-canonical-agents.md). Product primary mode uses independent advice and primary acceptance; delegated product mode retains approval verdicts and bounded revision loops. References below to reviewer assent or mandatory re-review govern delegated work only. Required objective gates and truthful evidence apply in both modes. All methodology work, including teach/learn, follows [review-lanes.md](review-lanes.md): one-shot by the primary, no delegated production or review, and commit/fast-forward-push authority after required checks.
+
+Verification must inspect the property that determines the answer, not a convenient stand-in. Every review, audit, and formal finding follows these rules.
+
+## State the blind spot
+
+No finite verification proves universal absence. A clean report names what was actually inspected and any material surface the instrument could not see. Do not turn unavailable evidence, an empty query, or an unsupported format into "none found."
+
+## Both silent directions
+
+A check has two silent directions, and both must be closed. One that can only say *good* turns an absent resource or a failed query into reassurance. One that can only say *found* — or that reports success after examining nothing — is the mirror image: a process search whose pattern matches its own command line, a collision count that counts unrelated rows, a comparison that exits zero reporting "0 needing a reason" because every input failed to resolve and unresolved inputs were never counted against it. Every check states what it examined, and fails when that is nothing. The false-green catalogue is in [`acceptance-empirical.md`](acceptance-empirical.md) § "A check must be able to fail"; this is its other half.
+
+Motivating incidents, cited per the doctrine's growth rule (donor project, three occurrences): an orphan-process check run after a stopped dispatch, a slug-collision count, and a mirror-parity tool that reported agreement over inputs it had never resolved.
+
+## Give a refusing command its own block
+
+A command that can refuse is run alone, and its refusal is read before the next command starts. A compound block continues past a failed member, so the refusal is never read and every later command runs against the state the failed one was supposed to establish.
+
+Two places attract the chained block, and neither is reviewed the way new work is. **Repair**: the mistake is visible, the whole fix is in view, and writing it as one block is the natural expression of undoing it properly. **Delivery**: stage, commit and push feel like a single motion. In a donor project the repair case produced a permanently uncertifiable record — a refusing cancel was followed by two commands that ran anyway, against a span that was still open — and the delivery case pushed a commit whose message described an entire sweep after its staging step had refused and carried only part of it. A repair is new work and takes the discipline of new work.
+
+## A grep lead is not a finding
+
+Search output identifies candidates for inspection. It becomes evidence only after the matching material is read in context and the asserted behavior is confirmed. Counts of matches are counts of a text pattern, not counts of the underlying defect.
+
+Never key a detector solely on a token the subject itself legitimately emits. If the rule under review discusses `TODO`, a grep for `TODO` will select the rule along with unfinished code. If a safety document discusses a prohibited term, matching the term does not establish the prohibited act.
+
+## A name you did not read is not a name
+
+An identifier that follows the naming conventions of a real one is evidence of nothing. Convention-consistency is the mechanism that generates a plausible wrong name, not a defense against it: the model that infers `--recursive` from every other CLI it has seen is using exactly the machinery that would have produced the flag had it existed.
+
+Before citing any function, method, class, flag, environment variable, configuration key, endpoint, package, schema field, or command in code, a plan, a brief, a report, or a message, either read it from the authority that defines it — the source file, `--help`, the schema, the documentation page — or mark it unverified and say which. "I inferred this from naming conventions" is a complete and acceptable answer; presenting it as read is not.
+
+The check is cheap and the failure is not. One grep, one `--help`, one open documentation tab settles it, while an unread name reaches a reviewer wearing the same confidence as a verified one and is indistinguishable until it runs. Reach for this hardest exactly where the surrounding work looks most finished: a fluent, correctly-structured, idiomatically-named artifact is where a fabricated reference is least visible.
+
+Two corollaries:
+
+- **The authority is the definition, not another mention.** A name recovered from your own earlier summary, a sibling file's usage, or a plausible neighbor's docs is still unread. Read where it is defined.
+- **Absence of a match is a finding, not a formatting problem.** When the grep comes back empty or `--help` does not list the flag, that is the answer. Do not widen the pattern until something matches.
+
+## Never reason over output you truncated yourself
+
+A view you narrowed is not the thing you narrowed it from. When output is passed through `head`, `tail`, `sed -n`, a line cap, or any other cut, the cut is part of the instrument, and a conclusion drawn from the remainder is scoped to the remainder. State the cut in the same breath as the conclusion, and re-read the output whole before any claim that depends on what might have been outside it.
+
+This is distinct from the pipe-status defect in [`acceptance-empirical.md`](acceptance-empirical.md) § "A check must be able to fail". There the exit status is lost and the command's own verdict disappears. Here the status is fine and the *content* is missing, so nothing about the run looks wrong — which is why the same reader can commit it twice.
+
+Motivating incidents, cited per the doctrine's growth rule (donor project, 2026-08-16 and 2026-08-20): a field read as whole after the reader's own `sed` cut it, with the cut falling exactly where two candidates diverge; a gate battery piped through `tail -6`, removing the gate's own verdict from what the reader then reasoned over; and four days later a process listing cut by the reader's own `head -5`, from which the orchestrator concluded that all surviving processes were the operator's editor and no cleanup was needed — two of its own probe processes had been running the whole time. The third was committed by a reader who had cited the first earlier that same day, which is the argument for stating this at its class rather than at any one command.
+
+## Name the repository you are asking about
+
+Every verification-grade repository command names its target explicitly — `git -C <repo-path> …` — regardless of where the shell believes it is. The same applies to any tool whose executable path and target repository are independent quantities: set or verify its working directory explicitly rather than inheriting one.
+
+The reason is the failure mode, not tidiness. Almost every directory of interest on a working machine sits inside *some* repository, so a query run from the wrong place does not error — it returns a well-formed, plausible answer about a different tree. That answer survives review, reads as evidence, and points every downstream conclusion at the wrong repository. A command that fails loudly is strictly safer than one that succeeds against the wrong subject.
+
+Four sightings in a donor project, differing in tool and subject: a history query that read a different repository twice in one night after an earlier directory change in the same shell; a probe that ran against the recipient's object database instead of the named source, making an existing commit appear absent; two probes that inherited a run-artifact directory and reported not-a-repository; and a manager invocation whose absolute executable path was correct while the repository it measured was not, yielding a plausible identity for the wrong tree.
+
+This is the same species as § Never reason over output you truncated yourself: in both, the instrument answers confidently about something other than the subject, and the reader cannot tell from the answer. There the reader removed part of the evidence; here the reader pointed the instrument somewhere else.
+
+## Blacklists do not prove a closed world
+
+A denylist can establish that named bad cases were absent. It cannot establish that no other bad case exists unless the domain is demonstrably closed and the list is complete by construction. State the narrower claim, then inspect the authoritative inventory when a closed-world claim is required.
+
+## Test proxies for sign inversion
+
+Every filter, score, heuristic, bucket, and detector measures a proxy. Name the proxy, characterize an innocent item that triggers it, and ask whether it can invert the sign: systematically surface the best or safest material as the worst while gaining confidence from more evidence.
+
+The cheap audit is to strip the selected items and read every justification as a bare column. Independent findings have independent reasons. Synonymous reasons, "same as above," or reasons that only restate the bucket indicate that the classifier is doing the judging instead of the evidence.
+
+When inversion is possible, the instrument is not merely noisy. It is unsafe for destructive or blocking decisions until tested against known-positive and known-negative fixtures that demonstrate the intended direction.
+
+## Material counts are reproducible
+
+Any material count in a plan review, code review, formal report, or finding includes the exact command or deterministic procedure that produced it. A relay either re-runs that procedure or attributes the number plainly as unverified. Do not launder an earlier summary into fresh evidence.
+
+## A snapshot nothing regenerates is a dated observation
+
+A committed report may be cited as evidence of the current state only when a gate regenerates it or compares it with what it describes. Otherwise it is a dated observation: it states its date and the command that regenerates it, and a reader who needs the current figure runs that command. A snapshot that nothing regenerates and nothing reads is deleted, not kept.
+
+The failure is quiet because a stale snapshot and a fresh one look identical until the day they disagree, and the reader most likely to rely on one is the reader who cannot run the toolchain. *(Graduated from `indefinable-numbat`, 3 occurrences across two reports — `lessons-archived/indefinable-numbat.md`. A committed inventory used to check published counts that no gate regenerated; a recall report cited as current between measurements; and the same inventory found a week stale, recording 85 test families against a live 95.)*
+
+## Sweep every embodiment of a changed contract
+
+Changing a shared contract is not complete when the contract's own file and its own test file are updated. The places that embody a contract are **independent inventories** that no single obvious search unifies: a tool's behavioral tests, a different tool's suite that initializes the contract as a fixture, a gate's stub-executable list, and that same gate's expected call-log assertions can each hold their own copy.
+
+Two moves carry this risk, and they fail in opposite directions:
+
+- **Making a member required** — a new mandatory flag, a required schema field, a new entry in a gate's preflight list. Every call site that exercises the contract breaks, and the failure is loud: the authoritative gate catches it.
+- **Relaxing an enforcement for one mode** — a lane that demotes a required measurement, a documented exemption, a compatibility window. The relaxation is itself a contract member and must reach every site that enforces the underlying check. A relaxation implemented at N−1 of N sites **reads as implemented everywhere**, because the ordinary mode exercises all sites identically and only the demoted mode's rare path reaches the unguarded one.
+
+The discipline is the same for both: grep the contract's **distinctive tokens** — the command name, a neighboring flag, the executable list, the check's own name — across the whole tree rather than the contract's own file or the policy's name, and treat every hit file as an independent inventory to update in the same change.
+
+The gate catching a miss is the backstop working as designed, but each round-trip costs a full gate run and the sweep is cheap by comparison. The cost is concrete: adding `bin/treatise` to `bin/check`'s required-executable preflight and policy lane broke fourteen `test_check.py` cases across four independent inventories **inside one file** — in a session where the same lesson had been re-filed hours earlier.
+
+Apply the changed-contract sweep before a plan's file list is finalized. Search for the old literal as well as the new name: a fixture can encode the old value without mentioning the owning policy. Follow actual dependent contracts, inspect every relevant match, and repeat the affected search after a requirement changes in review. Use the plan's existing File Changes and Intentionally unchanged neighbors sections; the obligation is complete work, not a separate inventory report.
+
+## Govern the proof estate, not a test-count proxy
+
+A file count, test-name count, duration, age, or coverage percentage is a proxy for proof value. Name that proxy and test its false positives before using it: it can invert the sign by identifying a slow or overlapping proof as waste when that proof is the only red witness for a distinct contract or produces an artifact another proof consumes.
+
+When a repository carries a proof-estate manifest, use its deterministic inventory to account for every collapsed family, expanded executable leaf, and gate/hook proof. Initial adoption freezes that inventory and preserves completed resets. New and modified tests follow current admission and authoring requirements; existing suites are reviewed in bounded batches for a concrete reason, with pending judgments explicit. Trace test-to-test dependencies and producer-to-consumer proof flow. A replacement must retain the contract, oracle, red witness, downstream artifacts, and direct critical-risk proof. Hidden or deselected code is still present, and a changed denominator is not evidence of shrinkage. See [`test-suite-governance.md`](test-suite-governance.md).
+
+## Relationship to acceptance
+
+[`acceptance-empirical.md`](acceptance-empirical.md) defines what makes a gate capable of failing and how to avoid vacuous green results. This policy governs the evidentiary step before and around those gates: inspect actual matches, state coverage limits, validate detector direction, and make counts reproducible.

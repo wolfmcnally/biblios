@@ -1,0 +1,66 @@
+[project]
+name = "biblios"
+version = "0.1.0"
+description = "Standalone, portable knowledge bases (shelves) that can be searched alone or federated in a stack, built from Drawbridge, Castle and Palace."
+requires-python = ">=3.12,<3.14"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+readme = "README.md"
+authors = [{ name = "Wolf McNally" }]
+dependencies = [
+    "palace @ git+https://github.com/wolfmcnally/palace.git@de950db73b7498084fe09b54b447bce9482c87bb",
+    "castle @ git+https://github.com/wolfmcnally/castle.git@9351299b11f0a0272a08ee406a768d591ed847c2#subdirectory=project",
+    "drawbridge @ git+https://github.com/wolfmcnally/drawbridge.git@359790cad3f23c2df7281e87004e51369fb9fba4",
+    "conric @ git+https://github.com/wolfmcnally/conric.git@ed9286297e92b8c049f70eb15a3b5556ed107ff0",
+]
+
+[project.scripts]
+biblios = "biblios.cli:main"
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["biblios"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/biblios", "/tests", "/examples", "/pyproject.toml", "/uv.lock",
+    "/.python-version", "/.gitignore", "/README.md", "/LICENSE", "/NOTICE", "/RELEASE.md",
+]
+
+[dependency-groups]
+dev = [
+    "pyyaml>=6.0,<7",
+    # pytest 9.2 breaks pytest-xdist 3.8.0 loadgroup scheduling (xdist_group tests land on
+    # different workers); keep pytest below 9.2 until a released xdist restores grouping.
+    "pytest>=8.0,<9.2",
+    "ruff>=0.6",
+    "cosmic-ray>=8.7,<9",
+    "pytest-xdist>=3.8,<4",
+]
+
+[tool.uv.sources]
+palace = { git = "https://github.com/wolfmcnally/palace.git", tag = "v0.3.0" }
+castle = { git = "https://github.com/wolfmcnally/castle.git", tag = "v0.3.0", subdirectory = "project" }
+drawbridge = { git = "https://github.com/wolfmcnally/drawbridge.git", rev = "359790cad3f23c2df7281e87004e51369fb9fba4" }
+conric = { git = "https://github.com/wolfmcnally/conric.git", rev = "ed9286297e92b8c049f70eb15a3b5556ed107ff0" }
+
+[tool.uv]
+required-version = ">=0.9.26"
+python-preference = "only-managed"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

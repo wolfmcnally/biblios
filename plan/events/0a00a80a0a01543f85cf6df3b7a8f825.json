@@ -1,0 +1,10 @@
+{
+  "id": "0a00a80a0a01543f85cf6df3b7a8f825",
+  "phase": "adapter-consumer-adoption",
+  "previous": null,
+  "from": null,
+  "state": "not-started",
+  "owner": null,
+  "writer": "public-baseline",
+  "reason": "Unstarted future roadmap; no historical acceptance or selected successor is claimed"
+}

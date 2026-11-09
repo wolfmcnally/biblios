@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+entrypoint_path="${BASH_SOURCE[0]}"
+while [[ -L "$entrypoint_path" ]]; do
+  entrypoint_dir="$(cd "$(dirname "$entrypoint_path")" && pwd)"
+  entrypoint_path="$(readlink "$entrypoint_path")"
+  [[ "$entrypoint_path" == /* ]] || entrypoint_path="$entrypoint_dir/$entrypoint_path"
+done
+repo_root="$(cd "$(dirname "$entrypoint_path")/.." && pwd)"
+cd "$repo_root"
+exec "$repo_root/bin/python" "$repo_root/lib/agentic_starter/documentation.py" "$@"

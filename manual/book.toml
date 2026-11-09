@@ -1,0 +1,28 @@
+[book]
+title = "Biblios Manual"
+authors = []
+description = "Create, curate, search and ship Biblios shelves, alone or federated in a stack."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../.kickoff/manual"
+create-missing = false
+
+[preprocessor.admonish]
+command = "mdbook-admonish"
+assets_version = "3.0.3" # do not edit: managed by `mdbook-admonish install`
+on_failure = "bail"
+
+[output.html]
+site-url = "/biblios/"
+additional-css = ["mdbook-admonish.css"]
+
+[output.html.playground]
+runnable = false
+
+[output.html.search]
+enable = true
+
+[output.html.print]
+enable = true

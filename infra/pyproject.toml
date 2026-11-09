@@ -1,0 +1,17 @@
+[project]
+name = "biblios-infra"
+version = "0.0.0"
+description = "CDK app for Biblios's disposable AWS qualification environment; synthesis only, never a deploy by itself."
+requires-python = ">=3.12"
+dependencies = [
+    "aws-cdk-lib>=2.275,<3",
+    "constructs>=10,<11",
+    "boto3>=1.40,<2",
+    "pyyaml>=6.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<9.2"]
+
+[tool.uv]
+python-preference = "only-managed"
