@@ -38,7 +38,8 @@ def main() -> None:
         domain = Path(directory)
         config = domain / "settings.yaml"
         config.write_text(
-            "palace:\n  embedding:\n    provider: ollama\ndrawbridge: {}\nvellric: {}\n"
+            "palace:\n  embedding:\n    provider: ollama\n"
+            "biblios:\n  max_file_bytes: 104857600\ndrawbridge: {}\nvellric: {}\n"
         )
         settings = load_settings([config], domain)
         root = domain / "shelf"
@@ -71,8 +72,8 @@ def main() -> None:
                         "2026-11-09T00:00:00+00:00",
                     ),
                 )
-                stored = bound.curate(request)
-                replay = bound.curate(request)
+                stored = bound.curate(request, settings=settings)
+                replay = bound.curate(request, settings=settings)
                 entry_id = stored.mutation.affected_entry_ids[0]
                 print("Stored:", bound.download(entry_id).decode())
                 print("Exact replay:", replay.replayed)

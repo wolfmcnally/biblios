@@ -12,7 +12,7 @@ Keep mounts and ancestor directories stable until close. Read-only access is ava
 
 Use typed `CurationRequest` actions with a caller UUIDv4 and expected revision. The coordinator serializes mutations and refuses new stale work before content staging. A completed exact retry returns its original result; changing the request under the same ID refuses. Imports reserve a complete creation-only tree, including empty directories. They do not create a general mixed-operation transaction system.
 
-Source payload bounds and Castle's canonical metadata-request bound are separate. The supported envelope is 100 files, 100 folders, 64 MiB total payload, 4 MiB per file and 255 UTF-8 bytes per name, subject to namespace capacity and validity. Inspect actual durable status after uncertainty; do not replace an unknown operation with a new ID.
+Source payload bounds and Castle's canonical metadata-request bound are separate. Use `bound.curate(request, settings=settings)` with [composed configuration](getting_started.md) to apply `biblios.max_file_bytes` to create, replace, import and copy. The per-source-file default is 100 MiB (104857600 bytes), including calls that omit settings; an override must be a positive integer byte count. Supply the intended settings on each call. Import/copy aggregate payload is limited to the larger of 64 MiB and the configured per-file allowance. The remaining envelope is 100 files, 100 folders and 255 UTF-8 bytes per name, subject to namespace capacity and validity. Inspect actual durable status after uncertainty; do not replace an unknown operation with a new ID.
 
 ## Supply and fence providers
 

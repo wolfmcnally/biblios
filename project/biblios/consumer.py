@@ -18,6 +18,7 @@ from palace.index.embedder import Embedder
 from palace.rerank import Reranker
 
 from biblios.binding import ShelfBinding, validate_handle
+from biblios.config import Settings
 from biblios.control import CallControl, ConsumerError, Observation, ShelfView, controlled
 from biblios.curation import (
     CopyIdentity,
@@ -272,10 +273,12 @@ class BoundShelf:
         self,
         request: CurationRequest,
         *,
+        settings: Settings | None = None,
         control: CallControl = CallControl(),
         observer: Callable[[Observation], None] | None = None,
     ) -> CurationResult:
-        return execute(self, request, control=control, observer=observer)
+        """Apply composed source limits, or the default when settings are omitted."""
+        return execute(self, request, settings=settings, control=control, observer=observer)
 
     def operation(self, operation_id: str) -> OperationStatus:
         from castle.namespace import namespace_operation

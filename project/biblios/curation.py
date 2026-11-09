@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from castle.namespace import (
@@ -22,6 +22,7 @@ from castle.namespace import (
     namespace_operation,
 )
 
+from biblios.config import DEFAULT_MAX_FILE_BYTES, Settings
 from biblios.control import CallControl, ConsumerError, Observation, observe
 from biblios.entries import DIRECTORY_METADATA, EntryMetadata
 
@@ -35,12 +36,13 @@ if TYPE_CHECKING:
 class CurationLimits:
     files: int = 100
     folders: int = 100
-    payload_bytes: int = 64 * 1024 * 1024
-    file_bytes: int = 4 * 1024 * 1024
+    payload_bytes: int = DEFAULT_MAX_FILE_BYTES
+    file_bytes: int = DEFAULT_MAX_FILE_BYTES
     name_bytes: int = 255
 
 
 LIMITS = CurationLimits()
+_MIN_PAYLOAD_BYTES = 64 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,8 +188,8 @@ def name(value: str) -> str:
     return normalized
 
 
-def content(data: bytes) -> dict[str, str | int]:
-    if type(data) is not bytes or len(data) > LIMITS.file_bytes:
+def content(data: bytes, limits: CurationLimits) -> dict[str, str | int]:
+    if type(data) is not bytes or len(data) > limits.file_bytes:
         raise ConsumerError("payload-limit", stage="curation")
     return {"cas_id": "sha256:" + hashlib.sha256(data).hexdigest(), "size": len(data)}
 
@@ -211,6 +213,7 @@ def metadata(
 def compile_request(
     bound: BoundShelf,
     request: CurationRequest,
+    limits: CurationLimits,
 ) -> tuple[MutationRequest, dict[str, bytes], int]:
     """Normalize the entire immutable request without consulting mutable tree state."""
     action = request.action
@@ -218,7 +221,7 @@ def compile_request(
     additions = 0
     generated = stable_id(bound.binding.namespace_id, request.operation_id, "entry")
     if type(action) is CreateFile:
-        spec = content(action.data)
+        spec = content(action.data, limits)
         kind, args = (
             "create-file",
             {
@@ -245,7 +248,7 @@ def compile_request(
         )
         additions = 1
     elif type(action) is ReplaceContent:
-        spec = content(action.data)
+        spec = content(action.data, limits)
         kind, args = "replace-content", {"entry_id": action.entry_id, "content": spec}
         sources[str(spec["cas_id"])] = action.data
     elif type(action) is SetEntryMetadata:
@@ -310,7 +313,7 @@ def compile_request(
                     kind="directory", metadata=dict(DIRECTORY_METADATA), cas_id=None, size=None
                 )
             else:
-                spec = content(item.data)
+                spec = content(item.data, limits)
                 files += 1
                 payload += len(item.data)
                 row.update(
@@ -322,7 +325,7 @@ def compile_request(
                 )
                 sources[str(spec["cas_id"])] = item.data
             incoming.append(row)
-        if files > LIMITS.files or folders > LIMITS.folders or payload > LIMITS.payload_bytes:
+        if files > limits.files or folders > limits.folders or payload > limits.payload_bytes:
             raise ConsumerError("inventory-limit", stage="curation")
         kind, args = (
             "import-folder",
@@ -357,6 +360,7 @@ def execute(
     bound: BoundShelf,
     request: CurationRequest,
     *,
+    settings: Settings | None = None,
     control: CallControl = CallControl(),
     observer: Callable[[Observation], None] | None = None,
 ) -> CurationResult:
@@ -367,7 +371,13 @@ def execute(
         control.check("curation")
         dispatched = False
         try:
-            compiled, sources, additions = compile_request(bound, request)
+            file_bytes = settings.max_file_bytes if settings is not None else DEFAULT_MAX_FILE_BYTES
+            limits = replace(
+                LIMITS,
+                file_bytes=file_bytes,
+                payload_bytes=max(_MIN_PAYLOAD_BYTES, file_bytes),
+            )
+            compiled, sources, additions = compile_request(bound, request, limits)
             saved = namespace_operation(handle, request.operation_id)
             replayed = saved.state != "unknown"
             if not replayed:
@@ -384,10 +394,10 @@ def execute(
                         entry for entry in selected if entry is not None and entry.kind == "file"
                     ]
                     if (
-                        len(files) > LIMITS.files
-                        or len(selected) - len(files) > LIMITS.folders
-                        or sum(entry.size or 0 for entry in files) > LIMITS.payload_bytes
-                        or any((entry.size or 0) > LIMITS.file_bytes for entry in files)
+                        len(files) > limits.files
+                        or len(selected) - len(files) > limits.folders
+                        or sum(entry.size or 0 for entry in files) > limits.payload_bytes
+                        or any((entry.size or 0) > limits.file_bytes for entry in files)
                     ):
                         raise ConsumerError("inventory-limit", stage="curation")
             dispatched = True

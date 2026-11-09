@@ -26,6 +26,7 @@ from biblios.curation import (
     ImportFolder,
     ImportItem,
     RelocateEntry,
+    ReplaceContent,
 )
 from tests.consumer_fixtures import (
     ADDED,
@@ -251,11 +252,15 @@ def test_frozen_import_and_concurrent_revision_admission_are_atomic(tmp_path: Pa
         fixture.close()
 
 
-def test_declared_import_envelope_copy_and_overlimit_refusal(tmp_path: Path) -> None:
+def test_declared_import_envelope_copy_and_overlimit_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture = consumer_fixture(tmp_path)
+    settings = replace(fixture.settings, max_file_bytes=4)
+    monkeypatch.setattr(curation_module, "_MIN_PAYLOAD_BYTES", 64)
     folders = [identifier() for _ in range(100)]
-    # Sixteen 4 MiB files exactly fill the 64 MiB payload; remaining files are empty.
-    payload = b"x" * (4 * 1024 * 1024)
+    # Scale bytes only; preserve the full declared file/folder count boundary.
+    payload = b"xxxx"
     items = [
         ImportItem(key, fixture.root_id if i == 0 else folders[0], f"dir-{i}")
         for i, key in enumerate(folders)
@@ -273,7 +278,8 @@ def test_declared_import_envelope_copy_and_overlimit_refusal(tmp_path: Path) -> 
     ]
     try:
         fixture.bound.curate(
-            CurationRequest(identifier(), 0, ImportFolder(fixture.root_id, tuple(items)))
+            CurationRequest(identifier(), 0, ImportFolder(fixture.root_id, tuple(items))),
+            settings=settings,
         )
         copy = fixture.bound.copy_request(
             operation_id=identifier(),
@@ -282,7 +288,7 @@ def test_declared_import_envelope_copy_and_overlimit_refusal(tmp_path: Path) -> 
             parent_id=fixture.root_id,
             name="copy",
         )
-        fixture.bound.curate(copy)
+        fixture.bound.curate(copy, settings=settings)
         before = inventory(fixture.binding.root)
         cases = (
             CreateFile(fixture.root_id, "too-large", payload + b"x", "text/plain", ADDED),
@@ -311,7 +317,7 @@ def test_declared_import_envelope_copy_and_overlimit_refusal(tmp_path: Path) -> 
         effects = []
         for action in cases:
             with pytest.raises(ConsumerError) as refused:
-                fixture.bound.curate(CurationRequest(identifier(), 2, action))
+                fixture.bound.curate(CurationRequest(identifier(), 2, action), settings=settings)
             effects.append(refused.value.effect)
         original_ids = {item.entry_id for item in items if item.data is not None}
         copied_ids = {entry.entry_id for entry in fixture.bound.files()} - original_ids
@@ -321,6 +327,102 @@ def test_declared_import_envelope_copy_and_overlimit_refusal(tmp_path: Path) -> 
             ["none"] * 5,
             before,
         ), "consumer envelope narrowed or overlimit/copy changed unadmitted storage"
+    finally:
+        fixture.close()
+
+
+def test_configured_source_limit_reaches_create_replace_import_and_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.support import write_settings
+
+    fixture = consumer_fixture(tmp_path)
+    settings = write_settings(
+        tmp_path / "limits",
+        "palace:\n  embedding:\n    provider: ollama\nbiblios:\n  max_file_bytes: 4\n",
+    )
+    # Exercise aggregate uplift with bytes, rather than allocating a large upload.
+    monkeypatch.setattr(curation_module, "_MIN_PAYLOAD_BYTES", 2)
+    try:
+        created = fixture.request(data=b"1234")
+        result = fixture.bound.curate(created, settings=settings)
+        entry = result.mutation.affected_entry_ids[0]
+        replaced = CurationRequest(identifier(), 1, ReplaceContent(entry, b"4321"))
+        fixture.bound.curate(replaced, settings=settings)
+        imported = identifier()
+        fixture.bound.curate(
+            CurationRequest(
+                identifier(),
+                2,
+                ImportFolder(
+                    fixture.root_id,
+                    (
+                        ImportItem(
+                            imported, fixture.root_id, "imported", b"abcd", "text/plain", ADDED
+                        ),
+                    ),
+                ),
+            ),
+            settings=settings,
+        )
+        copy = fixture.bound.copy_request(
+            operation_id=identifier(),
+            expected_revision=3,
+            entry_id=imported,
+            parent_id=fixture.root_id,
+            name="copy",
+        )
+        copied = fixture.bound.curate(copy, settings=settings).mutation.affected_entry_ids[0]
+        assert (
+            fixture.bound.download(entry),
+            fixture.bound.download(imported),
+            fixture.bound.download(copied),
+        ) == (b"4321", b"abcd", b"abcd"), "configured allowance did not reach all curation paths"
+        before = inventory(fixture.binding.root)
+        actions = (
+            fixture.request(name="large", data=b"12345").action,
+            ReplaceContent(entry, b"12345"),
+            ImportFolder(
+                fixture.root_id,
+                (
+                    ImportItem(
+                        identifier(), fixture.root_id, "large", b"12345", "text/plain", ADDED
+                    ),
+                ),
+            ),
+            ImportFolder(
+                fixture.root_id,
+                tuple(
+                    ImportItem(
+                        identifier(), fixture.root_id, f"batch-{i}", b"abc", "text/plain", ADDED
+                    )
+                    for i in range(2)
+                ),
+            ),
+        )
+        codes = []
+        for action in actions:
+            with pytest.raises(ConsumerError) as refused:
+                fixture.bound.curate(CurationRequest(identifier(), 4, action), settings=settings)
+            codes.append((refused.value.code, refused.value.effect))
+        smaller = replace(settings, max_file_bytes=3)
+        monkeypatch.setattr(curation_module, "_MIN_PAYLOAD_BYTES", 8)
+        with pytest.raises(ConsumerError) as refused:
+            fixture.bound.curate(
+                fixture.bound.copy_request(
+                    operation_id=identifier(),
+                    expected_revision=4,
+                    entry_id=entry,
+                    parent_id=fixture.root_id,
+                    name="refused-copy",
+                ),
+                settings=smaller,
+            )
+        codes.append((refused.value.code, refused.value.effect))
+        assert (codes, inventory(fixture.binding.root)) == (
+            [("payload-limit", "none")] * 3 + [("inventory-limit", "none")] * 2,
+            before,
+        ), "configured per-file or aggregate refusal mutated storage or lost its safe error"
     finally:
         fixture.close()
 

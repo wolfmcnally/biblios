@@ -3,6 +3,7 @@ Palace, and leaves the rest alone."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,7 @@ vellric:
         )
     with pytest.raises(PalaceRefusal, match="palace"):
         write_settings(tmp_path / "missing", "biblios: {}\ndrawbridge: {}\nvellric: {}\n")
-    # Biblios's own section is optional and declares nothing; an unknown key is refused.
+    # Biblios's own section is optional; an unknown key is refused.
     with pytest.raises(ConfigError, match="unknown_field"):
         write_settings(
             tmp_path / "stray",
@@ -66,3 +67,28 @@ vellric:
     (absent / "settings.yaml").write_text("drawbridge: {}\nvellric: {}\n")
     with pytest.raises(PalaceRefusal):
         load_settings([absent / "settings.yaml"], absent)
+
+
+def test_source_file_limit_defaults_composition_and_validation(tmp_path: Path) -> None:
+    """A configured source allowance must survive composition without bool coercion."""
+    base = "palace:\n  embedding:\n    provider: ollama\n"
+    defaults = write_settings(tmp_path / "default", base)
+    empty = write_settings(tmp_path / "empty", base + "biblios: {}\n")
+    override = tmp_path / "override.yaml"
+    override.write_text("biblios:\n  max_file_bytes: 7\n")
+    composed = load_settings([defaults.files[0], override], tmp_path)
+    assert (defaults.max_file_bytes, empty.max_file_bytes, composed.max_file_bytes) == (
+        104857600,
+        104857600,
+        7,
+    ), "source-file default or composed override was lost"
+    for index, value in enumerate(("0", "-1", "true", "1.5", "'7'", "null")):
+        with pytest.raises(ConfigError, match="expected_positive_integer") as refused:
+            write_settings(
+                tmp_path / f"invalid-{index}", base + f"biblios:\n  max_file_bytes: {value}\n"
+            )
+        assert refused.value.path == ("biblios", "max_file_bytes"), (
+            "invalid source limit lost its configuration key location"
+        )
+    with pytest.raises(ValueError, match="max_file_bytes must be a positive integer"):
+        replace(defaults, max_file_bytes=True)

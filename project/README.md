@@ -48,7 +48,7 @@ uv run --locked --managed-python python examples/shelf_demo.py /tmp/biblios-demo
 
 Expected: the source is stored, converted and indexed, a search resolves to its live entry, renaming preserves identity, and verification reports `ok=True`. The example uses deterministic test embeddings and a test reranker with no retrieval quality; it calls no model service. Plain-text/Markdown need no OCR engine. Other formats may require separately installed converters and are reported unconverted when unavailable.
 
-For real retrieval, explicitly configure the provider you intend to use. The settings file is a Conric composition with `palace`, `drawbridge` and `vellric` sections, forwarded unchanged. A `biblios` section is optional. For example, this declares Ollama; it does not install or start it:
+For real retrieval, explicitly configure the provider you intend to use. The settings file is a Conric composition with `palace`, `drawbridge` and `vellric` sections, forwarded unchanged. The optional `biblios.max_file_bytes` positive integer setting defaults to 104857600 bytes (100 MiB). Pass composed settings to consumer curation calls with `bound.curate(request, settings=settings)` to apply an override across create, replace, import and copy. Calls omitting settings use the default; conversion and indexing budgets remain separate. For example, this declares Ollama; it does not install or start it:
 
 ```yaml
 palace:

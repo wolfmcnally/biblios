@@ -1353,9 +1353,9 @@ families:
     vellric sections untouched; a composition without an embedder or with an unknown
     provider is refused.
   risk_class: product-contract
-  oracle: A composed file with foreign section content loads into Settings carrying
-    only the embedder; a missing embedder, an unknown provider and a missing section
-    each raise Conric's ConfigError with the named reason.
+  oracle: Composed Settings preserve the dependency-owned provider selection and the
+    exact default or explicit positive source-file allowance; invalid own fields retain
+    Conric reason and key location. Foreign sections remain dependency-owned.
   admission: 'First product phase: configuration is the first contract the shelf depends
     on.'
   nearest_overlap: No other family loads a composition with foreign sections.

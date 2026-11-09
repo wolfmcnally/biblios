@@ -38,12 +38,14 @@ The library is the contract; the [command-line tool](command_line.md) exposes it
 ./bin/python -c "import biblios; print(biblios.__version__)"
 ```
 
-A shelf is configured through one Conric composition. The `palace` section is Palace's own: it selects the embedding provider, model and dimension, and Biblios hands it to Palace exactly as composed, never reading it for itself; the `drawbridge` and `vellric` sections travel to Drawbridge unchanged; a `biblios` section is optional and declares nothing yet. The smallest valid file is:
+A shelf is configured through one Conric composition. The `palace` section is Palace's own: it selects the embedding provider, model and dimension, and Biblios hands it to Palace exactly as composed, never reading it for itself; the `drawbridge` and `vellric` sections travel to Drawbridge unchanged; the optional `biblios.max_file_bytes` setting declares the consumer curation per-source-file byte limit (default 104857600, exactly 100 MiB). Pass the loaded settings to `bound.curate(request, settings=settings)`; calls omitting settings use that default. This positive integer allowance is separate from conversion-output, chunk, checkpoint and snapshot budgets. For example:
 
 ```yaml
 palace:
   embedding:
     provider: ollama
+biblios:
+  max_file_bytes: 104857600
 drawbridge: {}
 vellric: {}
 ```
