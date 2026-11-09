@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/69235e84618d645770a637bf71814a7a085d475f58fda6e71c57190ad780a17b;placement:376623e6b0cfcff986700c70558b5fd9e645b14e3197ff6626e254a9d9da5b63;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "from": "not-started",
+  "id": "f8a382a530c84ef69f743dcbe6e432c1",
+  "owner": "wolf",
+  "phase": "conversion-envelope-budgets",
+  "previous": "3a3397fc0c694755a0732459fedd5ab3",
+  "reason": "Authorized bounded compatibility correction; full independent plan/code advice and evidence, completed predecessor unchanged; publication and MCP held",
+  "state": "in-progress",
+  "writer": "wolf"
+}

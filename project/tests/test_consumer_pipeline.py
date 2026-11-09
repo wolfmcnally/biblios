@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +40,220 @@ from tests.consumer_fixtures import (
 POLICY = DerivationPolicy(
     "injected", "1", "escaped/1", "body-name/1", "exact/1", "sections/1", "filename/1"
 )
+
+
+def _conversion_envelope(
+    fixture,
+    *,
+    source: bytes,
+    body: str,
+    mirror: str,
+    name: str = "note.txt",
+    media_type: str = "text/plain",
+) -> dict:
+    """Exercise one complete returned envelope, including original uncertain retry."""
+    calls = []
+
+    def converter(request):
+        calls.append(request.source)
+        return ConversionResult("converted", body, "injected", "1")
+
+    def renderer(result, name):
+        return MirrorDocument(mirror, "Filename")
+
+    entry = fixture.bound.curate(
+        CurationRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            CreateFile(fixture.root_id, name, source, media_type, ADDED),
+        )
+    ).mutation.affected_entry_ids[0]
+    refused_operation = identifier()
+    arguments = dict(converter=converter, renderer=renderer)
+    with pytest.raises(ConsumerError) as refused:
+        convert(fixture.bound, entry, operation_id=refused_operation, policy=POLICY, **arguments)
+    with pytest.raises(ConsumerError) as uncertain:
+        convert(fixture.bound, entry, operation_id=refused_operation, policy=POLICY, **arguments)
+    assert (refused.value.code, refused.value.effect, uncertain.value.code, len(calls)) == (
+        "conversion-result-invalid",
+        "uncertain",
+        "external-outcome-uncertain",
+        1,
+    ), "default envelope or original uncertain dispatch was changed"
+    policy = replace(POLICY, max_body_bytes=8 * 1024 * 1024, max_mirror_bytes=16 * 1024 * 1024)
+    operation = identifier()
+    try:
+        result = convert(fixture.bound, entry, operation_id=operation, policy=policy, **arguments)
+    except ConsumerError:
+        pytest.fail("explicit finite envelope was refused instead of preserving complete content")
+    file = fixture.binding.palace_root / "consumer-records" / (operation + ".json")
+    size = file.stat().st_size
+    fixture.reopen()
+    replay = convert(fixture.bound, entry, operation_id=operation, policy=policy, **arguments)
+    with pytest.raises(ConsumerError) as changed:
+        convert(
+            fixture.bound,
+            entry,
+            operation_id=operation,
+            policy=replace(policy, max_body_bytes=policy.max_body_bytes + 1),
+            **arguments,
+        )
+    assert (
+        result.result.body,
+        result.mirror.markdown,
+        replay.result.body,
+        replay.mirror.markdown,
+        replay.replayed,
+        result.mirror_sha256,
+        calls,
+        changed.value.code,
+        fixture.bound.download(entry),
+    ) == (
+        body,
+        mirror,
+        body,
+        mirror,
+        True,
+        hashlib.sha256(mirror.encode()).hexdigest(),
+        [source, source],
+        "operation-conflict",
+        source,
+    ), "explicit envelope truncated content, changed source, or redispatched completed work"
+    return {"conversion_checkpoint_bytes": size, "entry": entry, "operation": operation}
+
+
+def test_explicit_body_mirror_envelopes_preserve_complete_conversion(tmp_path: Path) -> None:
+    fixture = consumer_fixture(tmp_path)
+    body = "x" * (4 * 1024 * 1024 + 1)
+    mirror = body + body + "\n\n## Filename\n\none.txt\n"
+    try:
+        _conversion_envelope(fixture, source=b"compressed source", body=body, mirror=mirror)
+    finally:
+        fixture.close()
+
+
+def test_envelope_declarations_are_strict_and_finite() -> None:
+    for field in ("max_body_bytes", "max_mirror_bytes"):
+        for invalid in (True, 0, 1.5, 512 * 1024 * 1024 + 1):
+            with pytest.raises(ConsumerError, match="policy-invalid"):
+                replace(POLICY, **{field: invalid}).validate()
+        replace(POLICY, **{field: 512 * 1024 * 1024}).validate()
+    with pytest.raises(ConsumerError, match="policy-invalid"):
+        replace(POLICY, max_chunks=16385).validate()
+    for invalid in (True, 0, 1.5):
+        with pytest.raises(ConsumerError, match="snapshot-budget-invalid"):
+            ConsumerPipeline(
+                converter=lambda request: None,
+                renderer=render_escaped,
+                input_view=literal_inputs,
+                policy=POLICY,
+                embedder=HashEmbedder(),
+                max_snapshot_bytes=invalid,
+            )
+    assert (POLICY.max_body_bytes, POLICY.max_mirror_bytes, POLICY.max_chunks) == (
+        4 * 1024 * 1024,
+        8 * 1024 * 1024,
+        16384,
+    ), "explicit envelope support changed default resource declarations"
+
+
+def test_checkpoint_encoded_boundary_preserves_prior_record(tmp_path: Path, monkeypatch) -> None:
+    import biblios.pipeline as module
+    from biblios.control import save_checkpoint
+
+    file = tmp_path / "checkpoint.json"
+    document = {"body": "\u2603\n\x00", "vectors": [[0.123456789, -0.25]], "escaped": '"\\'}
+    encoded = json.dumps(document, sort_keys=True).encode("utf-8")
+    monkeypatch.setattr(module, "_MAX_CHECKPOINT_BYTES", len(encoded))
+    save_checkpoint(file, document, stage="index", max_bytes=len(encoded))
+    assert (file.read_bytes(), module._load_checkpoint(file)) == (encoded, document), (
+        "exact encoded checkpoint boundary refused or changed serialized content"
+    )
+    prior = b'{"prior": true}'
+    file.write_bytes(prior)
+    with pytest.raises(ConsumerError) as refused:
+        save_checkpoint(file, document, stage="index", max_bytes=len(encoded) - 1)
+    assert (refused.value.code, refused.value.effect, file.read_bytes()) == (
+        "checkpoint-write-failed",
+        "recovery-required",
+        prior,
+    ), "oversized encoded checkpoint replaced the prior durable record"
+    file.write_bytes(encoded + b" ")
+    actual_stat = Path.stat
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda current, **kwargs: (
+            SimpleNamespace(st_size=len(encoded))
+            if current == file and kwargs.get("follow_symlinks", True)
+            else actual_stat(current, **kwargs)
+        ),
+    )
+
+    def forbidden_parse(*args, **kwargs):
+        pytest.fail("oversized checkpoint reached JSON parser")
+
+    monkeypatch.setattr(module.json, "loads", forbidden_parse)
+    with pytest.raises(ConsumerError) as corrupt:
+        module._load_checkpoint(file, stage="conversion")
+    assert (corrupt.value.code, corrupt.value.stage, corrupt.value.effect) == (
+        "checkpoint-corrupt",
+        "conversion",
+        "recovery-required",
+    ), "encoded read boundary lost conversion-stage recovery classification"
+
+    # Public conversion must use the same bound before considering a prior record.
+    monkeypatch.undo()
+    fixture = consumer_fixture(tmp_path / "shelf")
+    calls = []
+    try:
+        entry = fixture.bound.curate(fixture.request()).mutation.affected_entry_ids[0]
+        operation = identifier()
+        record = fixture.binding.palace_root / "consumer-records" / (operation + ".json")
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text("{} ")
+        monkeypatch.setattr(module, "_MAX_CHECKPOINT_BYTES", 2)
+        parsed = []
+
+        def observed_parse(payload):
+            parsed.append(payload)
+            return json.loads(payload)
+
+        monkeypatch.setattr(module, "json", SimpleNamespace(loads=observed_parse, dumps=json.dumps))
+        with pytest.raises(ConsumerError) as public:
+            convert(
+                fixture.bound,
+                entry,
+                operation_id=operation,
+                converter=lambda request: calls.append(request),
+                renderer=render_escaped,
+                policy=replace(POLICY, max_body_bytes=2, max_mirror_bytes=2),
+            )
+        assert (public.value.code, public.value.stage, calls, parsed, record.read_bytes()) == (
+            "checkpoint-corrupt",
+            "conversion",
+            [],
+            [],
+            b"{} ",
+        ), "public conversion bypassed the encoded checkpoint read boundary"
+        record.unlink()
+        with pytest.raises(ConsumerError) as write:
+            convert(
+                fixture.bound,
+                entry,
+                operation_id=operation,
+                converter=lambda request: calls.append(request),
+                renderer=render_escaped,
+                policy=replace(POLICY, max_body_bytes=2, max_mirror_bytes=2),
+            )
+        assert (write.value.code, write.value.effect, calls, record.exists()) == (
+            "checkpoint-write-failed",
+            "recovery-required",
+            [],
+            False,
+        ), "pipeline save bypassed the checkpoint bound before callback dispatch"
+    finally:
+        fixture.close()
 
 
 def _pipeline(fixture, calls, *, embedder=None, input_view=literal_inputs):
@@ -67,6 +285,357 @@ def _pipeline(fixture, calls, *, embedder=None, input_view=literal_inputs):
         fixture.binding.palace_root, replace(selector, representation=pipeline.representation)
     )
     return pipeline, embedder
+
+
+def test_heading_only_own_name_preserves_projection_and_inputs(tmp_path: Path) -> None:
+    fixture = consumer_fixture(tmp_path)
+    names = ("Quillfern\u2028# second\u2029part.txt", "  MiXeD  # café.txt  ", "x" * 251 + ".txt")
+    observed = []
+    expected = []
+    try:
+        pipeline, embedder = _pipeline(fixture, [])
+
+        def renderer(result, name):
+            flattened = " ".join(name.splitlines())
+            return MirrorDocument("# Section\nbody\n\n# " + flattened + "\n", flattened.strip())
+
+        pipeline.renderer = renderer
+        pipeline.input_view = lambda plan: tuple("exact:" + row.body for row in plan.rows)
+        for name in names:
+            entry = fixture.bound.curate(
+                CurationRequest(
+                    identifier(),
+                    fixture.bound.view.revision,
+                    CreateFile(fixture.root_id, name, b"body", "text/plain", ADDED),
+                )
+            ).mutation.affected_entry_ids[0]
+            before = len(embedder.calls)
+            flattened = " ".join(name.splitlines())
+            expected.append(
+                ("indexed", ("exact:# Section\nbody", "exact:" + ("# " + flattened).rstrip()))
+            )
+            try:
+                result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+                observed.append(
+                    (
+                        result.state,
+                        tuple(text for batch in embedder.calls[before:] for text in batch),
+                    )
+                )
+            except ConsumerError as error:
+                observed.append((error.code, ()))
+        assert observed == expected, (
+            "heading-only own-name projection or exact supplied inputs changed"
+        )
+    finally:
+        fixture.close()
+
+
+def test_heading_only_name_refuses_forged_or_ambiguous_rows(tmp_path: Path) -> None:
+    fixture = consumer_fixture(tmp_path)
+    mirrors = (
+        ("# forged.txt\n", "forged.txt"),
+        ("# own.txt\nextra text\n", "own.txt"),
+        ("# own.txt\n# extra\n", "own.txt"),
+        ("# own.txt\n\n# Body\nbody\n", "own.txt"),
+        ("# own.txt\n\n# own.txt\n", "own.txt"),
+        ("body without name\n", "own.txt"),
+        ("# own.txt extra\n", "own.txt extra"),
+    )
+    observed = []
+    try:
+        pipeline, embedder = _pipeline(fixture, [])
+        for index, (markdown, heading) in enumerate(mirrors):
+            folder = fixture.bound.curate(
+                CurationRequest(
+                    identifier(),
+                    fixture.bound.view.revision,
+                    CreateDirectory(fixture.root_id, str(index)),
+                )
+            ).mutation.affected_entry_ids[0]
+            entry = fixture.bound.curate(
+                CurationRequest(
+                    identifier(),
+                    fixture.bound.view.revision,
+                    CreateFile(folder, "own.txt", b"body", "text/plain", ADDED),
+                )
+            ).mutation.affected_entry_ids[0]
+            pipeline.renderer = lambda result, name: MirrorDocument(markdown, heading)
+            try:
+                result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+                observed.append(result.state)
+            except ConsumerError as error:
+                observed.append(error.code)
+        assert (observed, embedder.calls) == (["mirror-name-row-invalid"] * len(mirrors), []), (
+            "heading-only admission accepted forged, extra, absent, duplicate or nonfinal name rows"
+        )
+    finally:
+        fixture.close()
+
+
+def _snapshot_envelope(
+    fixture,
+    *,
+    source: bytes,
+    body: str,
+    renderer,
+    embedder,
+    expected_mirror: bytes,
+    expected_rows: int,
+    name: str = "note.txt",
+    media_type: str = "text/plain",
+    insufficient: int = 4096,
+    adequate: int = 128 * 1024 * 1024,
+    progress=None,
+) -> dict:
+    """One shared public resource-retry scenario; large inputs are explicit qualification."""
+    import sqlite_vec
+    from palace.index import read_file_vectors
+    from palace.index.embedder_config import (
+        identity_for,
+        load_embedder_config,
+        save_embedder_config,
+    )
+    from palace.writer_lock import writer_lock
+
+    calls = []
+
+    def converter(request):
+        calls.append(request.source)
+        return ConversionResult("converted", body, "injected", "1")
+
+    def pipeline(budget):
+        return ConsumerPipeline(
+            converter=converter,
+            renderer=renderer,
+            input_view=literal_inputs,
+            policy=replace(
+                POLICY,
+                max_body_bytes=8 * 1024 * 1024,
+                max_mirror_bytes=8 * 1024 * 1024,
+                reuse_converted_body=True,
+            ),
+            embedder=embedder,
+            max_snapshot_bytes=budget,
+            progress=progress,
+        )
+
+    limited, allowed = pipeline(insufficient), pipeline(adequate)
+    selector = load_embedder_config(fixture.binding.palace_root)
+    save_embedder_config(
+        fixture.binding.palace_root, replace(selector, representation=allowed.representation)
+    )
+    identity = identity_for(load_embedder_config(fixture.binding.palace_root))
+
+    def snapshot(entry):
+        with writer_lock(fixture.binding.palace_root, operation="test committed envelope"):
+            with closing(
+                sqlite3.connect(fixture.bound._shelf.chunks_db, isolation_level=None)
+            ) as conn:
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+                return read_file_vectors(
+                    conn=conn,
+                    watch_root=fixture.binding.mirror_root.resolve(),
+                    path=entry + ".md",
+                    expected_identity=identity,
+                    max_bytes=adequate,
+                    max_chunks=16384,
+                )
+
+    entry = fixture.bound.curate(
+        CurationRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            CreateFile(fixture.root_id, name, source, media_type, ADDED),
+        )
+    ).mutation.affected_entry_ids[0]
+    operation = identifier()
+    revision_before = fixture.bound.view.revision
+    with pytest.raises(ConsumerError) as refused:
+        fixture.bound.derive(limited, entry, operation_id=operation)
+    state = limited.status(fixture.bound, operation_id=operation)
+    records = fixture.binding.palace_root / "consumer-records"
+    durable = json.loads((records / (operation + ".derived.json")).read_text())
+    before = (list(calls), list(embedder.calls))
+    assert (
+        refused.value.code,
+        refused.value.stage,
+        refused.value.effect,
+        state.state,
+        durable["state"],
+        snapshot(entry),
+        fixture.bound._shelf.mirror_path(entry).read_bytes(),
+        fixture.bound.view.revision,
+        fixture.bound.resolve(entry).searchable,
+    ) == (
+        "derivation-failed",
+        "index",
+        "recovery-required",
+        "indexing",
+        "vectors-ready",
+        None,
+        expected_mirror,
+        revision_before,
+        False,
+    ), "snapshot refusal hid committed rows, mirror residue, or truthful recovery status"
+    accepted = fixture.bound.derive(allowed, entry, operation_id=operation)
+    actual = snapshot(entry)
+    assert (
+        accepted.state,
+        len(actual.chunks),
+        list(calls),
+        list(embedder.calls),
+        fixture.bound.download(entry),
+        fixture.bound.read(entry).text.encode(),
+    ) == (
+        "indexed",
+        expected_rows,
+        *before,
+        source,
+        expected_mirror,
+    ), "adequate same-operation retry repeated providers or lost complete committed content"
+    for action in (
+        lambda: fixture.bound.derive(limited, entry, operation_id=operation),
+        lambda: limited.donor(fixture.bound, entry, operation_id=operation),
+    ):
+        with pytest.raises(ConsumerError) as read_refused:
+            action()
+        assert read_refused.value.code in {"derivation-failed", "read-failed"}, (
+            "insufficient committed snapshot read lost conservative diagnostics"
+        )
+    fixture.reopen()
+    replay = fixture.bound.derive(allowed, entry, operation_id=operation)
+    donor = allowed.donor(fixture.bound, entry, operation_id=operation)
+    after_replay = (list(calls), list(embedder.calls))
+    folder = fixture.bound.curate(
+        CurationRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            CreateDirectory(fixture.root_id, "copy"),
+        )
+    ).mutation.affected_entry_ids[0]
+    destination = fixture.bound.curate(
+        CurationRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            CreateFile(folder, name, source, media_type, ADDED),
+        )
+    ).mutation.affected_entry_ids[0]
+    offset = len(embedder.calls)
+    copied_operation = identifier()
+    copied = fixture.bound.derive(allowed, destination, operation_id=copied_operation, donor=donor)
+    own_name = renderer(ConversionResult("converted", body, "injected", "1"), name).name_heading
+    fresh_inputs = [text for batch in embedder.calls[offset:] for text in batch]
+    fixture.bound.curate(
+        CurationRequest(identifier(), fixture.bound.view.revision, DeleteEntry(entry))
+    )
+    allowed.finish(fixture.bound, operation_id=identifier())
+    fixture.reopen()
+    again = fixture.bound.derive(allowed, destination, operation_id=copied_operation)
+    assert (
+        replay.replayed,
+        after_replay,
+        copied.reused_body_rows,
+        copied.embedded_rows,
+        len(fresh_inputs),
+        bool(fresh_inputs) and own_name in fresh_inputs[0],
+        calls,
+        again.replayed,
+        fixture.bound.download(destination),
+        fixture.bound.read(destination).text.encode(),
+        len(snapshot(destination).chunks),
+    ) == (
+        True,
+        before,
+        expected_rows - 1,
+        1,
+        1,
+        True,
+        [source],
+        True,
+        source,
+        expected_mirror,
+        expected_rows,
+    ), "resource-bound donor reuse repeated body work or coupled destination/name ownership"
+    return {
+        "rows": expected_rows,
+        "dimensions": identity.dim,
+        "body_vector_lower_bound_bytes": sum(
+            len(row.vector) * 4 + len(row.chunk.body.encode()) + len(row.chunk.body_hash.encode())
+            for row in actual.chunks
+        ),
+        "conversion_checkpoint_bytes": (records / (copied_operation + ".json")).stat().st_size,
+        "derived_checkpoint_bytes": (records / (copied_operation + ".derived.json")).stat().st_size,
+        "adequate_snapshot_bytes": adequate,
+    }
+
+
+def test_snapshot_budget_propagates_through_publication_replay_and_donor(tmp_path: Path) -> None:
+    fixture = consumer_fixture(tmp_path)
+    body = "Lighthouse maintenance."
+
+    def renderer(result, name):
+        return MirrorDocument(
+            "# Body\n\n" + result.body + "\n\n## Filename\n\n" + name + "\n", "Filename"
+        )
+
+    try:
+        _snapshot_envelope(
+            fixture,
+            source=body.encode(),
+            body=body,
+            renderer=renderer,
+            embedder=HashEmbedder(),
+            expected_mirror=b"# Body\n\nLighthouse maintenance.\n\n## Filename\n\nnote.txt\n",
+            expected_rows=2,
+        )
+    finally:
+        fixture.close()
+
+
+def test_snapshot_postcommit_failure_remains_unaccepted(tmp_path: Path, monkeypatch) -> None:
+    import biblios.pipeline as module
+
+    fixture = consumer_fixture(tmp_path)
+    calls, committed = [], []
+    original = module.read_file_vectors
+
+    def fail_after_commit(**kwargs):
+        snapshot = original(**kwargs)
+        if snapshot is not None and not committed:
+            committed.append(snapshot.view_sha256)
+            raise OSError("unsafe readback failure")
+        return snapshot
+
+    monkeypatch.setattr(module, "read_file_vectors", fail_after_commit)
+    try:
+        pipeline, embedder = _pipeline(fixture, calls)
+        entry = fixture.bound.curate(fixture.request()).mutation.affected_entry_ids[0]
+        operation = identifier()
+        with pytest.raises(ConsumerError) as failed:
+            fixture.bound.derive(pipeline, entry, operation_id=operation)
+        before = (list(calls), list(embedder.calls))
+        record = fixture.binding.palace_root / "consumer-records" / (operation + ".derived.json")
+        assert (
+            len(committed),
+            failed.value.code,
+            failed.value.effect,
+            pipeline.status(fixture.bound, operation_id=operation).state,
+            json.loads(record.read_text())["state"],
+        ) == (1, "derivation-failed", "recovery-required", "indexing", "vectors-ready"), (
+            "postcommit read failure was accepted or misreported as effect-free rollback"
+        )
+        fixture.reopen()
+        result = fixture.bound.derive(pipeline, entry, operation_id=operation)
+        assert (result.state, list(calls), list(embedder.calls), fixture.bound.download(entry)) == (
+            "indexed",
+            *before,
+            b"fixture body",
+        ), "committed-but-unaccepted retry repeated providers or lost source content"
+    finally:
+        fixture.close()
 
 
 def test_integrated_duplicate_reuses_body_but_always_embeds_equal_destination_name(

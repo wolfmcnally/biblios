@@ -1,0 +1,26 @@
+@dataclass(frozen=True, slots=True)
+class FileVectorLimits:
+    """Finite encoded snapshot budget; not a bound on RSS or database size."""
+
+    max_bytes: int = _DEFAULT_MAX_BYTES
+    max_chunks: int = _MAX_CHUNKS
+
+    def __post_init__(self) -> None:
+        if any(
+            isinstance(n, bool) or not isinstance(n, int) or n <= 0
+            for n in (self.max_chunks, self.max_bytes)
+        ):
+            raise IndexError("file vector limits must be positive integers")
+        if self.max_chunks > _MAX_CHUNKS:
+            raise IndexError("file vector limits exceed the supported maximum")
+
+
+def _validate_file_vector_path(path: str) -> None:
+    if (
+        not isinstance(path, str)
+        or not path
+        or PurePosixPath(path).is_absolute()
+        or PurePosixPath(path).as_posix() != path
+        or ".." in PurePosixPath(path).parts
+        or path == "."
+        or "\\" in path

@@ -8,7 +8,7 @@ license-files = ["LICENSE", "NOTICE"]
 readme = "README.md"
 authors = [{ name = "Wolf McNally" }]
 dependencies = [
-    "palace @ git+https://github.com/wolfmcnally/palace.git@34bda8dcbf887aeda3c9211dfbae14c5218affcd",
+    "palace @ git+https://github.com/wolfmcnally/palace.git@d5e7409165ea81f4c11373633897f8c312cbe70d",
     "castle @ git+https://github.com/wolfmcnally/castle.git@9351299b11f0a0272a08ee406a768d591ed847c2#subdirectory=project",
     "drawbridge @ git+https://github.com/wolfmcnally/drawbridge.git@359790cad3f23c2df7281e87004e51369fb9fba4",
     "conric @ git+https://github.com/wolfmcnally/conric.git@ed9286297e92b8c049f70eb15a3b5556ed107ff0",
@@ -45,7 +45,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-palace = { git = "https://github.com/wolfmcnally/palace.git", rev = "34bda8dcbf887aeda3c9211dfbae14c5218affcd" }
+palace = { git = "https://github.com/wolfmcnally/palace.git", rev = "d5e7409165ea81f4c11373633897f8c312cbe70d" }
 castle = { git = "https://github.com/wolfmcnally/castle.git", tag = "v0.3.0", subdirectory = "project" }
 drawbridge = { git = "https://github.com/wolfmcnally/drawbridge.git", rev = "359790cad3f23c2df7281e87004e51369fb9fba4" }
 conric = { git = "https://github.com/wolfmcnally/conric.git", rev = "ed9286297e92b8c049f70eb15a3b5556ed107ff0" }

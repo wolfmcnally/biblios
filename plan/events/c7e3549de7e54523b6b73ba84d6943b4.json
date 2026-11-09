@@ -1,0 +1,15 @@
+{
+  "acceptance": {
+    "path": ".kickoff/runs/2fe873a4e2d4519029b2a9995062963a/closure.json",
+    "sha256": "6e0278e678fe9d666057a3800ede4ba5f83e0e500b4b1ed87681366b33386c81"
+  },
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/69235e84618d645770a637bf71814a7a085d475f58fda6e71c57190ad780a17b;placement:376623e6b0cfcff986700c70558b5fd9e645b14e3197ff6626e254a9d9da5b63;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "from": "in-progress",
+  "id": "c7e3549de7e54523b6b73ba84d6943b4",
+  "owner": "wolf",
+  "phase": "conversion-envelope-budgets",
+  "previous": "f8a382a530c84ef69f743dcbe6e432c1",
+  "reason": "Explicit finite conversion and snapshot envelopes qualified with unchanged defaults and semantic retry; exact own-name renderer admission preserved; both independent advice passes disposed, no new release/tag or successor",
+  "state": "completed",
+  "writer": "wolf"
+}

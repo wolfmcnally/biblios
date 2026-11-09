@@ -100,17 +100,33 @@ class CallControl:
                 raise ConsumerError("cancelled", stage=stage, effect=effect)
 
 
-def save_checkpoint(file: Path, document: dict, *, stage: Stage) -> None:
-    """Durably replace a finite local checkpoint without following a staging symlink."""
+def save_checkpoint(
+    file: Path, document: dict, *, stage: Stage, max_bytes: int | None = None
+) -> None:
+    """Durably replace a checkpoint, optionally bounding its encoded UTF-8 JSON.
+
+    Bounded saves encode once before opening the staging file. The encoded text
+    and bytes coexist with the document; this limit does not bound process memory.
+    """
     temporary = file.with_suffix(".partial")
     if any(item.is_symlink() for item in (file, file.parent, temporary)):
         raise ConsumerError("artifact-outside-domain", stage=stage, effect="recovery-required")
     try:
+        payload = None
+        if max_bytes is not None:
+            if type(max_bytes) is not int or max_bytes <= 0:
+                raise ValueError
+            payload = json.dumps(document, sort_keys=True)
+            if len(payload.encode("utf-8")) > max_bytes:
+                raise ValueError
         descriptor = os.open(
             temporary, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600
         )
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            json.dump(document, stream, sort_keys=True)
+            if payload is None:
+                json.dump(document, stream, sort_keys=True)
+            else:
+                stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, file)

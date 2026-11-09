@@ -28,6 +28,16 @@ Capture one completed donor view and nominate it for a destination. Same-shelf i
 
 Completed provider results and actual index commits survive restart. An uncertain dispatch requires explicit reconciliation and retry; a completed replay validates the real destination instead of silently repairing changed state. `pipeline.finish` removes obsolete index members and validates the watermark after all current entries finish. The writer's separate `checkpoint` prepares dynamic read-only access. Source distributions include a runnable `examples/consumer_binding.py` example with deterministic local providers.
 
+## Declare finite resource envelopes
+
+Conversion output can be much larger than its source. Body and mirror defaults remain 4 MiB and 8 MiB; a `DerivationPolicy` may explicitly declare larger positive bounds up to 512 MiB each. The complete checkpoint must independently fit within 512 MiB of encoded UTF-8 JSON, including escaped text and vectors. Reads check this boundary before parsing; an oversized write preserves the previous checkpoint and reports recovery required. The row ceiling remains 16,384.
+
+`ConsumerPipeline(max_snapshot_bytes=128 * 1024 * 1024)` is an example of an explicit larger snapshot allowance; the default remains 64 MiB. This separate resource budget applies consistently to donor, destination, replay, publication and final readback. It does not change semantic policy identity. Changing body, mirror or chunk declarations under an original operation ID still changes that request.
+
+Snapshot database bytes and checkpoint JSON bytes are different limits. Dense vectors can make JSON the binding ceiling, and encoding a checkpoint holds its serialized text alongside the document. Neither allowance bounds process memory. Publication checks staged database size before COMMIT, after embedding; no pre-embedding estimate or reversal of external effects is promised.
+
+Keep the original operation after refusal. A successfully rolled-back publication can leave a rendered mirror and a `vectors-ready` checkpoint with no committed destination rows; an adequate snapshot allowance can finish that same operation without repeating completed provider work. Generic recovery diagnostics also cover integrity and I/O failures, so do not infer a safe retry from exception prose. Failed post-commit readback is committed but unaccepted, and unresolved external dispatch still requires reconciliation.
+
 ## Coordinate history and cutover
 
 Finite retained-content references and snapshots preserve exact replaced/deleted source bytes without adding history to current search. Explicit excision requires complete content, entry, operation and snapshot closure, including shared owners. Metadata-only redaction leaves surviving files downloadable without inventing new metadata.

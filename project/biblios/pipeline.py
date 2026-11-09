@@ -24,6 +24,7 @@ from castle.namespace import canonical_bytes
 from palace.index import (
     EmbeddingRepresentation,
     FilePlan,
+    FileVectorLimits,
     FileVectorSnapshot,
     commit_plan,
     plan_one,
@@ -42,6 +43,7 @@ from biblios.control import (
     Effect,
     Observation,
     ShelfView,
+    Stage,
     controlled,
     observe,
     save_checkpoint,
@@ -57,6 +59,13 @@ from biblios.progress import (
 
 if TYPE_CHECKING:
     from biblios.consumer import BoundShelf
+
+
+_MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
+
+
+def _save_checkpoint(file: Path, document: dict, *, stage: Stage) -> None:
+    save_checkpoint(file, document, stage=stage, max_bytes=_MAX_CHECKPOINT_BYTES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,9 +157,9 @@ class DerivationPolicy:
         if (
             any(not _bounded_text(value, 256) or not value for value in labels)
             or type(self.max_body_bytes) is not int
-            or not 0 < self.max_body_bytes <= 4 * 1024 * 1024
+            or not 0 < self.max_body_bytes <= _MAX_CHECKPOINT_BYTES
             or type(self.max_mirror_bytes) is not int
-            or not 0 < self.max_mirror_bytes <= 8 * 1024 * 1024
+            or not 0 < self.max_mirror_bytes <= _MAX_CHECKPOINT_BYTES
             or type(self.max_chunks) is not int
             or not 0 < self.max_chunks <= 16384
             or type(self.reuse_converted_body) is not bool
@@ -284,14 +293,7 @@ def convert(
             )
         ).hexdigest()
         file = _record_path(bound, operation_id)
-        try:
-            record = json.loads(file.read_text()) if file.exists() else None
-            if record is not None and type(record) is not dict:
-                raise ValueError
-        except Exception:
-            raise ConsumerError(
-                "checkpoint-corrupt", stage="conversion", effect="recovery-required"
-            ) from None
+        record = _load_checkpoint(file, stage="conversion")
         if record is not None:
             if (
                 record.get("schema") != "biblios.consumer-conversion/1"
@@ -341,7 +343,7 @@ def convert(
             scratch = bound.binding.scratch_root / "consumer"
             scratch.mkdir(parents=True, exist_ok=True)
             record["state"] = "dispatched"
-            save_checkpoint(file, record, stage="conversion")
+            _save_checkpoint(file, record, stage="conversion")
             with tempfile.TemporaryDirectory(prefix=operation_id + ".", dir=scratch) as temporary:
                 request = ConversionRequest(
                     source, entry.metadata.media_type, display_name, Path(temporary)
@@ -353,7 +355,7 @@ def convert(
                     result = converter(request)
                 except ConversionConfigurationError:
                     record["state"] = "configuration-refused"
-                    save_checkpoint(file, record, stage="conversion")
+                    _save_checkpoint(file, record, stage="conversion")
                     raise ConsumerError("configuration-invalid", stage="conversion") from None
                 except Exception:
                     raise ConsumerError(
@@ -362,13 +364,13 @@ def convert(
                 control.check("conversion", effect="uncertain")
                 _validate_result(result, policy, effect="uncertain")
                 record.update(state="converted", conversion=asdict(result))
-                save_checkpoint(file, record, stage="conversion")
+                _save_checkpoint(file, record, stage="conversion")
         result = ConversionResult(**record["conversion"])
         _validate_result(result, policy)
         mirror = None
         if result.outcome == "converted":
             record["state"] = "render-dispatched"
-            save_checkpoint(file, record, stage="conversion")
+            _save_checkpoint(file, record, stage="conversion")
             mirror = controlled(
                 lambda: renderer(result, display_name), control, "conversion", effect="uncertain"
             )
@@ -386,24 +388,28 @@ def convert(
             if mirror is not None
             else "",
         )
-        save_checkpoint(file, record, stage="conversion")
+        _save_checkpoint(file, record, stage="conversion")
         return _status(record, False, policy)
 
 
-def _load_checkpoint(file: Path) -> dict | None:
-    if not file.exists():
-        return None
+def _load_checkpoint(file: Path, *, stage: Stage = "index") -> dict | None:
     try:
-        if file.is_symlink() or file.stat().st_size > 512 * 1024 * 1024:
+        if file.is_symlink():
             raise ValueError
-        document = json.loads(file.read_text())
+        if not file.exists():
+            return None
+        if file.stat().st_size > _MAX_CHECKPOINT_BYTES:
+            raise ValueError
+        with file.open("rb") as stream:
+            payload = stream.read(_MAX_CHECKPOINT_BYTES + 1)
+        if len(payload) > _MAX_CHECKPOINT_BYTES:
+            raise ValueError
+        document = json.loads(payload.decode("utf-8"))
         if type(document) is not dict:
             raise ValueError
         return document
     except Exception:
-        raise ConsumerError(
-            "checkpoint-corrupt", stage="index", effect="recovery-required"
-        ) from None
+        raise ConsumerError("checkpoint-corrupt", stage=stage, effect="recovery-required") from None
 
 
 def _digest(text: str) -> str:
@@ -431,14 +437,18 @@ class ConsumerPipeline:
         policy: DerivationPolicy,
         embedder: Embedder,
         progress: Callable[[EntryProgress], None] | None = None,
+        max_snapshot_bytes: int = 64 * 1024 * 1024,
     ) -> None:
         policy.validate()
+        if type(max_snapshot_bytes) is not int or max_snapshot_bytes <= 0:
+            raise ConsumerError("snapshot-budget-invalid", stage="index")
         if embedder is None or not all(
             callable(value) for value in (converter, renderer, input_view)
         ):
             raise ConsumerError("provider-required", stage="index")
         self.converter, self.renderer, self.input_view = converter, renderer, input_view
         self.policy, self.embedder, self.progress = policy, embedder, progress
+        self.max_snapshot_bytes = max_snapshot_bytes
 
     @property
     def representation(self) -> EmbeddingRepresentation:
@@ -461,6 +471,7 @@ class ConsumerPipeline:
             watch_root=str(bound.binding.mirror_root.resolve()),
             path=entry_id + ".md",
             expected_identity=identity,
+            max_bytes=self.max_snapshot_bytes,
             max_chunks=self.policy.max_chunks,
         )
 
@@ -790,7 +801,7 @@ class ConsumerPipeline:
                 "reused": 0,
                 "embedded": 0,
             }
-            save_checkpoint(file, record, stage="index")
+            _save_checkpoint(file, record, stage="index")
         elif record["state"] == "embedding-dispatched" and not retry_uncertain:
             raise ConsumerError("external-outcome-uncertain", stage="embedding", effect="uncertain")
 
@@ -822,12 +833,19 @@ class ConsumerPipeline:
                 for i, row in enumerate(plan.rows)
                 if row.heading == conversion.mirror.name_heading
             ]
+            name = entry.path.rsplit("/", 1)[-1]
+            heading_name = " ".join(name.splitlines())
             if (
                 len(plan.rows) > self.policy.max_chunks
                 or len(name_rows) != 1
                 or name_rows[0] != len(plan.rows) - 1
-                or plan.rows[name_rows[0]].body.partition("\n")[2].strip()
-                != entry.path.rsplit("/", 1)[-1]
+                or not (
+                    plan.rows[name_rows[0]].body.partition("\n")[2].strip() == name
+                    or (
+                        conversion.mirror.name_heading == heading_name.strip()
+                        and plan.rows[name_rows[0]].body == ("# " + heading_name).rstrip()
+                    )
+                )
             ):
                 raise ConsumerError("mirror-name-row-invalid", stage="index")
             inputs = controlled(lambda: tuple(self.input_view(plan)), control, "embedding")
@@ -854,7 +872,7 @@ class ConsumerPipeline:
                         vectors[i] = list(row.vector)
                     record["reused"] = len(source_rows)
             record.update(inputs=hashes, vectors=vectors)
-            save_checkpoint(file, record, stage="embedding")
+            _save_checkpoint(file, record, stage="embedding")
             for start in range(0, len(plan.rows), EMBED_SLICE):
                 if bound._admit() != before:
                     raise ConsumerError("stale-view", stage="index", effect="uncertain")
@@ -866,7 +884,7 @@ class ConsumerPipeline:
                 if not selected:
                     continue
                 record["state"] = "embedding-dispatched"
-                save_checkpoint(file, record, stage="embedding")
+                _save_checkpoint(file, record, stage="embedding")
                 returned = controlled(
                     lambda: self.embedder.embed([plan.embed_inputs[i] for i in selected]),
                     control,
@@ -886,7 +904,7 @@ class ConsumerPipeline:
                         )
                     vectors[i] = list(_float32(vector))
                 record.update(state="vectors-ready", embedded=record["embedded"] + len(selected))
-                save_checkpoint(file, record, stage="embedding")
+                _save_checkpoint(file, record, stage="embedding")
                 if self.progress is not None:
                     controlled(
                         lambda: self.progress(
@@ -918,12 +936,15 @@ class ConsumerPipeline:
                     plan=plan,
                     embeddings=vectors,
                     identity=identity,
+                    snapshot_limits=FileVectorLimits(
+                        max_bytes=self.max_snapshot_bytes, max_chunks=self.policy.max_chunks
+                    ),
                     log=lambda line: None,
                 )
             actual = self._snapshot(bound, conn, entry_id, identity)
             record["view_sha256"] = actual.view_sha256
             record["state"] = "index-committed"
-            save_checkpoint(file, record, stage="index")
+            _save_checkpoint(file, record, stage="index")
         else:
             from palace.index.core import delete_path
 
@@ -957,7 +978,7 @@ class ConsumerPipeline:
         if status.pending == 0 and indexed_files(bound._shelf) == expected:
             write_watermark(bound._shelf, bound._shelf.revision)
         record.update(state="complete", committed_view=asdict(bound.view))
-        save_checkpoint(file, record, stage="index")
+        _save_checkpoint(file, record, stage="index")
         result = self._result(bound, record, replayed=replayed)
         control.check("index", effect="derived-committed")
         observe(observer, result.observation, control)

@@ -8,5 +8,6 @@ Definitions and canonical lifecycle state live in `phases/` and `events/`. The o
 - [MCP server](phases/mcp-server-plane.md), held.
 - [Connector walkthrough](phases/connector-walkthrough-demo.md), dependent on MCP.
 - [Adapter-reached adoption](phases/adapter-consumer-adoption.md).
+- [Explicit conversion envelopes](phases/conversion-envelope-budgets.md), a bounded compatibility correction depending on the completed adoption work.
 
 Read the target definition, its brief references and actual dependencies before phase work; use the repository's supported custody and review workflow. Product code lives in `project/biblios/`, tests in `project/tests/`, and installation instructions in [the README](../README.md).
