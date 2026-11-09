@@ -1,0 +1,43 @@
+def init_db(conn: sqlite3.Connection, *, store: Path) -> None:
+    """Bootstrap the chunks DB schema on ``conn``.
+
+    Loads the sqlite-vec extension, runs the ``CREATE … IF NOT
+    EXISTS`` statements, sets ``PRAGMA journal_mode=WAL`` and
+    ``synchronous=NORMAL``, then reads or writes
+    ``<store>/meta/schema-version``. Idempotent — repeated calls against
+    the same store are safe. The independent metadata component is initialized
+    without rewriting chunks; an invalid component refuses bootstrap until its
+    documented metadata-only recovery is performed. (This is the property the writer thread
+    relies on when it re-runs ``init_db`` after the server's one-shot
+    bootstrap connection has closed).
+    """
+    # Order matters: enable the extension loader before sqlite_vec.load.
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+
+    _assert_not_foreign_schema(conn, store=store)
+
+    identity = resolve_identity(store)
+    assert_vector_width(conn, identity.dim, store=store)
+    for statement in _ddl_statements(identity.dim):
+        conn.execute(statement)
+    chunk_count = int(conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+    meta_count = int(conn.execute("SELECT COUNT(*) FROM index_meta").fetchone()[0])
+    if chunk_count == 0 and meta_count == 0:
+        stamp_identity(conn, identity)
+        # A new store keeps its keyword-row lookup from its first write.
+        conn.execute(
+            "INSERT OR IGNORE INTO index_meta (key, value) VALUES (?, 'complete')",
+            (FTS_ROWID_MAP_KEY,),
+        )
+    conn.commit()
+
+    try:
+        initialize_metadata(conn)
+    except MetadataError as exc:
+        raise IndexError(str(exc)) from exc
+    _check_schema_version(store)

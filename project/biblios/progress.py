@@ -145,6 +145,61 @@ def indexed_files(shelf: Shelf) -> dict[str, str]:
     return {Path(path).stem: file_hash for path, _, file_hash in _file_rows(shelf)}
 
 
+def prepare_readable(shelf: Shelf) -> IndexStatus:
+    """Writer-only dynamic checkpoint, without sealing or admitting a stale mirror set.
+
+    Readers never change journal modes or repair this checkpoint. The caller
+    holds the namespace coordinator; Palace's writer lock covers connection
+    creation through its close and checkpoint publication.
+    """
+    import hashlib
+
+    from palace.writer_lock import writer_lock
+
+    from biblios.control import ConsumerError
+
+    shelf._refuse_if_sealed()
+    with writer_lock(shelf.palace_store, operation="consumer readable checkpoint"):
+        expected = {}
+        for entry in shelf.files():
+            if entry.searchable and entry.metadata is not None:
+                file = shelf.mirror_path(entry.entry_id)
+                if (
+                    file.is_symlink()
+                    or hashlib.sha256(file.read_bytes()).hexdigest() != entry.metadata.mirror_sha256
+                ):
+                    raise ConsumerError("mirror-unavailable", stage="index")
+                expected[entry.entry_id] = entry.metadata.mirror_sha256
+        if indexed_files(shelf) != expected:
+            raise ConsumerError("index-membership-mismatch", stage="index")
+        if shelf.chunks_db.is_file():
+            connection = sqlite3.connect(shelf.chunks_db)
+            try:
+                checked = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+                if checked[0] != 0:
+                    raise ConsumerError("checkpoint-busy", stage="index")
+                if connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
+                    raise ConsumerError("checkpoint-failed", stage="index")
+            finally:
+                connection.close()
+        status = index_status(shelf)
+        marker = shelf.palace_store / "consumer-readable.json"
+        document = {
+            "revision": status.revision,
+            "membership": expected,
+            "database_sha256": hashlib.sha256(shelf.chunks_db.read_bytes()).hexdigest()
+            if shelf.chunks_db.is_file()
+            else None,
+        }
+        partial = marker.with_suffix(".partial")
+        with partial.open("w") as stream:
+            json.dump(document, stream, sort_keys=True)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(partial, marker)
+        return status
+
+
 def recorded_root(shelf: Shelf) -> str | None:
     """The absolute mirror root Palace recorded, or None for an unbuilt or empty store."""
     rows = _file_rows(shelf)

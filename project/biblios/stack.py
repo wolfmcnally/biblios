@@ -84,6 +84,7 @@ class Stack:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         rerank: bool = True,
+        strict: bool = False,
     ) -> StackResult:
         """Search the built members through Palace's multi-store search, one rerank over
         the union, naming every member whose index is still catching up."""
@@ -100,7 +101,7 @@ class Stack:
             limit=limit,
             rerank_in=max(limit, 20),
             rerank_enabled=rerank,
-            strict=False,
+            strict=strict,
             embedders={self._identity: embedder} if embedder is not None else None,
             reranker=reranker,
         )
@@ -125,6 +126,8 @@ class Stack:
             try:
                 body = palace_search.expand(chunk_id=hit.chunk_id, store=shelf.palace_store).body
             except palace_errors.IndexError:
+                if strict:
+                    raise
                 refused.append((shelf.shelf_id, entry_id))
                 continue
             hits.append(

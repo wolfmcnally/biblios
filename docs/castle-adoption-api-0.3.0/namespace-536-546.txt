@@ -1,0 +1,11 @@
+def open_namespace_readonly(
+    namespace_root: Path, cas_root: Path, session: AuthorizedSession
+) -> NamespaceHandle:
+    """Open existing validated authority without writing or repairing it.
+
+    The caller's session must fence all writers while admitting shared readers.
+    Use LocalSession(..., read_only=True) for the reference local environment.
+    """
+    from castle.namespace_store import NamespaceHandle
+
+    return NamespaceHandle(namespace_root, cas_root, session, read_only=True)

@@ -1,0 +1,77 @@
+def normalize(args: dict[str, Any]) -> dict[str, Any]:
+    """Close and normalize the specified request before its fingerprint."""
+    if not isinstance(args, dict) or set(args) != {"selection", "snapshot_actions"}:
+        n._refuse()
+    selection = args["selection"]
+    if not isinstance(selection, dict) or set(selection) != _SELECTION:
+        n._refuse()
+    selected = {
+        key: _identities(value, content=key == "content_ids") for key, value in selection.items()
+    }
+    if not any(selected.values()):
+        n._refuse()
+    actions = args["snapshot_actions"]
+    if not isinstance(actions, list):
+        n._refuse()
+    if len(actions) > n.MAX_ENTRIES:
+        n._refuse("namespace-limit-exceeded")
+    result = []
+    used = set()
+    for action in actions:
+        if not isinstance(action, dict):
+            n._refuse()
+        identity = action.get("snapshot_id")
+        n._uuid(identity)
+        if identity in used:
+            n._refuse()
+        used.add(identity)
+        if action.get("action") == "drop":
+            if set(action) != {"snapshot_id", "action"}:
+                n._refuse()
+            result.append({"snapshot_id": identity, "action": "drop"})
+        elif action.get("action") == "replace":
+            if set(action) != {
+                "snapshot_id",
+                "action",
+                "remove_entry_ids",
+                "clear_metadata_entry_ids",
+            }:
+                n._refuse()
+            result.append(
+                {
+                    "snapshot_id": identity,
+                    "action": "replace",
+                    "remove_entry_ids": _identities(action["remove_entry_ids"]),
+                    "clear_metadata_entry_ids": _identities(action["clear_metadata_entry_ids"]),
+                }
+            )
+        else:
+            n._refuse()
+    return {
+        "selection": selected,
+        "snapshot_actions": sorted(result, key=lambda item: item["snapshot_id"]),
+    }
+
+
+def roots(namespace_root: Path, predecessor_root: Path, value: object) -> tuple[Path, Path]:
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"predecessor_root", "successor_root"}
+        or any(not isinstance(item, Path) for item in value.values())
+    ):
+        n._refuse()
+    try:
+        predecessor, successor = excision._roots(value["predecessor_root"], value["successor_root"])
+        if predecessor != predecessor_root:
+            n._refuse("namespace-binding-mismatch")
+        if (
+            namespace_root == successor
+            or namespace_root in successor.parents
+            or successor in namespace_root.parents
+        ):
+            n._refuse("namespace-root-unsafe")
+        return predecessor, successor
+    except excision.ExcisionError:
+        n._refuse("namespace-root-unsafe")
+
+

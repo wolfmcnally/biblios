@@ -1,0 +1,27 @@
+def execute_namespace(
+    handle: NamespaceHandle,
+    request: MutationRequest,
+    content_sources: Mapping[str, bytes],
+    excision_roots: object = None,
+) -> MutationResult:
+    if handle.read_only:
+        _authorize(handle.session, "admit")
+        _refuse("namespace-access-denied")
+    if type(request) is MutationRequest and request.kind == "excise":
+        from castle import namespace_excision as cutover
+
+        return cutover.execute(handle, request, content_sources, excision_roots)
+    if excision_roots is not None:
+        _authorize(handle.session, request.kind if type(request) is MutationRequest else "execute")
+        _refuse()
+    return handle.execute(request, content_sources)
+
+
+def read_namespace(
+    handle: NamespaceHandle, request: ReadRequest, *, destination: SnapshotDestination | None = None
+) -> ReadResult:
+    return handle.read(request, destination=destination)
+
+
+def namespace_operation(handle: NamespaceHandle, operation_id: str) -> OperationStatus:
+    return handle.operation(operation_id)

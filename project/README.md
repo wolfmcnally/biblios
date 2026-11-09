@@ -1,6 +1,6 @@
 # Biblios
 
-Portable knowledge bases called shelves, searched alone or federated in a stack. Version 0.1.0 provides a Python library and a thin 22-command CLI. It is experimental: APIs and storage formats may change before a stable release. MCP and explicit excision are not included; remove is logical deletion and retains bytes in Castle. A shelf has no security boundary of its own.
+Portable knowledge bases called shelves, searched alone or federated in a stack. The development version is 0.2.0; the published initial release is 0.1.0. The Python library and thin 22-command CLI remain available. It is experimental: APIs and storage formats may change before a stable release. The generic consumer library lane adds explicit binding, retry, injected conversion, strict search and finite retained-content/excision coordination; see [ADOPTION.md](ADOPTION.md). The CLI does not expose excision; remove remains logical deletion and retains bytes in Castle. MCP is not included. A shelf has no security boundary of its own.
 
 ## Install
 
@@ -14,16 +14,16 @@ uv sync --locked --managed-python
 uv run --locked --managed-python python -c "import biblios; print(biblios.__version__)"
 ```
 
-Expected version: `0.1.0`. The lockfile pins public Git revisions for the substrate libraries. A new installation needs GitHub and the package index. The wheel also records those exact Git requirements; installers need Git as well as access to those sources. No private account configuration or AI coding harness is required.
+Expected checkout version: `0.2.0`. The lockfile pins public Git revisions for the substrate libraries. A new installation needs GitHub and the package index. The wheel also records those exact Git requirements; installers need Git as well as access to those sources. No private account configuration or AI coding harness is required.
 
-For a downloaded wheel, create a separate environment and install the exact artifact you inspected:
+Version 0.2.0 is a development target, not a newly published artifact. For a reviewed wheel built from this source, create a separate environment and install the exact artifact you inspected:
 
 ```sh
 uv venv --python 3.12 .venv
 ```
 
 ```sh
-uv pip install --python .venv/bin/python biblios-0.1.0-py3-none-any.whl
+uv pip install --python .venv/bin/python biblios-0.2.0-py3-none-any.whl
 ```
 
 These paths are for macOS/Linux. See RELEASE.md for update/uninstall and reporting guidance.

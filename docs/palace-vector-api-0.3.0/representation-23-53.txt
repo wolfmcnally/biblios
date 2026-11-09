@@ -1,0 +1,31 @@
+class EmbeddingRepresentation:
+    """Caller-declared mapping, implementation, chunker and filename policy.
+
+    Each label is nonblank and at most 256 UTF-8 bytes. Equality is a necessary
+    condition for reuse, never proof of equal actual inputs or model behavior.
+    """
+
+    convention: str
+    implementation: str
+    chunker: str
+    name_policy: str
+
+    def __post_init__(self) -> None:
+        for value in asdict(self).values():
+            if not isinstance(value, str) or not value.strip() or len(value.encode()) > 256:
+                raise IndexError("representation labels must be nonblank, at most 256 UTF-8 bytes")
+
+    @property
+    def marker(self) -> str:
+        """Canonical value of EmbeddingIdentity.convention for this representation."""
+        return _PREFIX + json.dumps(asdict(self), sort_keys=True, separators=(",", ":"))
+
+
+def parse_representation(convention: str | None) -> EmbeddingRepresentation | None:
+    """Recognize exactly the default or a canonical explicit descriptor; refuse others."""
+    if convention == EMBED_CONVENTION:
+        return None
+    if (
+        not isinstance(convention, str)
+        or len(convention) > 8192
+        or not convention.startswith(_PREFIX)

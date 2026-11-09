@@ -138,7 +138,7 @@ wheels = [
 
 [[package]]
 name = "biblios"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "castle" },
@@ -161,7 +161,7 @@ requires-dist = [
     { name = "castle", git = "https://github.com/wolfmcnally/castle.git?subdirectory=project&tag=v0.3.0" },
     { name = "conric", git = "https://github.com/wolfmcnally/conric.git?rev=ed9286297e92b8c049f70eb15a3b5556ed107ff0" },
     { name = "drawbridge", git = "https://github.com/wolfmcnally/drawbridge.git?rev=359790cad3f23c2df7281e87004e51369fb9fba4" },
-    { name = "palace", git = "https://github.com/wolfmcnally/palace.git?tag=v0.3.0" },
+    { name = "palace", git = "https://github.com/wolfmcnally/palace.git?rev=34bda8dcbf887aeda3c9211dfbae14c5218affcd" },
 ]
 
 [package.metadata.requires-dev]
@@ -938,7 +938,7 @@ wheels = [
 [[package]]
 name = "palace"
 version = "0.3.0"
-source = { git = "https://github.com/wolfmcnally/palace.git?tag=v0.3.0#de950db73b7498084fe09b54b447bce9482c87bb" }
+source = { git = "https://github.com/wolfmcnally/palace.git?rev=34bda8dcbf887aeda3c9211dfbae14c5218affcd#34bda8dcbf887aeda3c9211dfbae14c5218affcd" }
 dependencies = [
     { name = "boto3" },
     { name = "conric" },

@@ -1,0 +1,15 @@
+{
+  "acceptance": {
+    "path": ".kickoff/runs/be0f6de7bccaa446e782ec6e09db754f/closure.json",
+    "sha256": "7cf1498d66105bfdf6bc0d4fbadc5c180debede6283d1b92175affe38fae10b3"
+  },
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/2fe51ffd59b616a053f82972254afa440032b37f2ce3b9d41b334910e289fc82;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "from": "in-progress",
+  "id": "6531f981096f4bc6b4147c576e2d6cbe",
+  "owner": "wolf",
+  "phase": "adapter-consumer-adoption",
+  "previous": "4209b9d730d24b61b3315ca105396a20",
+  "reason": "Six bounded library capability families qualified for experimental0.2.0; independent advice adopted, actual candidate gates green; manual usability remains open, no new release/tag or successor selected",
+  "state": "completed",
+  "writer": "wolf"
+}

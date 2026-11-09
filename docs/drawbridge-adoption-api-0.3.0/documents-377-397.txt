@@ -1,0 +1,21 @@
+def convert_file(
+    path: Path | str,
+    *,
+    ocr: OcrBackend | None = None,
+    options: ConversionOptions | None = None,
+    media_type: str | None = None,
+    profile: Profile | None = None,
+    plan: Plan | None = None,
+    artifacts_dir: Path | None = None,
+    budget: Any = None,
+    stages: bool = True,
+) -> FileConversion:
+    """Convert one file of any type. ``media_type`` overrides sniffing when the caller already knows it.
+
+    Without a ``profile`` nothing networked runs, and audio or video is refused. ``plan`` lets a caller
+    that already narrowed the stages pass its decision in; ``artifacts_dir`` is where a transcription
+    package is kept (beside the input by default). With ``stages`` the grooming stages the plan runs
+    (structure for a PDF, refinement for a transcript) produce ``semantic``; the fidelity mirror is never changed.
+
+    Raises a typed ``DrawbridgeError`` for every document-local failure, exactly as ``convert_pdf`` does.
+    """

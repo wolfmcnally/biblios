@@ -1,0 +1,15 @@
+class EmbedderConfig:
+    """Validated contents of ``<store>/meta/embedder.toml``."""
+
+    provider: str
+    model: str
+    dim: int
+    upstream: str | None = None
+    published_corpus: bool = False
+    published_corpus_note: str | None = None
+    published_corpus_asserted_at: str | None = None
+    endpoint: EndpointConfig | None = None
+    region: str | None = None
+    profile: str | None = None
+    representation: EmbeddingRepresentation | None = None
+

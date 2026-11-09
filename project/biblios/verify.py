@@ -31,8 +31,7 @@ def verify_shelf(shelf: Shelf) -> VerifyReport:
     expected: dict[str, str] = {}
     for entry in shelf.files():
         metadata = entry.metadata
-        assert metadata is not None
-        if not metadata.converted:
+        if metadata is None or not metadata.converted:
             continue
         if not metadata.current_for(entry.cas_id):
             problems.append(f"conversion recorded over replaced bytes: {entry.entry_id}")

@@ -1,0 +1,27 @@
+def identity_for(config: EmbedderConfig) -> EmbeddingIdentity:
+    """Resolve the complete stamp for one validated selector."""
+    provider = config.provider
+    if provider == PROVIDER_ENDPOINT:
+        if config.endpoint is None:
+            raise IndexError("endpoint embedder requires endpoint configuration")
+        provider = config.endpoint.provider_id
+    if provider == PROVIDER_OPENROUTER:
+        if config.upstream is None:
+            raise IndexError("openrouter embedder config requires an upstream")
+        provider = f"openrouter:{config.upstream}"
+    if provider == PROVIDER_BEDROCK:
+        if config.region is None:
+            raise IndexError("bedrock embedder config requires a region")
+        provider = f"bedrock:{config.region}"
+    return EmbeddingIdentity(
+        convention=(
+            config.representation.marker if config.representation else index_config.EMBED_CONVENTION
+        ),
+        model=config.model,
+        provider=provider,
+        dim=config.dim,
+    )
+
+
+def resolve_identity(store: Path) -> EmbeddingIdentity:
+    """Resolve the store identity without constructing a client or using the network."""

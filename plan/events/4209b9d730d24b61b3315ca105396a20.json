@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/2fe51ffd59b616a053f82972254afa440032b37f2ce3b9d41b334910e289fc82;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "from": "not-started",
+  "id": "4209b9d730d24b61b3315ca105396a20",
+  "owner": "wolf",
+  "phase": "adapter-consumer-adoption",
+  "previous": "0a00a80a0a01543f85cf6df3b7a8f825",
+  "reason": "Operator-authorized six-family library adoption targeting 0.2.0; same sole owner, full review/evidence; MCP held",
+  "state": "in-progress",
+  "writer": "wolf"
+}

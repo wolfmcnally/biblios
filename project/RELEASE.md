@@ -1,12 +1,12 @@
-# Biblios 0.1.0
+# Biblios 0.2.0 development
 
-This is an experimental Python library and command-line tool. It supports Python 3.12 and 3.13; the checked-in managed runtime is Python 3.12. macOS and Linux have been exercised during development. Windows and other Python versions are not qualified. The API and on-disk formats may change before a stable release; keep your original documents and inspect changes before updating an existing shelf.
+This is the development source for experimental 0.2.0, an experimental Python library and command-line tool. The initial published release remains 0.1.0; this document does not announce a new release. It supports Python 3.12 and 3.13; the checked-in managed runtime is Python 3.12. macOS and Linux have been exercised during development. Windows and other Python versions are not qualified. The API and on-disk formats may change before a stable release; keep your original documents and inspect changes before updating an existing shelf.
 
 ## Install and use
 
 See README.md for a source-checkout installation, command help and a hermetic example. Git and uv are prerequisites because the four substrate libraries are pinned to public Git revisions. A generic package with the same name on an index is not a substitute. The wheel records those exact Git requirements, so installers need Git and access to GitHub as well as the Python package index.
 
-The CLI has 22 operations over the existing library. It includes curation, reconciliation, status, verification, sealing, federated search, reading and source-byte download. An MCP server is not included. Excision remains deferred until its library contract is settled; remove is logical deletion and retains source bytes in Castle.
+The CLI has 22 operations over the existing library. It includes curation, reconciliation, status, verification, sealing, federated search, reading and source-byte download. An MCP server is not included. The finite consumer library contract, including explicit retained-content/excision coordination, is documented in [ADOPTION.md](ADOPTION.md). It adds no CLI command: remove is still logical deletion and retains source bytes in Castle.
 
 ## Update and uninstall
 

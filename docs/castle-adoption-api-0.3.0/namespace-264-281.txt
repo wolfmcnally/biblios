@@ -1,0 +1,18 @@
+class MutationRequest:
+    namespace_id: str
+    expected_cas: StoreIdentity
+    expected_revision: int
+    operation_id: str
+    kind: str
+    args: dict[str, Any]
+    schema: str = field(default="castle.namespace_request.v1", init=False)
+
+
+@dataclass(frozen=True)
+class ReadRequest:
+    namespace_id: str
+    expected_cas: StoreIdentity
+    at_revision: int | None
+    kind: str
+    args: dict[str, Any]
+    schema: str = field(default="castle.namespace_read_request.v1", init=False)

@@ -1,0 +1,17 @@
+def plan_one(
+    *,
+    conn: sqlite3.Connection,
+    file_kind: str,
+    change_kind: ChangeKind,
+    path: Path,
+    watch_root: Path,
+    full: bool = False,
+    verbose: bool = False,
+    log: Callable[[str], None],
+    source_bytes: bytes | None = None,
+) -> FilePlan:
+    """Read and diff one file without embedding or mutating SQLite."""
+    stored = _stored_path(path, watch_root)
+    rel = _log_relative_path(path, watch_root)
+    if change_kind == "deleted":
+        if path.exists():

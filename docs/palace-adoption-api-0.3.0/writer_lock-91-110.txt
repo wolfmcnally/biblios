@@ -1,0 +1,20 @@
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise WriterLockTimeout(
+                        f"index writer lock {path} is held by {_describe_holder(path)}; "
+                        f"waited {timeout:g}s — retry later or pass a longer lock timeout"
+                    ) from None
+                time.sleep(WRITER_LOCK_POLL_SECONDS)
+        record = {
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "operation": operation,
+            "started_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        }
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)

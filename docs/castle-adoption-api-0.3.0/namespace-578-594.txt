@@ -1,0 +1,17 @@
+def recover_namespace(
+    namespace_root: Path,
+    cas_root: Path,
+    session: AuthorizedSession,
+    recovery_roots: object,
+) -> RecoveryResult:
+    _authorize(session, "recover")
+    if recovery_roots is not None:
+        with NamespaceHandle(
+            namespace_root, cas_root, session, recover=True, cutover_recovery=recovery_roots
+        ) as handle:
+            return handle.cutover_result
+    with NamespaceHandle(namespace_root, cas_root, session, recover=True) as handle:
+        info = handle.info()
+        return RecoveryResult(
+            info.namespace_id, "ready", info.revision, info.cas, sorted(set(handle.recovered))
+        )

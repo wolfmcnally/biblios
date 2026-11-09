@@ -1,0 +1,3 @@
+class SnapshotView:
+    snapshot: SnapshotRecord
+    manifest: dict[str, Any]

@@ -1696,3 +1696,153 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: consumer-binding
+  kind: pytest
+  selectors:
+  - project/tests/test_consumer_binding.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_consumer_binding.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_consumer_binding.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Explicit storage-domain and handle lifecycle admission, local-only backend
+    and dynamic reader refusal without effects.
+  risk_class: consumer-public-contract
+  oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
+    expected bytes/revisions/effects/provider counts and full pre/post inventories;
+    finite actual durable interruption boundaries where applicable.
+  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+    marginal value and attempted work are recorded in the append-only admissions.
+    No baseline reassessment or retirement.
+  nearest_overlap: Existing shelf/seal tests own directory handles and do not exercise
+    borrowed consumer domains or dynamic read-only admission.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: consumer-curation
+  kind: pytest
+  selectors:
+  - project/tests/test_consumer_curation.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_consumer_curation.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_consumer_curation.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Original-request atomic curation, finite envelope, concurrent revision
+    admission and durable interruption/effect reporting.
+  risk_class: consumer-public-contract
+  oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
+    expected bytes/revisions/effects/provider counts and full pre/post inventories;
+    finite actual durable interruption boundaries where applicable.
+  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+    marginal value and attempted work are recorded in the append-only admissions.
+    No baseline reassessment or retirement.
+  nearest_overlap: Ordinary convenience curation may remint changed requests and has
+    no strict consumer replay/effect contract.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: consumer-pipeline
+  kind: pytest
+  selectors:
+  - project/tests/test_consumer_pipeline.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_consumer_pipeline.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_consumer_pipeline.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Contained injected conversion, exact compatible body reuse with fresh
+    filename vectors and durable provider/index completion.
+  risk_class: consumer-public-contract
+  oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
+    expected bytes/revisions/effects/provider counts and full pre/post inventories;
+    finite actual durable interruption boundaries where applicable.
+  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+    marginal value and attempted work are recorded in the append-only admissions.
+    No baseline reassessment or retirement.
+  nearest_overlap: Ordinary reconcile uses breadcrumb inputs and lacks nominated body
+    reuse, exclusive callback uncertainty and restart composition.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: consumer-search
+  kind: pytest
+  selectors:
+  - project/tests/test_consumer_search.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_consumer_search.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_consumer_search.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Strict supplied-member retrieval and completion fences, active lifecycle,
+    explicit lag and read-only checkpoint behavior.
+  risk_class: consumer-public-contract
+  oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
+    expected bytes/revisions/effects/provider counts and full pre/post inventories;
+    finite actual durable interruption boundaries where applicable.
+  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+    marginal value and attempted work are recorded in the append-only admissions.
+    No baseline reassessment or retirement.
+  nearest_overlap: Ordinary search deliberately permits degraded reranking and does
+    not admit supplied binding/view/cancellation contracts.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: consumer-history
+  kind: pytest
+  selectors:
+  - project/tests/test_consumer_history.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_consumer_history.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_consumer_history.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Finite retained/snapshot reads and explicit complete excision/recovery
+    with selected artifact disposition and survivor preservation.
+  risk_class: consumer-public-contract
+  oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
+    expected bytes/revisions/effects/provider counts and full pre/post inventories;
+    finite actual durable interruption boundaries where applicable.
+  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+    marginal value and attempted work are recorded in the append-only admissions.
+    No baseline reassessment or retirement.
+  nearest_overlap: Ordinary download reads live entries only; no existing Biblios
+    consumer cutover/successor proof supplies these observations.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []

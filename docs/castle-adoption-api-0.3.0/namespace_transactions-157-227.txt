@@ -1,0 +1,71 @@
+def prepare(
+    handle: store.NamespaceHandle,
+    request: dict[str, Any],
+    *,
+    evidence_present: bool = False,
+    publications=None,
+    snapshot: n.SnapshotRecord | None = None,
+    rejection: str | None = None,
+) -> None:
+    info = handle.load_info()
+    if info.revision == n.MAX_INTEGER:
+        n._refuse("namespace-revision-exhausted")
+    identity = request["operation_id"]
+    if (
+        handle.db.execute(
+            "SELECT 1 FROM entry_reservations WHERE entry_id=?", (identity,)
+        ).fetchone()
+        or handle.db.execute(
+            "SELECT 1 FROM snapshot_reservations WHERE snapshot_id=?", (identity,)
+        ).fetchone()
+        or identity in handle.authority_ids()
+    ):
+        n._refuse()
+    receipt: dict[str, Any] = {
+        "receipt": handle._ownership(request, info),
+        "expiry": {},
+        "publication": [
+            {"request": asdict(item), "receipt": None} for item in (publications or [])
+        ],
+        "snapshot": asdict(snapshot) if snapshot else None,
+        "precondition_error": rejection,
+    }
+    if request["kind"] == "expire-results":
+        for target in request["args"]["operation_ids"]:
+            target_row = _row(handle, target)
+            if target_row and target_row["state"] in {"committed", "rejected"}:
+                directory = handle.root / "operations" / target
+                receipt["expiry"][target] = {
+                    "receipt": handle._receipt(target),
+                    "request_sha256": hashlib.sha256(
+                        (directory / "request.json").read_bytes()
+                    ).hexdigest(),
+                }
+    content_io.check_capacity(receipt)
+    encoded_receipt = content_io.encode_recipe(receipt)
+    handle.db.execute("BEGIN IMMEDIATE")
+    handle.operation_id = identity
+    handle.write_started = True
+    handle.effect = "recovery-required"
+    handle.db.execute(
+        "INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            identity,
+            n._fingerprint(request),
+            "staging" if publications or rejection is not None else "prepared",
+            info.revision,
+            None,
+            None,
+            None,
+            n.canonical_bytes(request).decode(),
+            None,
+            None,
+            encoded_receipt,
+            None,
+        ),
+    )
+    store._commit(handle.db)
+    if not evidence_present:
+        handle._evidence(request, info)
+
+

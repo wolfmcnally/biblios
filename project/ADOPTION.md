@@ -1,0 +1,69 @@
+# Consumer adoption contract
+
+This guide describes the experimental 0.2.0 library interface. The published initial release remains 0.1.0. The interface composes the existing Castle namespace, Palace index and Drawbridge conversion capabilities; it provides no authentication, authorization, encryption, sandbox or external publication protocol. Keep those responsibilities in the surrounding application. No new CLI or MCP operation is introduced.
+
+## Bind existing storage
+
+Use `ShelfBinding` to declare one absolute domain root and five nonoverlapping roots within it: namespace, active Castle store, Markdown mirrors, Palace state and scratch. Bind the shelf ID, namespace ID and complete active Castle identity, including its epoch and generation. The active Castle root may be an explicitly supplied successor inside that domain. Do not point a binding at a retired predecessor or let another actor change ancestor directories, mounts or symlinks during its lifetime.
+
+`bind_shelf(binding, handle)` admits precisely the supplied Castle `NamespaceHandle`; it never opens a second coordinator. Set ownership to `borrowed` when the caller retains that handle, or `owned` when Biblios must close it on successful close and refused admission. `open_bound_shelf(binding, session)` opens one owned existing handle through the supplied Castle `AuthorizedSession`. It does not initialize missing storage, recover a pending operation or fall back to an older store. Initialization remains a separate explicit `init_shelf` operation; callers needing protected initialization supply the supported Castle environment themselves before binding.
+
+A bound lifetime checks actual roots, handle access, manifest, namespace and active storage identity. Only Palace's local SQLite vector backend is admitted in this lane. Injecting a model alone does not constrain Palace's separate vector backend. Missing, corrupt, retired or unfinished storage refuses; it is not treated as an empty replacement shelf.
+
+`access="read-only"` is independent of the shelf's sealed state. To prepare a dynamic shelf for a read-only mount, finish required derivation and call the writer's `checkpoint()`, then close all writers and readers. The checkpoint verifies mirror/index membership and records the exact rollback-journal database digest. Read-only opening requires that checkpoint for an existing index and creates no namespace lock or SQLite WAL/shared-memory sidecar. Requested mutations refuse before effects. This is not a seal or a promise that an unsupported filesystem preserves Castle's protection modes; qualify the actual destination.
+
+`close()` is idempotent and closes only owned resources. `active_work` counts supplied callbacks still in flight; closing during provider work refuses with `work-active`. Wait for the original call to finish and for the count to reach zero before unmounting. Biblios does not close caller-owned embedding or reranking providers.
+
+## Curate and retry
+
+A `CurationRequest` contains the caller's UUIDv4 operation ID, expected namespace revision and one typed action. Keep the complete original request until its outcome is known. Actions cover file/directory creation, replacement, metadata updates, relocation, logical deletion, snapshots, creation-only folder import and no-content subtree duplication. Imports can reserve parent and child IDs together, including empty directories. They are not arbitrary mixed create/replace/move/delete batches.
+
+Biblios serializes through the supplied namespace coordinator and refuses a new stale request before staging content. Castle binds the canonical operation kind, exact content addresses and sizes, metadata, targets, names, IDs and relevant option presence. An exact completed replay returns the original durable result and IDs, even after later namespace mutations. Reusing its operation ID with a changed request refuses; generating a new ID is a new operation, not recovery. `operation(operation_id)` reports the actual durable Castle status, with `unknown` meaning absent rather than successful.
+
+The declared import/copy envelope is 100 files, 100 folders, 64 MiB total source payload, 4 MiB per file and 255 UTF-8 bytes per normalized name, subject to Castle validity and namespace capacity. Castle's separate 16 MiB canonical metadata-request limit also applies. Copy plans freeze source/destination IDs and reuse the underlying content objects; independent destination entries do not depend on the donor entry continuing to exist.
+
+After interruption, retain actual residue and the original operation. A reader does not repair it. The owning coordinator uses Castle's public `recover_namespace` with the original namespace/store/session, then explicitly opens the recovered binding and replays the original request. Recovery is a local durability boundary, not an assertion about an external client acknowledgment.
+
+## Supply conversion and model providers
+
+`ConversionRequest` passes exact original bytes, declared media type, display name and an explicit operation scratch directory to the injected converter. It returns a typed converted or unconverted `ConversionResult` with converter/version provenance. `ConversionConfigurationError` reports a fixed safe configuration refusal; unsupported, document-failed and deferred document outcomes remain distinct. Original downloads are unaffected. Biblios never implicitly starts a converter, OCR engine or model service in this lane.
+
+The renderer returns a bounded `MirrorDocument` with one independently designated filename section. `render_escaped` is an explicit optional policy that quotes source structure while preserving its text, then appends a finite filename section. It is not imposed on existing mirrors. A `DerivationPolicy` names the converter, rendering, embedding convention/implementation, chunker and filename policy; equal vector dimensions alone establish no compatibility. Body and mirror bounds are explicit; malformed UTF-8 and oversized callback results refuse without truncation.
+
+Conversion checkpoints bind the active namespace/store/epoch, entry/source identity, display name, media type and policy to the caller's operation ID. Completed results replay without invoking completed callbacks. If a callback was dispatched but no durable result was recorded, status is uncertain: an automatic retry is forbidden. The consumer must reconcile that external outcome and explicitly opt into retrying it. This provides neither exactly-once remote execution nor a billing guarantee. Scratch and content-bearing checkpoints stay in the declared domain; supplied Python callbacks remain responsible for their own I/O.
+
+## Derive independent destination rows
+
+Create `ConsumerPipeline` with an explicit converter, renderer, `input_view`, `DerivationPolicy` and document embedder. The selector's Palace representation must equal `pipeline.representation` before indexing begins. Declare it explicitly for an empty index using Palace's supported selector API; an incompatible existing index refuses and requires a deliberate derived-state rebuild. Biblios does not relabel old breadcrumb vectors. `literal_inputs` is an optional explicit input view that submits each exact chunk body, including its Markdown heading, without a destination path prefix. Query embedding remains a separately supplied provider.
+
+Call `bound.derive(pipeline, entry_id, operation_id=original_id)` to persist conversion, bounded model results and the actual atomic Palace publication. `pipeline.status(bound, operation_id=original_id)` reports recorded local work without dispatch. A completed operation replays only while its actual destination mirror and committed vector view still match. Completed observations retain their original storage/revision view and are labeled on replay. Cancellation cannot undo an external dispatch or a committed index.
+
+After deriving a donor, capture `pipeline.donor(bound, entry_id, operation_id=donor_operation_id)` and nominate that finite `ReuseDonor` for a destination derivation. Only same-shelf live source identity, current converted mirror, complete representation, exact ordered embedding-input digests and the captured committed view qualify. Missing or ineligible donors take the ordinary path; malformed or stale binding/integrity evidence refuses. `reuse_converted_body=True` additionally declares that this converter/policy permits reuse of the converted body across destination names; leave it false for converters whose body depends on the name. Compatible body vectors may still be reused after ordinary conversion when their exact inputs agree.
+
+The renderer must produce exactly one final filename section, whose single chunk contains the destination filename. The destination name is freshly embedded even when two filenames match. Body vectors are composed in the destination's own plan order and committed as independent rows. Deleting the donor cannot delete or invalidate the destination. Palace's recorded input digests attest to the submitted-input claim; they do not prove an external provider's behavior.
+
+Use `pipeline.finish(bound, operation_id=completion_id)` after processing current entries to remove obsolete index members and validate the complete current watermark. It performs no conversion or embedding and refuses pending entries. `bound.checkpoint()` remains the separate writer operation that prepares a read-only mount. Injected progress reports count completed embedding rows; observers describe committed local effects and never imply external publication. The complete runnable local-provider example is `examples/consumer_binding.py`.
+
+## Search and observe completion
+
+`BoundShelf.search` and `open_bound_stack` accept explicitly supplied providers. Only admitted supplied shelves participate; Palace performs one union fusion/rerank for a stack. Provider, storage or reranking failures produce a typed error rather than a degraded accepted answer. Known unbuilt and lagging shelves remain visible in status. Current-hit checks preserve live entry/content/mirror identities, and a changed admitted view during a provider call refuses the old answer.
+
+`CallControl` carries an absolute monotonic deadline and a cooperative cancellation predicate. Checks before and after synchronous callbacks prevent accepted late results. They cannot forcibly terminate arbitrary Python code or undo an already dispatched external operation. Keep the binding and providers alive until the call actually returns.
+
+`Observation` identifies the actual local operation, storage view, revisions and affected entries. A failed observer retains the durable effect and its observation in `ConsumerError`; the caller can inspect status and replay the original request. An unsigned callback delivery is not authenticated consumer publication. `ConsumerError` exposes a fixed code, stage, effect and optional observation; provider exception text is discarded. Effects distinguish no effect, namespace commit, derived commit, recovery required and uncertain outcome.
+
+## Retain, inspect and excise
+
+Use `retained()`, `read_retained(reference)`, `snapshot(id)` and `history_inventory()` through the bound coordinator. References bind exact content to the namespace/store/epoch and finite currently retained membership. Historical owner fields describe the captured occurrence; a later snapshot or operation may retain the same exact content. A reference is not unrestricted CAS access. Replaced and deleted bytes remain historical; they do not become current search hits.
+
+Excision is explicit and forward-only. `preview_excision` uses Castle's complete content/entry/metadata/operation/snapshot closure. Supply a finite `ExcisionRequest`, explicit snapshot actions and an absent successor root within the declared domain. Accept the exact returned request; an incomplete shared-content selection refuses. Clearing only metadata preserves surviving bytes as metadata-free entries; Biblios does not invent replacement metadata or convert/search those entries.
+
+`excise` coordinates Castle retirement with derived mirror/index/checkpoint disposition. It invalidates the old facade and removes selected derived rows, mirrors, free-page disclosures and old-epoch conversion/scratch records while retaining unselected rows and bytes. The result supplies a successor binding with `service_resumed=False`. Explicitly reconcile your own publication/resumption policy before opening that successor; a library result cannot assert that policy was satisfied.
+
+An interrupted cutover leaves the library's pending disposition marker and actual Castle recovery records. `recover_excision(binding, session, original_request)` accepts only the original roots, request digest and operation ID, resumes Castle's supported recovery, and completes idempotent derived cleanup. It never falls back to the predecessor. Unfinished cleanup blocks admission, including a newly opened successor. This covers Biblios-managed derived artifacts, not provider backups, independently copied documents, application logs or consumer-controlled publication history.
+
+## Storage and release limits
+
+The caller owns storage/mount/ancestor custody and must preserve Castle's filesystem protection requirements. A shared filesystem that changes immutable object modes is not qualified merely because a local temporary directory works. Read-only mount qualification and installed-artifact qualification establish different properties. Keep originals and exercise a disposable shelf before adopting a changed experimental version.
+
+The CLI remains a thin interface over its existing operations; consumer excision is a library call, not a new command. MCP, cross-shelf vector caches, new security mechanisms and unrestricted privileged execution are outside this contract. Source delivery does not publish a new version or certify a consumer application's behavior.

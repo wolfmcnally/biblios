@@ -60,6 +60,7 @@ from biblios.errors import BibliosError, DuplicateContentError, SealedShelfError
 from biblios.progress import write_watermark
 
 if TYPE_CHECKING:
+    from biblios.binding import ShelfBinding
     from biblios.progress import EntryProgress, IndexStatus
     from biblios.reconcile import ReconcileReport
     from biblios.seal import SealRecord
@@ -196,10 +197,21 @@ def _split(path: str) -> list[str]:
 class Shelf:
     """An open shelf. Use as a context manager; every method is one library call."""
 
-    def __init__(self, root: Path, manifest: ShelfManifest, handle: NamespaceHandle) -> None:
+    def __init__(
+        self,
+        root: Path,
+        manifest: ShelfManifest,
+        handle: NamespaceHandle,
+        *,
+        layout: ShelfBinding | None = None,
+        owns_handle: bool = True,
+    ) -> None:
         self.root = Path(root).resolve()
         self.manifest = manifest
         self._handle = handle
+        self._layout = layout
+        self._owns_handle = owns_handle
+        self._closed = False
         # Held by a running reconcile step for its whole run and by a seal for its whole
         # transition, so neither can start while the other is writing derived state.
         self._step_lock = threading.Lock()
@@ -216,19 +228,19 @@ class Shelf:
 
     @property
     def castle_root(self) -> Path:
-        return self.root / CASTLE_DIR
+        return self._handle.cas_root
 
     @property
     def namespace_root(self) -> Path:
-        return self.root / NAMESPACE_DIR
+        return self._handle.root
 
     @property
     def mirror_root(self) -> Path:
-        return self.root / MIRROR_DIR
+        return self._layout.mirror_root if self._layout is not None else self.root / MIRROR_DIR
 
     @property
     def palace_store(self) -> Path:
-        return self.root / PALACE_DIR
+        return self._layout.palace_root if self._layout is not None else self.root / PALACE_DIR
 
     @property
     def chunks_db(self) -> Path:
@@ -243,11 +255,20 @@ class Shelf:
         return self.manifest.mode == "sealed"
 
     def _refuse_if_sealed(self) -> None:
+        self._ensure_open()
         if self.sealed:
             raise SealedShelfError(f"shelf {self.shelf_id} is sealed; unseal it before writing")
+        if self._handle.read_only:
+            raise SealedShelfError("this shelf handle is read-only")
 
     def close(self) -> None:
-        self._handle.close()
+        if self._owns_handle:
+            self._handle.close()
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise BibliosError("shelf handle is closed")
 
     def __enter__(self) -> Shelf:
         return self
@@ -258,6 +279,7 @@ class Shelf:
     # ---- namespace plumbing -----------------------------------------------------------
 
     def _live(self) -> dict[str, EntryRecord]:
+        self._ensure_open()
         # Castle holds this re-entrant lock for the whole of a mutation, so a reader in
         # another thread sees only committed entry sets, never the vacated rows inside one.
         with self._handle.mutex:
@@ -269,6 +291,7 @@ class Shelf:
         return self._read("info", {}).revision
 
     def _read(self, kind: str, args: dict[str, Any]) -> Any:
+        self._ensure_open()
         request = ReadRequest(self._namespace_id, self._cas, None, kind, args)
         return read_namespace(self._handle, request).value
 
@@ -688,10 +711,19 @@ class Shelf:
         embedder: Embedder | None = None,
         reranker: Reranker | None = None,
         rerank: bool = True,
+        strict: bool = False,
     ) -> SearchResult:
         from biblios.search import search
 
-        return search(self, query, limit=limit, embedder=embedder, reranker=reranker, rerank=rerank)
+        return search(
+            self,
+            query,
+            limit=limit,
+            embedder=embedder,
+            reranker=reranker,
+            rerank=rerank,
+            strict=strict,
+        )
 
     def read(self, entry_id: str, *, page: int | None = None) -> Page:
         from biblios.search import read

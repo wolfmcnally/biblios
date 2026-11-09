@@ -1,0 +1,19 @@
+def commit_plan(
+    *,
+    conn: sqlite3.Connection,
+    plan: FilePlan,
+    embeddings: Sequence[Sequence[float]],
+    identity: EmbeddingIdentity | None,
+    log: Callable[[str], None],
+) -> IndexOutcome:
+    """Commit one plan transactionally on the calling writer thread.
+
+    The caller holds the store's writer lock. Inside the transaction the
+    store's recorded identity must still equal ``identity`` (the embedder
+    that produced ``embeddings``), and the plan's prior state must be the
+    state the store holds now; otherwise nothing is written and
+    :class:`StalePlanError` (or the identity refusal) is raised. A full
+    rebuild passes ``identity=None``: it holds the lock for its whole run and
+    replaces a stale or missing certificate at its end, so its commits are
+    the remedy for a mismatch rather than subject to it.
+    """

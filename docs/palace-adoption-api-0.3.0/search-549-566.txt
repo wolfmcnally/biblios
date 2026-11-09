@@ -1,0 +1,18 @@
+def search_reranked(
+    *,
+    query: str,
+    store: Path,
+    rerank_in: int = RERANK_IN,
+    limit: int = RERANK_OUT,
+    mode: SearchMode = "hybrid",
+    pool: int = DEFAULT_POOL,
+    rrf_k: int = RRF_K,
+    hyde: bool = False,
+    multi_query: int | None = None,
+    embedder: Embedder | None = None,
+    reranker: Reranker | None = None,
+    expander: QueryExpander | None = None,
+    strict: bool | None = True,
+    filters: Sequence[MetadataFilter] = (),
+) -> RerankedSearch:
+    """Retrieve and rerank, optionally degrading operational failures to fused order."""

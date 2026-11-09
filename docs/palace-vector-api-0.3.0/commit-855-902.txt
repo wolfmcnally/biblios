@@ -1,0 +1,48 @@
+def commit_plan(
+    *,
+    conn: sqlite3.Connection,
+    plan: FilePlan,
+    embeddings: Sequence[Sequence[float]],
+    identity: EmbeddingIdentity | None,
+    log: Callable[[str], None],
+) -> IndexOutcome:
+    """Commit one plan transactionally on the calling writer thread.
+
+    The caller holds the store's writer lock. Inside the transaction the
+    store's recorded identity must still equal ``identity`` (the embedder
+    that produced ``embeddings``), and the plan's prior state must be the
+    state the store holds now; otherwise nothing is written and
+    :class:`StalePlanError` (or the identity refusal) is raised. A full
+    rebuild passes ``identity=None``: it holds the lock for its whole run and
+    replaces a stale or missing certificate at its end, so its commits are
+    the remedy for a mismatch rather than subject to it.
+    """
+    if len(embeddings) != len(plan.rows):
+        raise IndexError(
+            f"embedder returned {len(embeddings)} vectors for {len(plan.rows)} planned rows"
+        )
+    if plan.noop is not None and not plan.full_delete:
+        return plan.noop
+    representation = parse_representation(plan.convention)
+    if identity is not None and plan.convention != identity.convention:
+        raise IndexError("file plan embedding representation does not match identity")
+    if representation is not None:
+        if identity is None:
+            raise IndexError("supplied embedding inputs require an explicit identity")
+        _validate_supplied_plan(plan)
+    elif plan.embed_inputs != tuple(
+        scored_text(path=plan.stored, heading=row.heading, body=row.body) for row in plan.rows
+    ):
+        raise IndexError("default embedding inputs must equal the complete breadcrumb text")
+    dim = declared_vector_dim(conn)
+    if dim is None or (identity is not None and dim != identity.dim):
+        raise IndexError("embedding vector table width does not match identity")
+    vector_blobs = []
+    for vector in embeddings:
+        if len(vector) != dim or any(not math.isfinite(value) for value in vector):
+            raise IndexError("embedding vectors must have the declared dimension and finite values")
+        try:
+            vector_blobs.append(sqlite_vec.serialize_float32(vector))
+        except (OverflowError, ValueError) as exc:
+            raise IndexError("embedding vector cannot be represented as float32") from exc
+    ingest_time = _now_iso()

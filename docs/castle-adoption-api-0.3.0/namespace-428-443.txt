@@ -1,0 +1,16 @@
+class OperationStatus:
+    namespace_id: str
+    operation_id: str
+    state: str
+    result: MutationResult | None
+    error_code: str | None
+    next_action: str
+
+
+@dataclass(frozen=True)
+class RecoveryResult:
+    namespace_id: str
+    state: str
+    revision: int
+    cas_binding: StoreIdentity
+    completed_operation_ids: list[str]

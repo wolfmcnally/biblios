@@ -65,6 +65,7 @@ def search(
     embedder: Embedder | None = None,
     reranker: Reranker | None = None,
     rerank: bool = True,
+    strict: bool = False,
 ) -> SearchResult:
     store = shelf.palace_store
     if not embedder_config_path(store).exists():
@@ -85,7 +86,7 @@ def search(
             rerank_in=max(limit, 20),
             embedder=embedder,
             reranker=reranker,
-            strict=False,
+            strict=strict,
         )
         hits, status = ranked.hits, ranked.status
     else:
@@ -105,6 +106,8 @@ def search(
         try:
             body = palace_search.expand(chunk_id=hit.chunk_id, store=store).body
         except palace_errors.IndexError:
+            if strict:
+                raise
             refused.append(entry_id)
             continue
         results.append(
@@ -148,11 +151,15 @@ def read(shelf: Shelf, entry_id: str, *, page: int | None = None) -> Page:
     if entry.metadata is None or not entry.metadata.converted:
         raise BibliosError(f"entry {entry_id} has no mirror")
     _header, body = parse_mirror_header(shelf.mirror_path(entry_id))
+    return _page(entry, body, page=page)
+
+
+def _page(entry: Entry, body: str, *, page: int | None) -> Page:
     pages = page_sections(body) or [text for _heading, text in sections(body)]
     if page is None:
         return Page(entry=entry, page=None, text=body, page_count=len(pages))
     if not 1 <= page <= len(pages):
-        raise BibliosError(f"entry {entry_id} has no page {page}")
+        raise BibliosError(f"entry {entry.entry_id} has no page {page}")
     return Page(entry=entry, page=page, text=pages[page - 1], page_count=len(pages))
 
 

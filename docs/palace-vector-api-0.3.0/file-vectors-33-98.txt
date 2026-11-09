@@ -1,0 +1,66 @@
+class CommittedChunkVector:
+    """A committed chunk, its float32 vector, and its exact UTF-8 input digest."""
+
+    chunk: ChunkRecord
+    vector: tuple[float, ...]
+    input_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class FileVectorSnapshot:
+    """One nominated file view; not a reservation, authorization or store checkpoint."""
+
+    file: FileRecord
+    identity: EmbeddingIdentity
+    chunks: tuple[CommittedChunkVector, ...]
+    view_sha256: str
+
+
+_CHUNK_COLUMNS = tuple(field.name for field in fields(ChunkRecord))
+_FILE_COLUMNS = tuple(field.name for field in fields(FileRecord))
+
+
+def _byte_lengths(columns: tuple[str, ...]) -> str:
+    return "+".join(f"coalesce(length(cast({name} AS BLOB)),0)" for name in columns)
+
+
+def _chunk_identity(chunk: ChunkRecord) -> str:
+    if chunk.kind == "jsonl" and chunk.frontmatter_json is not None:
+        try:
+            frontmatter = json.loads(chunk.frontmatter_json)
+        except ValueError as exc:
+            raise IndexError("invalid committed JSONL identity evidence") from exc
+        if isinstance(frontmatter, dict) and frontmatter.get("jsonl_record_id") is not None:
+            return compute_record_id({"jsonl_record_id": frontmatter["jsonl_record_id"]})
+    return compute_chunk_id(
+        watch_root=chunk.watch_root,
+        path=chunk.path,
+        section_index=chunk.section_index,
+        window_index=chunk.window_index,
+        body_hash=chunk.body_hash,
+    )
+
+
+def read_file_vectors(
+    *,
+    conn: sqlite3.Connection,
+    watch_root: str | Path,
+    path: str,
+    expected_identity: EmbeddingIdentity,
+    max_chunks: int = 16384,
+    max_bytes: int = 67108864,
+) -> FileVectorSnapshot | None:
+    """Read exactly one committed file, refusing malformed or oversized evidence.
+
+    Hold the same-store writer_lock before opening this idle connection until
+    after planning, embedding, publication and connection close, on one writer
+    thread. This reader never locks, mutates, commits or rolls back. After any
+    lock release, reread and revalidate before using vectors. Limits count rows
+    and encoded database payload bytes (not Python object overhead), and refuse
+    rather than truncate. No provider or caller eligibility check is performed.
+    """
+    if conn.in_transaction:
+        raise IndexError("read_file_vectors requires an idle connection, not an active transaction")
+    if (
+        not isinstance(path, str)
+        or not path

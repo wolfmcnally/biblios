@@ -1,0 +1,21 @@
+def with_embedding_inputs(
+    plan: FilePlan, *, representation: EmbeddingRepresentation, inputs: Sequence[str]
+) -> FilePlan:
+    """Bind exact ordered caller inputs to a full destination plan, preserving its rows.
+
+    The caller embeds these exact strings using the declared implementation and
+    supplies vectors in this order to commit_plan. Filename selection and fresh
+    filename embedding belong to the caller. JSONL record IDs are intentionally
+    not destination-owned, so JSONL composition is excluded.
+    """
+    _validate_supplied_plan(plan)
+    values = tuple(inputs)
+    if (
+        isinstance(inputs, str)
+        or len(values) != len(plan.rows)
+        or any(not isinstance(value, str) for value in values)
+    ):
+        raise IndexError("supply exactly one embedding input string per planned row")
+    return replace(plan, embed_inputs=values, convention=representation.marker)
+
+

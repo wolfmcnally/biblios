@@ -187,9 +187,15 @@ def path_of(entry_id: str, live: dict[str, EntryRecord], root_id: str) -> str:
 
 
 def view(record: EntryRecord, live: dict[str, EntryRecord], root_id: str) -> Entry:
-    metadata = EntryMetadata.from_mapping(record.metadata) if record.kind == "file" else None
+    # Castle's explicit metadata-only excision preserves the live entry with {}.
+    # Absence is redaction, never newly invented conversion or descriptive data.
+    metadata = (
+        EntryMetadata.from_mapping(record.metadata)
+        if record.kind == "file" and record.metadata != {}
+        else None
+    )
     if record.kind == "directory" and record.entry_id != root_id:
-        if record.metadata != DIRECTORY_METADATA:
+        if record.metadata not in ({}, DIRECTORY_METADATA):
             raise EntryMetadataError("directory entry does not carry biblios.entry/1 metadata")
     return Entry(
         entry_id=record.entry_id,

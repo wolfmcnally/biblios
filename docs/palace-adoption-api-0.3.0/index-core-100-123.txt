@@ -1,0 +1,24 @@
+class FilePlan:
+    """Immutable value crossing the producer → embed → writer seam."""
+
+    kind: str
+    stored: str
+    rel: str
+    watch_root: str
+    noop: IndexOutcome | None
+    embed_inputs: tuple[str, ...]
+    chunk_ids: tuple[str, ...]
+    rows: tuple[PendingRow, ...]
+    stale_chunk_ids: tuple[str, ...]
+    file_row: PendingFileRow | None
+    jsonl_offset: int | None
+    full_delete: bool
+    counts: IndexOutcome
+    # The store state this plan was computed against, or ``None`` when there
+    # is nothing to verify: full plans replace unconditionally, delete plans
+    # verify the file's absence instead, and noop plans never commit.
+    prior_signature: str | None
+
+    def __post_init__(self) -> None:
+        if not (len(self.embed_inputs) == len(self.chunk_ids) == len(self.rows)):
+            raise ValueError("file plan embed inputs, chunk ids, and rows must have equal lengths")
