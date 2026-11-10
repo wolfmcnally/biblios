@@ -1,37 +1,37 @@
-# Biblios 0.1.0 release preparation
+# Biblios 0.2.0 release preparation
 
-This experimental library and CLI release candidate is being prepared for the existing repository. Publication and the one-history transition require approval of the exact qualified content and irreversible operations. Nothing in this record claims publication or completion of that transition.
+Version 0.2.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It follows the published initial 0.1.0 release and includes the intervening library capabilities; it is not a backport labeled 0.1.1. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The proposed destination is the existing GitHub repository, with `master` as default branch and `v0.1.0` as proposed version tag. Package artifacts are `biblios-0.1.0-py3-none-any.whl` and `biblios-0.1.0.tar.gz`. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is proposed. Exact contents and digests belong to the reviewed release packet.
+The version tag is `v0.2.0`. The attached package artifacts are `biblios-0.2.0-py3-none-any.whl`, `biblios-0.2.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
-Python support is 3.12 and 3.13, bounded by Palace's declared contract; the managed checkout runtime is Python 3.12. Git and uv fetch the public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
+Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
 
-The exact qualified dependency revisions are Palace `de950db73b7498084fe09b54b447bce9482c87bb`, Castle `9351299b11f0a0272a08ee406a768d591ed847c2` (its `project` subdirectory), Drawbridge `359790cad3f23c2df7281e87004e51369fb9fba4` and Conric `ed9286297e92b8c049f70eb15a3b5556ed107ff0`. Each revision's package metadata and root MIT license were anonymously reachable on 2026-11-09. Built metadata must retain these requirements; uv-only overrides do not establish a wheel's dependency sources.
+## Changes since 0.1.0
+
+The library adds explicit consumer-controlled shelf binding and read-only use, revision-bound retry, injected conversion and rendering, same-shelf body-vector reuse with independent destination-name embeddings, strict search and publication observations, and coordinated finite retained-content/history/excision access. Destination rows remain independent after donor removal. Excision is an explicit library operation; the CLI still has 22 commands and logical removal retains source bytes. MCP remains held.
+
+The optional Conric `biblios.max_file_bytes` setting is a positive integer and defaults to exactly 104857600 bytes (100 MiB). Consumer create, replace, import and copy use the configured limit when passed the composed settings. Aggregate import/copy admission is at least that per-file limit. Conversion body/mirror, chunk-count, checkpoint and vector-snapshot controls remain separate finite limits; source admission does not promise that every permitted upload fits every processing budget.
+
+Explicit larger finite conversion envelopes and snapshot budgets are supported without changing their defaults, model dimensions, rendering or input identity. Durable checkpoint admission measures encoded UTF-8 JSON bytes against the existing 512 MiB ceiling. Retry preserves uncertain dispatch and committed-but-unaccepted distinctions; increasing a read-only resource budget does not silently change the original semantic request or redispatch conversion.
 
 ## Public baseline and provenance
 
-The proposed first public tree is a fresh baseline rather than an imported private phase ledger. It contains the implemented shelf library, stacks, sealing, CLI, tests and unchanged validation machinery. It carries no fabricated completed phase events or copied acceptance closures. Its future roadmap contains only unstarted work, including held MCP work. Implemented prerequisites belong to the shipped baseline, without a counterfeit completion record.
+The initial release established one canonical public history. This ordinary release continues that same history without replacement, parallel private development lineage or cleanup of required operational records. Completed development records remain historical evidence, not a claim that a later artifact was installed or that human usability was accepted.
 
-Pre-release lifecycle records, raw logs, source snapshots and private qualification runs are not public artifacts. Their eventual disposition and discarded-history removal require the explicit transition approval; current private records stay intact during preparation. The public tree must pass fresh qualification using public prerequisites. Source-clone results and installed-wheel tests are distinct observations.
+The package source allowlist includes the library, tests, examples, metadata, lockfile, license and user instructions. The wheel contains the package, console entry point, metadata and license notices. Repository governance, private execution evidence and local configuration are excluded from both package artifacts. The generated GitHub repository source archives are separate from these curated package artifacts.
 
-## Qualification observations
+## Qualification and limits
 
-On 2026-11-09, a new Python 3.12 environment installed the actual wheel from declared public sources without private configuration or a reused dependency cache. The unchanged 66 product tests ran against that installed package outside any source checkout. Console and module help, a hermetic shelf workflow and an independent build/install from the source distribution were exercised. The wheel records exact substrate Git revisions; its remaining dependencies resolve from their declared public requirements, whereas the source checkout uses the complete lockfile.
+Release qualification inspects the actual wheel/source archive, installs each into an isolated environment outside the checkout, verifies dependency sources and installed package origin, and exercises synthetic library/CLI behavior. The repository's changed-path selection and final bare full gate bind the final release source. Their exact results and artifact digests belong to the release receipt and GitHub release notes; historical development runs are preserved separately.
 
-A fresh clone of the proposed single-root public baseline passed all 243 repository tests and the unchanged policy gates using public prerequisites. That observation precedes this release-summary update; the final source payload must receive its own exact-tree qualification before publication. The original failed qualification is retained during preparation: temporary storage for required execution evidence was correctly refused, and the launcher was corrected to use durable private state without changing tests or validators. The manual build retains the known version warning between the pinned admonish plugin and mdBook; its links, assets, anchors, search and print checks passed.
+The configured per-file limit is tested with small synthetic fixtures. No 100 MiB stress test, full-RAG boundary run, memory benchmark or performance gate is part of this release. The known pinned mdBook/admonish version warning remains separate from successful generated-link, asset, anchor, search and print checks. Bounded desktop/narrow manual inspection passed on the unchanged affected guide sources. Human CLI/library usability judgments remain open.
 
-These are macOS observations. Earlier Linux/Amazon Linux development qualification is historical capability evidence, not a new Linux installation of these release artifacts. Python 3.13 is admitted by dependency metadata but has not received this clean-install run. Windows remains unqualified. Manual document inspection and the CLI human usability demo are separate from these automated results.
+Keep original documents. The API and on-disk formats may change before a stable release. Existing shelf data and configuration are not modified by installing or uninstalling the application. Biblios supplies no encryption, authentication or authorization; surrounding applications own those boundaries. No automatic legacy-shelf conversion or external provider call is implied by installation.
 
 ## Licensing and notices
 
 Original work is Copyright © 2026 Wolf McNally under [MIT](LICENSE), also included in the standalone package. [Package notices](project/NOTICE) distinguish separately installed dependencies and optional tools. Vellric's separate AGPL terms are not replaced by Biblios's MIT declaration.
 
-Repository-only third-party assets retain their notices: ECharts under Apache-2.0; the included Font Awesome SVG icons under CC BY 4.0; mdBook reference/theme material under its included MPL-2.0 license; admonish material under its included MIT license. The [reference catalog](docs/README.md) records provenance and limited quotation bases for other excerpts. These repository governance/documentation assets are excluded from the wheel and package source distribution.
-
-## Boundaries
-
-MCP remains held. Excision's exposed scope remains unresolved. Existing shelves, configuration and services are unchanged. The CLI human usability demo remains open; automated checks do not supply that judgment.
-
-The final packet must identify exact artifacts/source, privacy and license dispositions, real clean-install and unchanged-gate results, controlled old refs/object stores and historical copies, inaccessible-copy limits, installed-user continuity and forward-only reconciliation after partial failure. Replacing a GitHub ref alone does not prove removal of cached or unreferenced objects. This document authorizes no visibility change, cleanup, remote replacement, tag or publication.
+Repository-only third-party assets retain their notices: ECharts under Apache-2.0, included Font Awesome SVG icons under CC BY 4.0, mdBook reference/theme material under its included MPL-2.0 license, and admonish material under its included MIT license. The [reference catalog](docs/README.md) records provenance and limited quotation bases for other excerpts. These repository governance/documentation assets are excluded from the package artifacts.

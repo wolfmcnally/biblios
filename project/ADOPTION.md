@@ -1,6 +1,6 @@
 # Consumer adoption contract
 
-This guide describes the experimental 0.2.0 library interface. The published initial release remains 0.1.0. The interface composes the existing Castle namespace, Palace index and Drawbridge conversion capabilities; it provides no authentication, authorization, encryption, sandbox or external publication protocol. Keep those responsibilities in the surrounding application. No new CLI or MCP operation is introduced.
+This guide describes the experimental 0.2.0 library interface. The interface composes the existing Castle namespace, Palace index and Drawbridge conversion capabilities; it provides no authentication, authorization, encryption, sandbox or external publication protocol. Keep those responsibilities in the surrounding application. No new CLI or MCP operation is introduced.
 
 ## Bind existing storage
 
