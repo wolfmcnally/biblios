@@ -1883,3 +1883,27 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: fixture-git-signing
+  kind: pytest
+  selectors:
+  - tests/test_fixture_git_signing.py
+  source_paths:
+  - tests/conftest.py
+  - tests/test_fixture_git_signing.py
+  covers:
+  - tests/conftest.py
+  - tests/test_fixture_git_signing.py
+  contract: Synthetic fixture repositories never invoke the operator's personal commit
+    or tag signing; existing command-scope Git configuration entries are preserved.
+  risk_class: isolation
+  oracle: Real git commit and annotated tag in a synthetic repository whose repository
+    configuration demands signing through an always-refusing program, plus the pure
+    overlay function over explicit environments.
+  admission: 'As of 2026-11-11, inter-phase fixture correction directed by the factotum
+    after recurring gate setup errors (gpg ''Cannot allocate memory''): four new proofs,
+    red-witnessed. No retirement.'
+  nearest_overlap: Every repository fixture commits, but none asserts that personal
+    signing is neutralised; their setup failures were the only signal.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
