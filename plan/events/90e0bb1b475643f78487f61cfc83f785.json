@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/59e758c0189c9295e13ca0b8457f9837c9513b680404232b3727b0f34e54da2d;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "from": "not-started",
+  "id": "90e0bb1b475643f78487f61cfc83f785",
+  "owner": "biblios-codex-continuation",
+  "phase": "responsive-provider-reads",
+  "previous": "40bb771e46c8438f940272cfc15f635f",
+  "reason": "Authorized bounded full-review correction for admitted read responsiveness during injected document embedding; completed predecessor acceptance and budgets remain closed",
+  "state": "in-progress",
+  "writer": "biblios-codex-continuation"
+}

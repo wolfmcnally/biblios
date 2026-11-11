@@ -1,0 +1,15 @@
+{
+  "acceptance": {
+    "path": ".kickoff/runs/951a86bde55055859ad6b9a2e69ba73b/closure.json",
+    "sha256": "88606fc22b1930e5d36cb9cb7e244bf3e1ce700db885542fa2a3cb4522c7e7d2"
+  },
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/692b29188192b91874ffb886c3e66dfdc4ae77dadd975fe46c61dda218cea394;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "in-progress",
+  "id": "a71b27123a26815423dfa4b7257f0d3e",
+  "owner": "biblios-opus-successor",
+  "phase": "responsive-provider-reads",
+  "previous": "51f5a555276ba2ecea251e991fd0444a",
+  "reason": "Admitted public reads and strict search complete during held document embedding, accepted through a successor run that carries the original advice; receiving tools match the adopted Starter 1.5.0 bytes; source delivery remains distinct from a later release and manual usability acceptance",
+  "state": "completed",
+  "writer": "biblios-opus-successor"
+}

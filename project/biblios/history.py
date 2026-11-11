@@ -309,7 +309,10 @@ def excise(
     *,
     control: CallControl = CallControl(),
 ) -> ExcisionResult:
-    with bound._shelf._handle.mutex:
+    with (
+        bound._writer("consumer excision", stage="history", control=control),
+        bound._shelf._handle.mutex,
+    ):
         bound._admit(write=True)
         control.check("history")
         successor = _successor(bound.binding, request)
@@ -325,45 +328,40 @@ def excise(
             "epoch_id": bound.binding.expected_cas.epoch_id,
             "entry_ids": sorted(set(proposed.entry_ids) | set(proposed.metadata_entry_ids)),
         }
-        with writer_lock(bound.binding.palace_root, operation="consumer excision"):
-            previous = (
-                _marker(bound.binding).read_bytes() if _marker(bound.binding).exists() else None
+        previous = _marker(bound.binding).read_bytes() if _marker(bound.binding).exists() else None
+        save_checkpoint(_marker(bound.binding), document, stage="history")
+        try:
+            result = execute_namespace(
+                bound._shelf._handle,
+                compiled,
+                {},
+                {
+                    "predecessor_root": bound.binding.castle_root,
+                    "successor_root": request.successor_root,
+                },
             )
+        except NamespaceError as error:
+            if error.effect == "none":
+                if previous is None:
+                    _marker(bound.binding).unlink()
+                else:
+                    save_checkpoint(_marker(bound.binding), json.loads(previous), stage="history")
+            raise ConsumerError(error.code, stage="history", effect=error.effect) from None
+        except Exception:
+            raise ConsumerError(
+                "excision-outcome-unknown", stage="history", effect="uncertain"
+            ) from None
+        bound._closed = True
+        try:
+            _disposition(bound.binding, document)
+            document.update(state="complete", epoch_id=result.cas_binding.epoch_id)
             save_checkpoint(_marker(bound.binding), document, stage="history")
-            try:
-                result = execute_namespace(
-                    bound._shelf._handle,
-                    compiled,
-                    {},
-                    {
-                        "predecessor_root": bound.binding.castle_root,
-                        "successor_root": request.successor_root,
-                    },
-                )
-            except NamespaceError as error:
-                if error.effect == "none":
-                    if previous is None:
-                        _marker(bound.binding).unlink()
-                    else:
-                        save_checkpoint(
-                            _marker(bound.binding), json.loads(previous), stage="history"
-                        )
-                raise ConsumerError(error.code, stage="history", effect=error.effect) from None
-            except Exception:
-                raise ConsumerError(
-                    "excision-outcome-unknown", stage="history", effect="uncertain"
-                ) from None
-            bound._closed = True
-            try:
-                _disposition(bound.binding, document)
-                document.update(state="complete", epoch_id=result.cas_binding.epoch_id)
-                save_checkpoint(_marker(bound.binding), document, stage="history")
-            except Exception:
-                raise ConsumerError(
-                    "derived-recovery-required", stage="history", effect="recovery-required"
-                ) from None
-            control.check("history", effect="namespace-committed")
-            return ExcisionResult(result, replace(successor, expected_cas=result.cas_binding))
+        except Exception:
+            raise ConsumerError(
+                "derived-recovery-required", stage="history", effect="recovery-required"
+            ) from None
+        control.check("history", effect="namespace-committed")
+        return ExcisionResult(result, replace(successor, expected_cas=result.cas_binding))
 
 
 def recover_excision(

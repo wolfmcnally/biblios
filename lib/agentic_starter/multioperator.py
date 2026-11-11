@@ -160,7 +160,11 @@ def records(root: Path) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]
         except (ValueError, TypeError, ZeroDivisionError) as exc:
             raise Refusal("invalid rational order key") from exc
         phases[identifier] = meta
-    require(bool(phases), "empty phase inventory")
+    manifest = load(safe(root, "collaboration/manifest.json"))
+    require(
+        bool(phases) or (manifest.get("mode") == "retrofit" and manifest.get("adopted") is False),
+        "empty phase inventory",
+    )
     events = []
     for path in sorted(safe(root, "plan/events").glob("*.json")):
         event = load(path)
@@ -367,7 +371,22 @@ def logs(root: Path) -> list[tuple[dict[str, Any], bytes]]:
     )
 
 
-def verify_acceptance_bytes(root: Path, event: dict[str, Any]) -> None:
+def not_held(path: Path, relative: str, absent: list[str] | None) -> bool:
+    """Ignored runtime evidence does not travel with a clone or to another machine.
+
+    Historical validation reports its absence instead of refusing. A file that is
+    present must still match, tracked paths are never excused, and publishing a new
+    completion passes no list, so it keeps requiring the bytes.
+    """
+    if absent is None or not relative.startswith(".kickoff/") or path.exists() or path.is_symlink():
+        return False
+    absent.append(relative)
+    return True
+
+
+def verify_acceptance_bytes(
+    root: Path, event: dict[str, Any], absent: list[str] | None = None
+) -> None:
     """Check retention, not semantic phase approval; live adapters still own that."""
     if event["previous"] is None or event["state"] != "completed":
         return
@@ -381,11 +400,13 @@ def verify_acceptance_bytes(root: Path, event: dict[str, Any]) -> None:
         "acceptance reference must be repo-relative",
     )
     artifact = safe(root, reference["path"])
+    if not_held(artifact, reference["path"], absent):
+        return
     require(
         artifact.is_file() and digest(artifact.read_bytes()) == reference["sha256"],
         "acceptance artifact missing or mutated",
     )
-    inspect_phase_acceptance(root, event)
+    inspect_phase_acceptance(root, event, absent=absent)
 
 
 def validate(root: Path) -> dict[str, Any]:
@@ -399,10 +420,18 @@ def validate(root: Path) -> dict[str, Any]:
     )
     phases, events = records(root)
     heads = fold(phases, events)
+    absent: list[str] = []
     for event in events:
-        verify_acceptance_bytes(root, event)
+        verify_acceptance_bytes(root, event, absent)
     entries = logs(root)
     manifest = load(safe(root, "collaboration/manifest.json"))
+    if manifest.get("mode") == "retrofit":
+        for name, expected in manifest["historical_plans"].items():
+            path = safe(root, name)
+            require(
+                path.is_file() and digest(path.read_bytes()) == expected,
+                "retained historical plan missing or mutated",
+            )
     imported = sorted(
         (pair for pair in entries if pair[0].get("source_offset") is not None),
         key=lambda pair: pair[0]["source_offset"],
@@ -427,6 +456,7 @@ def validate(root: Path) -> dict[str, Any]:
         "heads": heads,
         "historical_log_sha256": digest(original),
         "adopted": manifest["adopted"],
+        "evidence_not_held": sorted(set(absent)),
     }
 
 
@@ -512,7 +542,10 @@ def source_phase_states(index: str) -> dict[str, str]:
 def rehearse(source: Path, output: Path, mapping_path: Path) -> None:
     source, output = source.resolve(), output.absolute()
     require(not output.exists() and not output.is_symlink(), "output must be absent")
-    require(output != source and not source.is_relative_to(output), "output overlaps source")
+    require(
+        not output.resolve().is_relative_to(source) and not source.is_relative_to(output.resolve()),
+        "output overlaps source",
+    )
     compatibility = claude_compatibility()
     config = load(mapping_path)
     head = subprocess.check_output(
@@ -546,6 +579,11 @@ def rehearse(source: Path, output: Path, mapping_path: Path) -> None:
             not (root / "collaboration").exists(),
             "source already has collaboration records",
         )
+        if config.get("mode") == "retrofit":
+            retrofit_records(root, config, head, archive, compatibility)
+            require(not output.exists(), "output appeared during rehearsal")
+            root.rename(output)
+            return
         plan = root / "plan"
         index = (plan / "INDEX.md").read_text()
         rows = source_phase_states(index)
@@ -662,7 +700,7 @@ def rehearse(source: Path, output: Path, mapping_path: Path) -> None:
             if not section.startswith(("## Phase Table", "## Phase Dependency Graph"))
         )
         (plan / "INDEX.md").write_text(
-            "# Proposed plan discovery — REHEARSAL ONLY\n\n"
+            REHEARSAL_BANNER + "\n\n"
             "State lives in phases/ and events/; render produces disposable local views. "
             "The preserved context below still needs owner/caller cutover review.\n\n"
             + rewrite_links(context, Path("plan/INDEX.md"), mapping)
@@ -899,7 +937,9 @@ def snapshot_acceptance(root: Path, run_dir: Path) -> dict[str, Any]:
     }
 
 
-def verify_qualification_snapshot(root: Path, value: dict[str, Any]) -> None:
+def verify_qualification_snapshot(
+    root: Path, value: dict[str, Any], absent: list[str] | None = None
+) -> None:
     require(
         isinstance(value, dict)
         and set(value) == {"schema", "files", "budget_prefix", "execution_prefix"}
@@ -910,6 +950,8 @@ def verify_qualification_snapshot(root: Path, value: dict[str, Any]) -> None:
     )
     for relative, expected in value["files"].items():
         path = safe(root, relative)
+        if not_held(path, relative, absent):
+            continue
         require(
             path.is_file() and not path.is_symlink() and digest(path.read_bytes()) == expected,
             "accepted phase input is missing or mutated: " + relative,
@@ -930,6 +972,8 @@ def verify_qualification_snapshot(root: Path, value: dict[str, Any]) -> None:
         if key == "execution_prefix":
             require(prefix["path"] == "EXECUTION_LOG.jsonl", "wrong execution ledger prefix")
         path = safe(root, prefix["path"])
+        if not_held(path, prefix["path"], absent):
+            continue
         require(
             path.is_file()
             and len(path.read_bytes()) >= prefix["bytes"]
@@ -938,7 +982,13 @@ def verify_qualification_snapshot(root: Path, value: dict[str, Any]) -> None:
         )
 
 
-def inspect_phase_acceptance(root: Path, event: dict[str, Any], *, fresh: bool = False) -> None:
+def inspect_phase_acceptance(
+    root: Path,
+    event: dict[str, Any],
+    *,
+    fresh: bool = False,
+    absent: list[str] | None = None,
+) -> None:
     reference = event["acceptance"]
     closure_path = safe(root, reference["path"])
     closure = load(closure_path)
@@ -961,7 +1011,7 @@ def inspect_phase_acceptance(root: Path, event: dict[str, Any], *, fresh: bool =
         and custody.get("claim") == event.get("claim"),
         "completion does not match accepted phase custody",
     )
-    verify_qualification_snapshot(root, closure.get("qualification"))
+    verify_qualification_snapshot(root, closure.get("qualification"), absent)
     log_id = uuid.uuid5(
         uuid.NAMESPACE_URL, "log:" + custody["owner"] + ":" + closure["closure_id"]
     ).hex
@@ -1070,6 +1120,17 @@ def append(
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         validate(root)
         terminal_body(body)
+        # A methodology close under any other heading would skip the Lessons contract.
+        # New entries only: earlier closes keep the headings they were written with.
+        require(
+            not any(
+                re.search(r"— METHODOLOGY(?! SCOPE\b)", block.header)
+                and "— END" not in block.header
+                and "— PARK" not in block.header
+                for block in log_blocks.parse(body.decode()).blocks
+            ),
+            "methodology close must be an END or PARK record from append-terminal",
+        )
         identifier = (
             uuid.uuid5(uuid.NAMESPACE_URL, "log:" + writer + ":" + idempotency_key).hex
             if idempotency_key
@@ -1224,6 +1285,16 @@ def validate_staged(root: Path) -> dict[str, Any]:
         "log/entries",
         "collaboration/manifest.json",
     )
+    manifest_bytes = git_read(root, "show", ":collaboration/manifest.json")
+    manifest = json.loads(manifest_bytes, object_pairs_hook=unique_pairs)
+    if manifest.get("mode") == "retrofit":
+        retained = manifest["historical_plans"]
+        require(
+            isinstance(retained, dict)
+            and all(name.startswith("plan/") and ".." not in Path(name).parts for name in retained),
+            "invalid retained historical plan paths",
+        )
+        prefixes += tuple(retained)
     raw_index = git_read(root, "ls-files", "--stage", "-z", "--", *prefixes)
     indexed = {}
     for row in raw_index.split(b"\0"):
@@ -1264,8 +1335,13 @@ def validate_staged(root: Path) -> dict[str, Any]:
                     "staged execution history rewrite refused",
                 )
             elif relative != "AGENTS.md" and not relative.startswith("plan/phases/"):
+                committed = git_read(root, "show", head + ":" + relative)
                 require(
-                    indexed[relative] == git_read(root, "show", head + ":" + relative),
+                    indexed[relative] == committed
+                    or (
+                        relative == "collaboration/manifest.json"
+                        and adoption_declared(committed, indexed[relative])
+                    ),
                     "staged immutable record rewrite refused",
                 )
     with tempfile.TemporaryDirectory(prefix="multioperator-index-") as temporary:
@@ -1273,7 +1349,7 @@ def validate_staged(root: Path) -> dict[str, Any]:
         for relative, body in indexed.items():
             publish(safe(staging, relative), body)
         for relative in indexed:
-            if relative.startswith("plan/events/"):
+            if relative.startswith("plan/events/") and relative.endswith(".json"):
                 record = load(staging / relative)
                 if (
                     relative not in prior_paths
@@ -1320,6 +1396,9 @@ def validate_staged(root: Path) -> dict[str, Any]:
                         "acceptance must be repo-relative",
                     )
                     artifact = safe(root, reference["path"])
+                    unheld: list[str] | None = [] if relative in prior_paths else None
+                    if not_held(artifact, reference["path"], unheld):
+                        continue
                     require(
                         artifact.is_file() and digest(artifact.read_bytes()) == reference["sha256"],
                         "staged acceptance bytes missing/mutated",
@@ -1329,13 +1408,15 @@ def validate_staged(root: Path) -> dict[str, Any]:
                         publish(destination, artifact.read_bytes())
                     closure = load(artifact)
                     qualification = closure.get("qualification")
-                    verify_qualification_snapshot(root, qualification)
+                    verify_qualification_snapshot(root, qualification, unheld)
                     retained = list(qualification["files"])
                     for key in ("execution_prefix", "budget_prefix"):
                         if qualification[key] is not None:
                             retained.append(qualification[key]["path"])
                     for retained_relative in retained:
                         retained_source = safe(root, retained_relative)
+                        if not_held(retained_source, retained_relative, unheld):
+                            continue
                         if retained_relative in indexed:
                             data = indexed[retained_relative]
                         else:
@@ -1369,7 +1450,102 @@ def validate_staged(root: Path) -> dict[str, Any]:
     return {**state, "staged": True}
 
 
-def layout(root: Path) -> str:
+def retrofit_records(
+    root: Path, recipe: dict[str, Any], head: str, archive: bytes, compatibility: Any
+) -> None:
+    """Seed prospective records in a committed snapshot; never infer old phase state."""
+    require(
+        layout(root) == "existing-project",
+        "retrofit requires an existing non-methodology project",
+    )
+    require(
+        set(recipe) == {"mode", "source_commit", "writer", "constitution", "historical_plans"}
+        and recipe["source_commit"] == head,
+        "retrofit recipe must bind the exact committed source",
+    )
+    require(
+        isinstance(recipe["writer"], str) and bool(recipe["writer"].strip()),
+        "explicit retrofit writer required",
+    )
+    plans = {
+        p.relative_to(root).as_posix(): digest(p.read_bytes())
+        for p in safe(root, "plan").rglob("*")
+        if p.is_file() and not p.is_symlink()
+    }
+    require(
+        recipe["historical_plans"] == plans,
+        "historical plan inventory/preimage mismatch",
+    )
+    constitution = recipe["constitution"]
+    require(
+        isinstance(constitution, str) and bool(constitution.strip()),
+        "reviewed constitution required",
+    )
+    require(
+        not any(
+            (root / name).exists() or (root / name).is_symlink()
+            for name in ("AGENTS.md", "CLAUDE.md")
+        ),
+        "existing constitution requires owner reconciliation before retrofit",
+    )
+    publish(root / "AGENTS.md", constitution.encode())
+    for name in ("plan/phases", "plan/events", "log/entries"):
+        publish(root / name / ".gitkeep", b"")
+    publish(
+        root / "plan/INDEX.md",
+        (
+            "# Plan discovery\n\nNew work uses phases/ and events/. "
+            "Historical narrative plans remain at their original paths; "
+            "they are not imported lifecycle or acceptance records.\n\n"
+            + "".join(
+                f"- [{name}]({Path(name).relative_to('plan').as_posix()})\n"
+                for name in sorted(plans)
+            )
+        ).encode(),
+    )
+    publish(
+        root / "log/README.md",
+        b"# Activity records\n\nProspective immutable entries; "
+        b"no historical activity log was supplied.\n",
+    )
+    publish(
+        root / "collaboration/manifest.json",
+        encode(
+            {
+                "format": FORMAT,
+                "adopted": False,
+                "source_commit": head,
+                "source_archive_sha256": digest(archive),
+                "writer": recipe["writer"],
+                "phase_mapping": {},
+                "active_imports": [],
+                "original_log_bytes": 0,
+                "original_log_sha256": digest(b""),
+                "historical_plans": plans,
+                "mode": "retrofit",
+            }
+        ),
+    )
+    publish(
+        root / "collaboration/adoption-blockers.json",
+        encode(
+            {
+                "remaining": [
+                    "Approved recipient-local atomic methodology/toolchain/caller/proof bundle",
+                    "Owner decisions for prospective phases; no historical acceptance inferred",
+                    "Settled work, external custody and terminal native/review boundaries",
+                    "Recipient validation, retirement audit, full gate and instruction loading",
+                ],
+                "compatibility": compatibility,
+                "loading_qualified": False,
+            }
+        ),
+    )
+    validate(root)
+    render(root)
+
+
+def layout(root: Path, *, capability_source: bool = False) -> str:
     require(root.is_dir(), "transfer directory NOT-FOUND")
     marker = safe(root, "collaboration/manifest.json")
     if marker.exists() or marker.is_symlink():
@@ -1379,50 +1555,305 @@ def layout(root: Path) -> str:
             "unknown/malformed collaboration declaration",
         )
         require(
-            (root / "plan/phases").is_dir() and (root / "log/entries").is_dir(),
+            all(
+                safe(root, name).is_dir() for name in ("plan/phases", "plan/events", "log/entries")
+            ),
             "partial collaboration structure",
         )
         return "declared-adopted" if data["adopted"] else "rehearsal"
     require(
-        not (root / "plan/phases").exists() and not (root / "log/entries").exists(),
+        not any(
+            safe(root, name).exists()
+            for name in ("collaboration", "plan/phases", "plan/events", "log/entries")
+        ),
         "partial collaboration structure has no declaration",
     )
+    index, log = safe(root, "plan/INDEX.md"), safe(root, "LOG.md")
+    if index.exists() or log.exists() or list(safe(root, "plan").glob("phase-*.md")):
+        require(
+            index.is_file() and log.is_file(),
+            "partial/unsupported pre-migration structure",
+        )
+        rows = source_phase_states(index.read_text())
+        require(
+            bool(rows) and {p.stem[6:] for p in (root / "plan").glob("phase-*.md")} == set(rows),
+            "phase files/table disagree",
+        )
+        return "pre-migration"
     require(
-        (root / "plan/INDEX.md").is_file() and (root / "LOG.md").is_file(),
-        "unsupported pre-migration structure",
+        not safe(root, "kickoff.yaml").exists()
+        and not safe(root, ".claude/skills/kickoff").exists(),
+        "partial methodology structure requires owner reconciliation",
     )
-    return "pre-migration"
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        candidate = safe(root, name)
+        require(
+            not candidate.exists() or candidate.is_file(),
+            "unrecognized constitution structure",
+        )
+    require(
+        not ((root / "AGENTS.md").exists() and (root / "CLAUDE.md").exists()),
+        "conflicting constitutions require owner reconciliation",
+    )
+    if capability_source:
+        require(
+            any(
+                p.is_file() and not p.is_symlink() and p.stat().st_size > 0
+                for p in root.iterdir()
+                if p.name != ".DS_Store"
+            ),
+            "empty/unsupported capability source",
+        )
+        return "capability-source"
+    require(
+        any(
+            safe(root, name).is_file()
+            for name in (
+                "pyproject.toml",
+                "package.json",
+                "Cargo.toml",
+                "go.mod",
+                "Package.swift",
+                "CMakeLists.txt",
+            )
+        )
+        or any(
+            p.is_file()
+            and not p.is_symlink()
+            and p.suffix in {".py", ".rs", ".js", ".ts", ".go", ".swift", ".c", ".cpp"}
+            for p in root.iterdir()
+        ),
+        "unsupported existing-project structure; explicit owner assessment required",
+    )
+    return "existing-project"
 
 
-def transfer_preflight(donor: Path, recipient: Path, entry: str) -> dict[str, Any]:
+PROVENANCE = "collaboration/methodology-provenance.json"
+RELEASE = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+
+
+def methodology_provenance(root: Path) -> dict[str, Any] | None:
+    """The recipient-carried record of the methodology release it last adopted.
+
+    Absent means no named baseline is recorded, never that one is current. A malformed
+    record refuses: a wrong answer here would hide releases the recipient lacks.
+    """
+    path = root / PROVENANCE
+    if not path.exists() and not path.is_symlink():
+        return None
+    value = load(safe(root, PROVENANCE))
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", "source", "release", "revision", "recorded", "capabilities"}
+        and value["schema"] == "agentic.methodology-provenance.v1"
+        and isinstance(value["source"], str)
+        and bool(value["source"].strip())
+        and (value["release"] is None or bool(re.fullmatch(RELEASE, str(value["release"]))))
+        and isinstance(value["revision"], str)
+        and bool(re.fullmatch(r"[0-9a-f]{40}", value["revision"]))
+        and isinstance(value["recorded"], str)
+        and bool(re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value["recorded"]))
+        and isinstance(value["capabilities"], list)
+        and all(isinstance(item, str) and bool(item.strip()) for item in value["capabilities"]),
+        "invalid methodology provenance record",
+    )
+    return value
+
+
+def declared_releases(root: Path) -> list[str]:
+    """Release headings a source declares in RELEASES.md, oldest first; none if it has no file."""
+    path = root / "RELEASES.md"
+    if not path.is_file():
+        return []
+    found = re.findall(r"(?m)^## (" + RELEASE.replace("(", "(?:") + r")(?= |$)", path.read_text())
+    require(len(found) == len(set(found)), "source declares a release twice")
+    return sorted(found, key=lambda name: tuple(map(int, name.split("."))))
+
+
+def transfer_preflight(
+    donor: Path, recipient: Path, entry: str, intent: str = "methodology"
+) -> dict[str, Any]:
     """Read-only route detection. Declared adoption is not verified authority."""
     require(
-        donor.resolve() != recipient.resolve(),
-        "donor and recipient are the same checkout",
+        not donor.resolve().is_relative_to(recipient.resolve())
+        and not recipient.resolve().is_relative_to(donor.resolve()),
+        "donor and recipient are the same checkout or overlap",
     )
-    donor_state, recipient_state = layout(donor), layout(recipient)
+    donor_state = layout(donor, capability_source=intent == "capability")
+    recipient_state = layout(recipient)
     require(
-        donor_state == "declared-adopted",
+        intent == "capability" or donor_state == "declared-adopted",
         "donor has not migrated; rehearsal is not adoption",
+    )
+    require(
+        donor_state != "rehearsal",
+        "donor rehearsal is not an operational source",
     )
     require(
         recipient_state != "rehearsal",
         "recipient has an unresolved rehearsal/partial transition",
     )
+    route = (
+        "capability-learning"
+        if intent == "capability"
+        else {
+            "pre-migration": "migration-rehearsal",
+            "existing-project": "retrofit-rehearsal",
+            "declared-adopted": "maintenance",
+        }[recipient_state]
+    )
+    if route == "retrofit-rehearsal":
+        require(
+            not any((recipient / name).exists() for name in ("AGENTS.md", "CLAUDE.md")),
+            "existing constitution requires owner reconciliation before retrofit",
+        )
+    recorded = methodology_provenance(recipient)
     return {
-        "compatibility": claude_compatibility() if recipient_state == "pre-migration" else None,
+        "compatibility": claude_compatibility()
+        if route in {"migration-rehearsal", "retrofit-rehearsal"}
+        else None,
         "entry": entry,
-        "route": "migration-rehearsal" if recipient_state == "pre-migration" else "maintenance",
+        "intent": intent,
+        "route": route,
         "donor_layout": donor_state,
         "recipient_layout": recipient_state,
+        "recipient_provenance": recorded,
+        "releases_not_recorded": [
+            name
+            for name in declared_releases(donor)
+            if recorded is None
+            or recorded["release"] is None
+            or tuple(map(int, name.split("."))) > tuple(map(int, recorded["release"].split(".")))
+        ],
         "mutation_authorized": False,
         "adoption_verified": False,
         "required_owner_checks": [
-            "Actual qualified Starter-first adoption and exact donor candidate",
+            "Exact source/capability; qualified donor adoption for whole-methodology transfer",
             "Recipient custody, clean/settled work and terminal phase/review/native boundaries",
             "Approved concrete teach/learn migration plan and recipient-specific recipe/runtime",
             "Phase/budget/evidence continuity; obsolete-tool retirement and full acceptance",
         ],
+    }
+
+
+REHEARSAL_BANNER = "# Proposed plan discovery — REHEARSAL ONLY"
+
+
+def adoption_declared(committed: bytes, staged: bytes) -> bool:
+    """The one permitted manifest change: the owner's adoption declaration, nothing else."""
+    try:
+        before, after = json.loads(committed), json.loads(staged)
+    except ValueError:
+        return False
+    return (
+        isinstance(before, dict)
+        and before.get("adopted") is False
+        and after == {**before, "adopted": True}
+    )
+
+
+def adopt(root: Path) -> dict[str, Any]:
+    """Record the owner's adoption of a delivered conversion.
+
+    Delivery and adoption are separate facts, so a cutover may be committed undeclared.
+    This is the only route that changes the manifest afterwards. It records a declaration
+    the owner has made; it does not decide it.
+    """
+    path = safe(root, "collaboration/manifest.json")
+    raw = path.read_bytes()
+    manifest = json.loads(raw)
+    require(manifest.get("format") == FORMAT, "wrong format")
+    require(manifest.get("adopted") is False, "adoption is already declared")
+    index = root / "plan/INDEX.md"
+    require(
+        not index.is_file() or not index.read_text().startswith(REHEARSAL_BANNER),
+        "plan index still carries the rehearsal banner; finish the cutover review first",
+    )
+    validate(root)
+    require(raw.count(b'"adopted": false') == 1, "manifest adoption field is not canonical")
+    publish_over = raw.replace(b'"adopted": false', b'"adopted": true')
+    require(adoption_declared(raw, publish_over), "adoption edit would change other fields")
+    path.write_bytes(publish_over)
+    return {"adopted": True, "manifest_sha256": digest(publish_over)}
+
+
+def transfer_ancestry(donor: Path, recipient: Path, release: str = "HEAD") -> dict[str, Any]:
+    """Report, per shared file, what a transfer must merge and what it must preserve.
+
+    A recipient's files rarely descend from one donor revision. Merging against a single
+    assumed base reads content the recipient never received as content it deleted, and
+    drops it without a conflict. This names, for each file that differs, the donor
+    revision nearest the recipient's copy, the recipient lines that no donor revision
+    ever held, and the conflicts a three-way merge on that ancestor leaves. Read-only.
+    """
+    donor, recipient = donor.resolve(), recipient.resolve()
+    require(donor != recipient, "donor and recipient are the same checkout")
+
+    def blob(root: Path, revision: str, path: str) -> bytes | None:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{revision}:{path}"], capture_output=True
+        )
+        return result.stdout if result.returncode == 0 else None
+
+    listing = git_read(donor, "ls-tree", "-rz", release).split(b"\0")
+    received = set(git_read(recipient, "ls-tree", "-rz", "--name-only", "HEAD").split(b"\0"))
+    files = []
+    for entry in listing:
+        if not entry:
+            continue
+        meta, raw_path = entry.split(b"\t", 1)
+        if meta.split()[0] == b"120000" or raw_path not in received:
+            continue
+        path = raw_path.decode()
+        theirs, ours = blob(donor, release, path), blob(recipient, "HEAD", path)
+        if theirs is None or ours is None or theirs == ours:
+            continue
+        revisions = git_read(donor, "log", "--format=%H", release, "--", path).decode().split()
+        ours_lines = set(ours.split(b"\n"))
+        ever: set[bytes] = set()
+        nearest: tuple[int, str, bytes] | None = None
+        for revision in revisions:
+            old = blob(donor, revision, path)
+            if old is None:
+                continue
+            lines = set(old.split(b"\n"))
+            ever.update(line.strip() for line in lines)
+            distance = len(ours_lines ^ lines)
+            if nearest is None or distance < nearest[0]:
+                nearest = (distance, revision, old)
+        if nearest is None:
+            continue
+        own = sorted(
+            {
+                line.strip().decode(errors="replace")
+                for line in ours.split(b"\n")
+                if line.strip() and line.strip() not in ever
+            }
+        )
+        with tempfile.TemporaryDirectory(prefix="multioperator-ancestry-") as directory:
+            for name, data in (("ours", ours), ("base", nearest[2]), ("theirs", theirs)):
+                (Path(directory) / name).write_bytes(data)
+            merged = subprocess.run(
+                ["git", "merge-file", "-p", "ours", "base", "theirs"],
+                cwd=directory,
+                capture_output=True,
+            )
+        files.append(
+            {
+                "path": path,
+                "state": "behind" if nearest[0] == 0 else "edited",
+                "ancestor": nearest[1],
+                "recipient_own_lines": own,
+                "conflicts": 0 if nearest[0] == 0 else max(merged.returncode, 0),
+            }
+        )
+    return {
+        "release": git_read(donor, "rev-parse", release + "^{commit}").decode().strip(),
+        "files": files,
+        "behind": sum(1 for item in files if item["state"] == "behind"),
+        "edited": sum(1 for item in files if item["state"] == "edited"),
+        "with_recipient_own_lines": sum(1 for item in files if item["recipient_own_lines"]),
+        "conflicting": sum(1 for item in files if item["conflicts"]),
     }
 
 
@@ -1476,6 +1907,13 @@ def main() -> int:
     transfer.add_argument("--donor", type=Path, required=True)
     transfer.add_argument("--recipient", type=Path, required=True)
     transfer.add_argument("--entry", choices=("teach", "learn"), required=True)
+    transfer.add_argument("--intent", choices=("methodology", "capability"), default="methodology")
+    ancestry = commands.add_parser("transfer-ancestry")
+    ancestry.add_argument("--donor", type=Path, required=True)
+    ancestry.add_argument("--recipient", type=Path, required=True)
+    ancestry.add_argument("--release", default="HEAD")
+    adoption = commands.add_parser("adopt")
+    adoption.add_argument("--root", type=Path, required=True)
     selection = commands.add_parser("select")
     selection.add_argument("--root", type=Path, required=True)
     selection.add_argument("--owner", required=True)
@@ -1526,10 +1964,18 @@ def main() -> int:
         elif args.command == "transfer-preflight":
             print(
                 json.dumps(
-                    transfer_preflight(args.donor, args.recipient, args.entry),
+                    transfer_preflight(args.donor, args.recipient, args.entry, args.intent),
                     sort_keys=True,
                 )
             )
+        elif args.command == "transfer-ancestry":
+            print(
+                json.dumps(
+                    transfer_ancestry(args.donor, args.recipient, args.release), sort_keys=True
+                )
+            )
+        elif args.command == "adopt":
+            print(json.dumps(adopt(args.root), sort_keys=True))
         elif args.command == "select":
             print(json.dumps(select_phase(args.root, args.owner, args.phase), sort_keys=True))
         elif args.command == "status":
@@ -1541,12 +1987,14 @@ def main() -> int:
         elif args.command == "rehearse":
             rehearse(args.source, args.output, args.mapping)
         elif args.command == "validate":
-            print(
-                json.dumps(
-                    validate_staged(args.root) if args.staged else validate(args.root),
-                    sort_keys=True,
+            state = validate_staged(args.root) if args.staged else validate(args.root)
+            print(json.dumps(state, sort_keys=True))
+            if state["evidence_not_held"]:
+                print(
+                    f"EVIDENCE NOT HELD {len(state['evidence_not_held'])}: retained acceptance "
+                    "evidence is absent from this checkout; present evidence was verified",
+                    file=sys.stderr,
                 )
-            )
         elif args.command == "render":
             render(args.root, args.check)
         elif args.command == "event":

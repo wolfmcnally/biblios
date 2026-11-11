@@ -1,0 +1,12 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/692b29188192b91874ffb886c3e66dfdc4ae77dadd975fe46c61dda218cea394;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "in-progress",
+  "id": "51f5a555276ba2ecea251e991fd0444a",
+  "owner": "biblios-opus-successor",
+  "phase": "responsive-provider-reads",
+  "previous": "90e0bb1b475643f78487f61cfc83f785",
+  "reason": "User-directed Opus Medium successor after verified predecessor stand-down; sealed accepted closure 50f7bb97 could not publish completion; successor run carries existing advice with budgets unchanged",
+  "release": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/7e11eefdf16e91421fc818583f45311e3dd9fc9714f1e894c7f5b4ac3bacf56c;released-owner:biblios-codex-continuation;sole-owner:01a1bd49-65fc-7c81-b82b-6fb93ee3b281",
+  "state": "in-progress",
+  "writer": "biblios-opus-successor"
+}

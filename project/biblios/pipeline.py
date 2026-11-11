@@ -35,7 +35,6 @@ from palace.index.config import EmbeddingIdentity
 from palace.index.embedder import Embedder
 from palace.index.embedder_config import identity_for, load_embedder_config
 from palace.index.schema import assert_identity, init_db
-from palace.writer_lock import writer_lock
 
 from biblios.control import (
     CallControl,
@@ -59,6 +58,7 @@ from biblios.progress import (
 
 if TYPE_CHECKING:
     from biblios.consumer import BoundShelf
+    from biblios.entries import Entry
 
 
 _MAX_CHECKPOINT_BYTES = 512 * 1024 * 1024
@@ -420,6 +420,33 @@ def _float32(vector: Sequence[float]) -> tuple[float, ...]:
     return struct.unpack(f"{len(vector)}f", struct.pack(f"{len(vector)}f", *vector))
 
 
+@dataclass(slots=True)
+class _PreparedDerivation:
+    before: ShelfView
+    admitted: ShelfView | None
+    entry: Entry
+    conversion: ConversionStatus
+    checkpoint: Path
+    record: dict
+    path: Path
+    plan: FilePlan | None
+    vectors: list
+    data: bytes | None
+    staged_new: bool = False
+    publication_started: bool = False
+
+
+def _replace_mirror(path: Path, data: bytes) -> None:
+    temporary = path.with_suffix(".partial")
+    if path.is_symlink() or temporary.is_symlink():
+        raise ConsumerError("artifact-outside-domain", stage="index")
+    with temporary.open("wb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
 class ConsumerPipeline:
     """Explicit conversion, input view and model composition over public Palace plans.
 
@@ -477,12 +504,15 @@ class ConsumerPipeline:
 
     def donor(self, bound: BoundShelf, entry_id: str, *, operation_id: str) -> ReuseDonor:
         """Capture an actual completed view; retaining it does not reserve the donor."""
-        return bound._read(
-            lambda: self._capture_donor(bound, entry_id, operation_id), CallControl()
-        )
+        try:
+            return self._capture_donor(bound, entry_id, operation_id)
+        except ConsumerError:
+            raise
+        except Exception:
+            raise ConsumerError("read-failed", stage="read") from None
 
     def _capture_donor(self, bound: BoundShelf, entry_id: str, operation_id: str) -> ReuseDonor:
-        with bound._working(), bound._shelf._handle.mutex:
+        with bound._writer("consumer donor capture"), bound._shelf._handle.mutex:
             bound._admit(write=True)
             view = bound.view
             entry = bound.resolve(entry_id)
@@ -496,18 +526,18 @@ class ConsumerPipeline:
                 or not entry.searchable
             ):
                 raise ConsumerError("donor-not-complete", stage="index")
-            with writer_lock(bound.binding.palace_root, operation="consumer donor capture"):
-                identity = self._identity(bound)
-                with closing(sqlite3.connect(bound._shelf.chunks_db, isolation_level=None)) as conn:
-                    # The public reader loads no extension; bootstrap only on the writer path.
-                    import sqlite_vec
+            identity = self._identity(bound)
+            with closing(sqlite3.connect(bound._shelf.chunks_db, isolation_level=None)) as conn:
+                # The public reader loads no extension; bootstrap only on the writer path.
+                import sqlite_vec
 
-                    conn.enable_load_extension(True)
-                    sqlite_vec.load(conn)
-                    conn.enable_load_extension(False)
-                    snapshot = self._snapshot(bound, conn, entry_id, identity)
-                    if snapshot is None or snapshot.view_sha256 != record.get("view_sha256"):
-                        raise ConsumerError("donor-view-changed", stage="index")
+                conn.enable_load_extension(True)
+                sqlite_vec.load(conn)
+                conn.enable_load_extension(False)
+                snapshot = self._snapshot(bound, conn, entry_id, identity)
+                if snapshot is None or snapshot.view_sha256 != record.get("view_sha256"):
+                    raise ConsumerError("donor-view-changed", stage="index")
+            bound._admit()
             return ReuseDonor(
                 entry_id,
                 view.namespace_id,
@@ -556,39 +586,36 @@ class ConsumerPipeline:
         """
         from palace.index.core import delete_path
 
-        with bound._working(), bound._shelf._handle.mutex:
+        with bound._writer("consumer completion", control=control), bound._shelf._handle.mutex:
             before = bound._admit(write=True)
             _record_path(bound, operation_id)
             control.check("index")
             try:
-                with writer_lock(bound.binding.palace_root, operation="consumer completion"):
-                    identity = self._identity(bound)
-                    with closing(
-                        sqlite3.connect(bound._shelf.chunks_db, isolation_level=None)
-                    ) as conn:
-                        init_db(conn, store=bound.binding.palace_root)
-                        assert_identity(conn, identity)
-                        expected = {
-                            entry.entry_id: entry.metadata.mirror_sha256
-                            for entry in bound._shelf.files()
-                            if entry.searchable
-                        }
-                        for entry_id in sorted(set(indexed_files(bound._shelf)) - set(expected)):
-                            delete_path(
-                                conn=conn,
-                                watch_root=str(bound.binding.mirror_root.resolve()),
-                                path_str=entry_id + ".md",
-                            )
-                            bound._shelf.mirror_path(entry_id).unlink(missing_ok=True)
-                        bound.view  # Validate actual mirrors before declaring completion.
-                        if (
-                            index_status(bound._shelf).pending
-                            or indexed_files(bound._shelf) != expected
-                        ):
-                            raise ConsumerError(
-                                "index-incomplete", stage="index", effect="derived-committed"
-                            )
-                        write_watermark(bound._shelf, before.revision)
+                identity = self._identity(bound)
+                with closing(sqlite3.connect(bound._shelf.chunks_db, isolation_level=None)) as conn:
+                    init_db(conn, store=bound.binding.palace_root)
+                    assert_identity(conn, identity)
+                    expected = {
+                        entry.entry_id: entry.metadata.mirror_sha256
+                        for entry in bound._shelf.files()
+                        if entry.searchable
+                    }
+                    for entry_id in sorted(set(indexed_files(bound._shelf)) - set(expected)):
+                        delete_path(
+                            conn=conn,
+                            watch_root=str(bound.binding.mirror_root.resolve()),
+                            path_str=entry_id + ".md",
+                        )
+                        bound._shelf.mirror_path(entry_id).unlink(missing_ok=True)
+                    bound.view  # Validate actual mirrors before declaring completion.
+                    if (
+                        index_status(bound._shelf).pending
+                        or indexed_files(bound._shelf) != expected
+                    ):
+                        raise ConsumerError(
+                            "index-incomplete", stage="index", effect="derived-committed"
+                        )
+                    write_watermark(bound._shelf, before.revision)
                 result = Observation(
                     operation_id,
                     "index",
@@ -680,19 +707,25 @@ class ConsumerPipeline:
         control: CallControl = CallControl(),
         observer: Callable[[Observation], None] | None = None,
     ) -> DerivationStatus:
-        with bound._working(), bound._shelf._handle.mutex:
-            bound._admit(write=True)
-            control.check("index")
+        with bound._writer("consumer derivation", control=control):
+            prepared = None
             try:
-                with writer_lock(bound.binding.palace_root, operation="consumer derivation"):
+                with bound._shelf._handle.mutex:
+                    bound._admit(write=True)
+                    control.check("index")
                     identity = self._identity(bound)
                     db = bound._shelf.chunks_db
-                    control.check("index", effect="uncertain")
                     db.parent.mkdir(parents=True, exist_ok=True)
-                    with closing(sqlite3.connect(db, isolation_level=None)) as conn:
+                    conn = sqlite3.connect(db, isolation_level=None)
+                    try:
                         init_db(conn, store=bound.binding.palace_root)
                         assert_identity(conn, identity)
-                        return self._derive(
+                    except BaseException:
+                        conn.close()
+                        raise
+                with closing(conn):
+                    with bound._shelf._handle.mutex:
+                        prepared = self._prepare(
                             bound,
                             conn,
                             identity,
@@ -703,14 +736,32 @@ class ConsumerPipeline:
                             control,
                             observer,
                         )
-            except ConsumerError:
-                raise
-            except Exception:
+                    if isinstance(prepared, DerivationStatus):
+                        return prepared
+                    self._embed(bound, identity, prepared, control)
+                    with bound._shelf._handle.mutex:
+                        self._fence(bound, prepared, complete=True)
+                        return self._publish(bound, conn, identity, prepared, control, observer)
+            except BaseException as error:
+                if isinstance(prepared, _PreparedDerivation):
+                    with bound._shelf._handle.mutex:
+                        if prepared.staged_new and not prepared.publication_started:
+                            self._discard_staging(prepared.path, prepared.data, error)
+                if isinstance(error, ConsumerError) or not isinstance(error, Exception):
+                    raise
                 raise ConsumerError(
                     "derivation-failed", stage="index", effect="recovery-required"
                 ) from None
 
-    def _derive(
+    @staticmethod
+    def _discard_staging(path: Path, data: bytes, error: BaseException) -> None:
+        try:
+            if not path.is_symlink() and path.is_file() and path.read_bytes() == data:
+                path.unlink()
+        except OSError:
+            error.add_note("Owned unadmitted mirror cleanup failed; recovery required.")
+
+    def _prepare(
         self,
         bound,
         conn,
@@ -811,71 +862,118 @@ class ConsumerPipeline:
             path.parent.mkdir(parents=True, exist_ok=True)
             if path.is_symlink() or path.with_suffix(".partial").is_symlink():
                 raise ConsumerError("artifact-outside-domain", stage="index")
-            if not path.exists() or path.read_bytes() != data:
-                temporary = path.with_suffix(".partial")
-                with temporary.open("wb") as stream:
-                    stream.write(data)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(temporary, path)
-            plan = plan_one(
-                conn=conn,
-                file_kind="markdown",
-                change_kind="modified",
-                path=path.resolve(),
-                watch_root=bound.binding.mirror_root.resolve(),
-                full=True,
-                source_bytes=data,
-                log=lambda line: None,
-            )
-            name_rows = [
-                i
-                for i, row in enumerate(plan.rows)
-                if row.heading == conversion.mirror.name_heading
-            ]
-            name = entry.path.rsplit("/", 1)[-1]
-            heading_name = " ".join(name.splitlines())
-            if (
-                len(plan.rows) > self.policy.max_chunks
-                or len(name_rows) != 1
-                or name_rows[0] != len(plan.rows) - 1
-                or not (
-                    plan.rows[name_rows[0]].body.partition("\n")[2].strip() == name
-                    or (
-                        conversion.mirror.name_heading == heading_name.strip()
-                        and plan.rows[name_rows[0]].body == ("# " + heading_name).rstrip()
+            staged_new = not (entry.metadata.converted and entry.metadata.mirror_sha256)
+            if not path.exists():
+                _replace_mirror(path, data)
+            try:
+                plan = plan_one(
+                    conn=conn,
+                    file_kind="markdown",
+                    change_kind="modified",
+                    path=path.resolve(),
+                    watch_root=bound.binding.mirror_root.resolve(),
+                    full=True,
+                    source_bytes=data,
+                    log=lambda line: None,
+                )
+                name_rows = [
+                    i
+                    for i, row in enumerate(plan.rows)
+                    if row.heading == conversion.mirror.name_heading
+                ]
+                name = entry.path.rsplit("/", 1)[-1]
+                heading_name = " ".join(name.splitlines())
+                if (
+                    len(plan.rows) > self.policy.max_chunks
+                    or len(name_rows) != 1
+                    or name_rows[0] != len(plan.rows) - 1
+                    or not (
+                        plan.rows[name_rows[0]].body.partition("\n")[2].strip() == name
+                        or (
+                            conversion.mirror.name_heading == heading_name.strip()
+                            and plan.rows[name_rows[0]].body == ("# " + heading_name).rstrip()
+                        )
                     )
+                ):
+                    raise ConsumerError("mirror-name-row-invalid", stage="index")
+                inputs = controlled(lambda: tuple(self.input_view(plan)), control, "embedding")
+                if any(not _bounded_text(text, self.policy.max_mirror_bytes) for text in inputs):
+                    raise ConsumerError("embedding-input-invalid", stage="embedding")
+                plan = with_embedding_inputs(
+                    plan, representation=self.representation, inputs=inputs
+                )
+                hashes = [_digest(text) for text in plan.embed_inputs]
+                if "inputs" in record and record["inputs"] != hashes:
+                    raise ConsumerError("operation-conflict", stage="embedding")
+                vectors = record.get("vectors", [None] * len(plan.rows))
+                if len(vectors) != len(plan.rows):
+                    raise ConsumerError(
+                        "checkpoint-corrupt", stage="embedding", effect="recovery-required"
+                    )
+                if nominated is not None:
+                    source_rows = [
+                        row for row in nominated[1].chunks if row.chunk.heading != nominated[2]
+                    ]
+                    destination_rows = [i for i in range(len(plan.rows)) if i != name_rows[0]]
+                    if [row.input_sha256 for row in source_rows] == [
+                        hashes[i] for i in destination_rows
+                    ] and len(source_rows) == len(destination_rows):
+                        for i, row in zip(destination_rows, source_rows, strict=True):
+                            vectors[i] = list(row.vector)
+                        record["reused"] = len(source_rows)
+                record.update(inputs=hashes, vectors=vectors)
+                _save_checkpoint(file, record, stage="embedding")
+            except BaseException as error:
+                if staged_new:
+                    self._discard_staging(path, data, error)
+                raise
+        else:
+            plan, vectors, data, staged_new = None, [], None, False
+        prepared = _PreparedDerivation(
+            before, None, entry, conversion, file, record, path, plan, vectors, data, staged_new
+        )
+        try:
+            prepared.admitted = bound.view
+        except ConsumerError as error:
+            # A prior committed publication can have replaced the admitted mirror
+            # before its metadata checkpoint. Only exact durable vector evidence
+            # permits finishing that operation without another provider dispatch.
+            if (
+                error.code != "mirror-unavailable"
+                or record["state"] not in {"vectors-ready", "index-committed"}
+                or plan is None
+                or any(vector is None for vector in vectors)
+                or path.is_symlink()
+                or path.read_bytes() != data
+                or not self._same_snapshot(
+                    self._snapshot(bound, conn, entry_id, identity), prepared
                 )
             ):
-                raise ConsumerError("mirror-name-row-invalid", stage="index")
-            inputs = controlled(lambda: tuple(self.input_view(plan)), control, "embedding")
-            if any(not _bounded_text(text, self.policy.max_mirror_bytes) for text in inputs):
-                raise ConsumerError("embedding-input-invalid", stage="embedding")
-            plan = with_embedding_inputs(plan, representation=self.representation, inputs=inputs)
-            hashes = [_digest(text) for text in plan.embed_inputs]
-            if "inputs" in record and record["inputs"] != hashes:
-                raise ConsumerError("operation-conflict", stage="embedding")
-            vectors = record.get("vectors", [None] * len(plan.rows))
-            if len(vectors) != len(plan.rows):
-                raise ConsumerError(
-                    "checkpoint-corrupt", stage="embedding", effect="recovery-required"
-                )
-            if nominated is not None:
-                source_rows = [
-                    row for row in nominated[1].chunks if row.chunk.heading != nominated[2]
-                ]
-                destination_rows = [i for i in range(len(plan.rows)) if i != name_rows[0]]
-                if [row.input_sha256 for row in source_rows] == [
-                    hashes[i] for i in destination_rows
-                ] and len(source_rows) == len(destination_rows):
-                    for i, row in zip(destination_rows, source_rows, strict=True):
-                        vectors[i] = list(row.vector)
-                    record["reused"] = len(source_rows)
-            record.update(inputs=hashes, vectors=vectors)
-            _save_checkpoint(file, record, stage="embedding")
-            for start in range(0, len(plan.rows), EMBED_SLICE):
-                if bound._admit() != before:
-                    raise ConsumerError("stale-view", stage="index", effect="uncertain")
+                if staged_new:
+                    self._discard_staging(path, data, error)
+                raise
+        return prepared
+
+    def _fence(
+        self, bound: BoundShelf, work: _PreparedDerivation, *, complete=False, effect="uncertain"
+    ) -> None:
+        try:
+            current = bound.view if complete and work.admitted is not None else bound._admit()
+        except ConsumerError as error:
+            raise ConsumerError(error.code, stage="index", effect=effect) from None
+        expected = work.admitted if complete and work.admitted is not None else work.before
+        if current != expected:
+            raise ConsumerError("stale-view", stage="index", effect=effect)
+
+    def _embed(self, bound: BoundShelf, identity, work: _PreparedDerivation, control) -> None:
+        plan, vectors, record = work.plan, work.vectors, work.record
+        if plan is None:
+            return
+        for start in range(0, len(plan.rows), EMBED_SLICE):
+            with bound._shelf._handle.mutex:
+                effect = "uncertain" if record["state"] == "embedding-dispatched" else "none"
+                self._fence(bound, work, effect=effect)
+                control.check("embedding", effect=effect)
                 selected = [
                     i
                     for i in range(start, min(start + EMBED_SLICE, len(plan.rows)))
@@ -884,13 +982,16 @@ class ConsumerPipeline:
                 if not selected:
                     continue
                 record["state"] = "embedding-dispatched"
-                _save_checkpoint(file, record, stage="embedding")
-                returned = controlled(
-                    lambda: self.embedder.embed([plan.embed_inputs[i] for i in selected]),
-                    control,
-                    "embedding",
-                    effect="uncertain",
-                )
+                _save_checkpoint(work.checkpoint, record, stage="embedding")
+            returned = controlled(
+                lambda: self.embedder.embed([plan.embed_inputs[i] for i in selected]),
+                control,
+                "embedding",
+                effect="uncertain",
+            )
+            with bound._shelf._handle.mutex:
+                self._fence(bound, work)
+                control.check("embedding", effect="uncertain")
                 if len(returned) != len(selected):
                     raise ConsumerError(
                         "embedding-result-invalid", stage="embedding", effect="uncertain"
@@ -904,43 +1005,65 @@ class ConsumerPipeline:
                         )
                     vectors[i] = list(_float32(vector))
                 record.update(state="vectors-ready", embedded=record["embedded"] + len(selected))
-                _save_checkpoint(file, record, stage="embedding")
-                if self.progress is not None:
-                    controlled(
-                        lambda: self.progress(
-                            EntryProgress(
-                                before.shelf_id,
-                                entry_id,
-                                entry.path,
-                                "indexing",
-                                sum(vector is not None for vector in vectors),
-                                len(vectors),
-                            )
-                        ),
-                        control,
-                        "index",
-                        effect="uncertain",
-                    )
-            if bound._admit() != before:
-                raise ConsumerError("stale-view", stage="index", effect="uncertain")
-            existing = self._snapshot(bound, conn, entry_id, identity)
-            same = (
-                existing is not None
-                and existing.file.file_hash == conversion.mirror_sha256
-                and [row.input_sha256 for row in existing.chunks] == hashes
-                and [row.vector for row in existing.chunks] == [tuple(vector) for vector in vectors]
-            )
-            if not same:
-                commit_plan(
-                    conn=conn,
-                    plan=plan,
-                    embeddings=vectors,
-                    identity=identity,
-                    snapshot_limits=FileVectorLimits(
-                        max_bytes=self.max_snapshot_bytes, max_chunks=self.policy.max_chunks
+                _save_checkpoint(work.checkpoint, record, stage="embedding")
+            if self.progress is not None:
+                controlled(
+                    lambda: self.progress(
+                        EntryProgress(
+                            work.before.shelf_id,
+                            work.entry.entry_id,
+                            work.entry.path,
+                            "indexing",
+                            sum(vector is not None for vector in vectors),
+                            len(vectors),
+                        )
                     ),
-                    log=lambda line: None,
+                    control,
+                    "index",
+                    effect="uncertain",
                 )
+
+    @staticmethod
+    def _same_snapshot(snapshot: FileVectorSnapshot | None, work: _PreparedDerivation) -> bool:
+        return (
+            snapshot is not None
+            and snapshot.file.file_hash == work.conversion.mirror_sha256
+            and [row.input_sha256 for row in snapshot.chunks] == work.record["inputs"]
+            and [row.vector for row in snapshot.chunks]
+            == [tuple(vector) for vector in work.vectors]
+        )
+
+    def _publish(self, bound, conn, identity, work: _PreparedDerivation, control, observer):
+        entry, conversion, record = work.entry, work.conversion, work.record
+        path, file, vectors = work.path, work.checkpoint, work.vectors
+        entry_id = entry.entry_id
+        work.publication_started = True
+        if conversion.state == "converted":
+            plan = work.plan
+            existing = self._snapshot(bound, conn, entry_id, identity)
+            previous = path.read_bytes() if path.is_file() else None
+            if previous != work.data:
+                _replace_mirror(path, work.data)
+            try:
+                if not self._same_snapshot(existing, work):
+                    commit_plan(
+                        conn=conn,
+                        plan=plan,
+                        embeddings=vectors,
+                        identity=identity,
+                        snapshot_limits=FileVectorLimits(
+                            max_bytes=self.max_snapshot_bytes, max_chunks=self.policy.max_chunks
+                        ),
+                        log=lambda line: None,
+                    )
+            except Exception:
+                # A general Palace error alone does not establish rollback. Restore
+                # the old mirror only after checking the actual idle database view.
+                if not conn.in_transaction and previous is not None:
+                    actual = self._snapshot(bound, conn, entry_id, identity)
+                    if actual == existing:
+                        _replace_mirror(path, previous)
+                raise
             actual = self._snapshot(bound, conn, entry_id, identity)
             record["view_sha256"] = actual.view_sha256
             record["state"] = "index-committed"
@@ -979,7 +1102,7 @@ class ConsumerPipeline:
             write_watermark(bound._shelf, bound._shelf.revision)
         record.update(state="complete", committed_view=asdict(bound.view))
         _save_checkpoint(file, record, stage="index")
-        result = self._result(bound, record, replayed=replayed)
+        result = self._result(bound, record, replayed=False)
         control.check("index", effect="derived-committed")
         observe(observer, result.observation, control)
         return result

@@ -1,0 +1,10 @@
+{
+  "from": null,
+  "id": "40bb771e46c8438f940272cfc15f635f",
+  "owner": null,
+  "phase": "responsive-provider-reads",
+  "previous": null,
+  "reason": "New phase; not a claim or acceptance",
+  "state": "not-started",
+  "writer": "biblios-codex-continuation"
+}

@@ -3313,7 +3313,9 @@ def test_registrar_refuses_gap_before_any_dispatch(repository, tmp_path):
     accepted = run(*common, "--attempt", "1")
     assert accepted.returncode == 0, accepted.stderr
     sequential = run(*common, "--attempt", "2")
-    assert sequential.returncode == 0, sequential.stderr
+    assert sequential.returncode != 0 and "relaunch that registration" in sequential.stderr, (
+        "a later attempt was registered over one that never launched"
+    )
 
 
 @pytest.mark.parametrize("advisory_continuation", ["historical-two-roles"], indirect=True)

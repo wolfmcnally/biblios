@@ -16,10 +16,11 @@ from typing import TYPE_CHECKING, TypeVar
 
 from palace.index.embedder import Embedder
 from palace.rerank import Reranker
+from palace.writer_lock import WriterLockTimeout, writer_lock
 
 from biblios.binding import ShelfBinding, validate_handle
 from biblios.config import Settings
-from biblios.control import CallControl, ConsumerError, Observation, ShelfView, controlled
+from biblios.control import CallControl, ConsumerError, Observation, ShelfView, Stage, controlled
 from biblios.curation import (
     CopyIdentity,
     CurationRequest,
@@ -78,6 +79,22 @@ class BoundShelf:
         finally:
             with self._lifecycle:
                 self._active -= 1
+
+    @contextmanager
+    def _writer(
+        self, operation: str, *, stage: Stage = "index", control: CallControl = CallControl()
+    ) -> Iterator[None]:
+        """Keep the lifetime active while waiting, without taking the reader mutex."""
+        with self._working(), ExitStack() as stack:
+            with self._shelf._handle.mutex:
+                self._admit(write=True)
+                control.check(stage)
+            try:
+                stack.enter_context(writer_lock(self.binding.palace_root, operation=operation))
+            except WriterLockTimeout:
+                raise ConsumerError("writer-busy", stage=stage) from None
+            # Only admission errors above are effect-free; body failures are not.
+            yield
 
     def _admit(self, *, write: bool = False) -> ShelfView:
         if self._closed:
@@ -223,7 +240,7 @@ class BoundShelf:
         """Publish a no-sidecar dynamic read checkpoint as the admitted writer."""
         from biblios.progress import prepare_readable
 
-        with self._shelf._handle.mutex:
+        with self._writer("consumer readable checkpoint"), self._shelf._handle.mutex:
             self._admit(write=True)
             try:
                 return prepare_readable(self._shelf)

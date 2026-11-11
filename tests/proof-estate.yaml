@@ -1760,18 +1760,21 @@ families:
   kind: pytest
   selectors:
   - project/tests/test_consumer_pipeline.py
+  - project/tests/test_consumer_responsiveness.py
   source_paths:
   - project/biblios/**
   - project/tests/test_consumer_pipeline.py
   - project/tests/consumer_fixtures.py
   - project/pyproject.toml
   - project/uv.lock
+  - project/tests/test_consumer_responsiveness.py
   covers:
   - project/biblios/**
   - project/tests/test_consumer_pipeline.py
   - project/tests/consumer_fixtures.py
   - project/pyproject.toml
   - project/uv.lock
+  - project/tests/test_consumer_responsiveness.py
   contract: Contained injected conversion, exact compatible body reuse with fresh
     filename vectors and durable provider/index completion.
   risk_class: consumer-public-contract
