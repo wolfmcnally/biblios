@@ -1,6 +1,6 @@
 # Consumer Adoption
 
-The experimental 0.2.1 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
+The experimental 0.2.2 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
 
 ## Choose the binding and lifetime
 

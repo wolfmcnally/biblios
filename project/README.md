@@ -1,6 +1,6 @@
 # Biblios
 
-Portable knowledge bases called shelves, searched alone or federated in a stack. Version 0.2.1 includes the consumer library capabilities, configurable per-file limits and responsive reads during document embedding. The Python library and thin 22-command CLI remain available. It is experimental: APIs and storage formats may change before a stable release. The generic consumer library lane adds explicit binding, retry, injected conversion, strict search and finite retained-content/excision coordination; see [ADOPTION.md](ADOPTION.md). The CLI does not expose excision; remove remains logical deletion and retains bytes in Castle. MCP is not included. A shelf has no security boundary of its own.
+Portable knowledge bases called shelves, searched alone or federated in a stack. Version 0.2.2 includes the consumer library capabilities, configurable per-file limits and responsive reads during document embedding. The Python library and thin 22-command CLI remain available. It is experimental: APIs and storage formats may change before a stable release. The generic consumer library lane adds explicit binding, retry, injected conversion, strict search and finite retained-content/excision coordination; see [ADOPTION.md](ADOPTION.md). The CLI does not expose excision; remove remains logical deletion and retains bytes in Castle. MCP is not included. A shelf has no security boundary of its own.
 
 ## Install
 
@@ -14,16 +14,16 @@ uv sync --locked --managed-python
 uv run --locked --managed-python python -c "import biblios; print(biblios.__version__)"
 ```
 
-Expected checkout version: `0.2.1`. The package names published release tags for the substrate libraries; the lockfile records their exact resolved commits. A new installation needs GitHub and the package index. The wheel also records those exact Git requirements; installers need Git as well as access to those sources. No private account configuration or AI coding harness is required.
+Expected checkout version: `0.2.2`. The package names published release tags for the substrate libraries; the lockfile records their exact resolved commits. A new installation needs GitHub and the package index. The wheel also records those exact Git requirements; installers need Git as well as access to those sources. No private account configuration or AI coding harness is required.
 
-Download the wheel from the [0.2.1 release](https://github.com/wolfmcnally/biblios/releases/tag/v0.2.1), create a separate environment and install it:
+Download the wheel from the [0.2.2 release](https://github.com/wolfmcnally/biblios/releases/tag/v0.2.2), create a separate environment and install it:
 
 ```sh
 uv venv --python 3.12 .venv
 ```
 
 ```sh
-uv pip install --python .venv/bin/python biblios-0.2.1-py3-none-any.whl
+uv pip install --python .venv/bin/python biblios-0.2.2-py3-none-any.whl
 ```
 
 These paths are for macOS/Linux. See RELEASE.md for update/uninstall and reporting guidance.
