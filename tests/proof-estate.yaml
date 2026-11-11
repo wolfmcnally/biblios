@@ -1849,3 +1849,37 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: user-owned-mirrors
+  kind: pytest
+  selectors:
+  - project/tests/test_mirror_ownership.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_mirror_ownership.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_mirror_ownership.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: 'Mirrors are user-owned: replacement is a new ingestion that retains the
+    previous mirror with provenance, edits are validated at the update seam and never
+    overwritten, one corrupt mirror isolates only its entry, and copies materialize
+    only from their own receipt.'
+  risk_class: data-loss
+  oracle: Actual public derive/update/reconcile/finish/search over unique synthetic
+    Castle/Palace storage; exact mirror and retained bytes, provenance records, typed
+    refusal codes and search membership.
+  admission: 'As of 2026-11-11, phase user-owned-mirrors: nine new proofs, each red-witnessed
+    against the specific guard it protects. No retirement.'
+  nearest_overlap: consumer-pipeline and reconcile families exercise conversion and
+    indexing but assert nothing about displaced bytes, retention provenance, per-entry
+    isolation or copy receipts.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []

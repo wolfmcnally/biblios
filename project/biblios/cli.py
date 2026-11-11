@@ -94,6 +94,14 @@ def _parser() -> argparse.ArgumentParser:
         if name in {"init", "reconcile"}:
             command.add_argument("--config", type=Path, action="append", required=True)
             command.add_argument("--config-root", type=Path, required=True)
+        if name == "reconcile":
+            command.add_argument(
+                "--materialize",
+                action="append",
+                default=[],
+                metavar="OPERATION_ID",
+                help="Create mirrors for the entries this copy operation created (repeatable)",
+            )
         if name == "init":
             command.add_argument("--name", required=True)
             command.add_argument("--description", default="")
@@ -167,7 +175,11 @@ def _invoke(args: argparse.Namespace, resources: ExitStack) -> Any:
         case "status":
             return shelf.index_status()
         case "reconcile":
-            return shelf.reconcile(load_settings(args.config, args.config_root), progress=_progress)
+            return shelf.reconcile(
+                load_settings(args.config, args.config_root),
+                progress=_progress,
+                materialize=tuple(args.materialize),
+            )
         case "verify" | "verify-seal" | "seal":
             return getattr(shelf, name.replace("-", "_"))()
         case "resolve" | "download":

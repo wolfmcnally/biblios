@@ -375,17 +375,20 @@ def test_staging_cleanup_failure_preserves_typed_effect(tmp_path: Path, monkeypa
         ).mutation.affected_entry_ids[0]
         mirror = fixture.bound._shelf.mirror_path(entry)
         operation = identifier()
-        original = Path.unlink
+        import biblios.mirrors as mirrors
 
-        def fail_owned(path, *args, **kwargs):
-            if path == mirror:
+        original = mirrors._rename
+
+        def fail_owned(source, target, flag):
+            # Cleanup moves the owned mirror to a retained name; fail exactly that move.
+            if source == mirror and flag == "noreplace":
                 raise OSError("private provider detail")
-            return original(path, *args, **kwargs)
+            return original(source, target, flag)
 
         def stale(bound, identity, work, control):
             raise ConsumerError("stale-view", stage="index", effect="uncertain")
 
-        monkeypatch.setattr(Path, "unlink", fail_owned)
+        monkeypatch.setattr(mirrors, "_rename", fail_owned)
         monkeypatch.setattr(pipeline, "_embed", stale)
         with pytest.raises(ConsumerError) as refused:
             fixture.bound.derive(pipeline, entry, operation_id=operation)

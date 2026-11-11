@@ -165,8 +165,8 @@ class Entry:
         return self.kind == "file"
 
     @property
-    def searchable(self) -> bool:
-        """Converted over the live bytes, so its mirror and chunks are current."""
+    def conversion_current(self) -> bool:
+        """A conversion is recorded over the live bytes; the mirror's own state is separate."""
         return (
             self.metadata is not None
             and self.metadata.converted

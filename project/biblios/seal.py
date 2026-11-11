@@ -128,6 +128,11 @@ def seal(shelf: Shelf) -> SealRecord:
                 f"the index lags: {status.pending} pending, revision {status.revision}, "
                 f"index at {status.searchable_revision}; reconcile before sealing"
             )
+        if status.isolated:
+            raise BibliosError(
+                f"mirror-states-unsettled: {status.isolated} isolated mirror(s); repair or "
+                "update them before sealing"
+            )
         staging = shelf.chunks_db.parent / "build-staging"
         if staging.exists() and any(staging.iterdir()):
             raise BibliosError("an interrupted Palace build is staged; reconcile before sealing")

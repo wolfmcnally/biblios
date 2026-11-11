@@ -67,7 +67,7 @@ def main(argv: list[str]) -> int:
         print(f"verify: {shelf.verify()}")
 
         converted = [shelf.resolve(e.entry_id) for e in entries]
-        converted = [e for e in converted if e.searchable]
+        converted = [e for e in converted if e.conversion_current]
         if not converted:
             print("\nno file converted, so there is nothing to search; the reasons are above")
             return 0

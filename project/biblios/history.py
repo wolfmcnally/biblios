@@ -259,9 +259,15 @@ def _marker(binding: ShelfBinding) -> Path:
 def _disposition(binding: ShelfBinding, document: dict) -> None:
     """Idempotent derived cleanup, already fenced by the single Palace writer."""
     selected = document["entry_ids"]
+    from biblios.mirrors import retained_files, retention_directory
+
     for entry_id in selected:
-        for suffix in (".md", ".partial"):
-            file = binding.mirror_root / (entry_id + suffix)
+        # Explicit excision is the one operation that removes an entry's mirror bodies,
+        # including retained displaced versions.
+        names = [entry_id + ".md", entry_id + ".partial"]
+        names += [file.name for file in retained_files(binding.mirror_root, entry_id)]
+        for name in names:
+            file = binding.mirror_root / name
             if file.is_symlink() or not file.resolve().is_relative_to(
                 binding.mirror_root.resolve()
             ):
@@ -269,6 +275,14 @@ def _disposition(binding: ShelfBinding, document: dict) -> None:
                     "artifact-outside-domain", stage="history", effect="recovery-required"
                 )
             file.unlink(missing_ok=True)
+        # Their provenance records name excised content addresses.
+        records = retention_directory(binding.palace_root, entry_id)
+        if records.is_symlink():
+            raise ConsumerError(
+                "artifact-outside-domain", stage="history", effect="recovery-required"
+            )
+        if records.exists():
+            shutil.rmtree(records)
     database = binding.palace_root / "index" / "chunks.sqlite"
     if database.is_file():
         connection = sqlite3.connect(database)

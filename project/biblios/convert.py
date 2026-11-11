@@ -46,6 +46,8 @@ class MirrorResult:
     converter: str
     converter_version: str
     conversion: str
+    data: bytes | None = None
+    """The rendered mirror bytes; the caller publishes them through the mirror writer."""
 
     @property
     def converted(self) -> bool:
@@ -71,7 +73,7 @@ def _convert(source: Path, entry: Entry, configuration: Configuration) -> tuple[
 
 
 def convert_entry(shelf: Shelf, entry: Entry, settings: Settings) -> MirrorResult:
-    """Convert one file entry, write or remove its mirror, and return what to record."""
+    """Convert one file entry and return its rendered mirror; the mirror path is untouched."""
     assert entry.cas_id is not None and entry.metadata is not None
     source = cas.require_object(shelf.castle_root, entry.cas_id)
     mirror_path = shelf.mirror_path(entry.entry_id)
@@ -88,19 +90,15 @@ def convert_entry(shelf: Shelf, entry: Entry, settings: Settings) -> MirrorResul
             method, rendered = _convert(staged, entry, configuration)
     except DrawbridgeError as error:
         reason = blocked_reason(error) or "conversion-failed"
-        mirror_path.unlink(missing_ok=True)
         return MirrorResult(
             entry.entry_id, None, "", type(error).__name__, version, UNCONVERTED_PREFIX + reason
         )
     if rendered is None:
-        mirror_path.unlink(missing_ok=True)
         reason = method.removeprefix(DEFERRED_PREFIX)
         return MirrorResult(entry.entry_id, None, "", method, version, UNCONVERTED_PREFIX + reason)
     data = rendered.encode("utf-8")
-    shelf.mirror_root.mkdir(exist_ok=True)
-    mirror_path.write_bytes(data)
     digest = hashlib.sha256(data).hexdigest()
-    return MirrorResult(entry.entry_id, mirror_path, digest, method, version, CONVERTED)
+    return MirrorResult(entry.entry_id, mirror_path, digest, method, version, CONVERTED, data)
 
 
 def recorded(entry: Entry, result: MirrorResult) -> EntryMetadata:

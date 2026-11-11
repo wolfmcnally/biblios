@@ -68,7 +68,7 @@ uv run --locked --managed-python biblios init --shelf my-shelf --config config/s
 uv run --locked --managed-python biblios add --shelf my-shelf notes.txt notes.txt --json
 ```
 
-Run `reconcile` with the same explicit configuration before searching newly stored content. It uses the declared provider and reports progress to stderr; a remote provider may transmit content and incur charges. Every command accepts `--json`; download bytes become base64 in JSON, or exact bytes without it. `download --output FILE` saves a source. Move and copy take complete destination paths including the new name.
+Run `reconcile` with the same explicit configuration before searching newly stored content. It uses the declared provider and reports progress to stderr; a remote provider may transmit content and incur charges. Every command accepts `--json`; download bytes become base64 in JSON, or exact bytes without it. `download --output FILE` saves a source. Move and copy take complete destination paths including the new name. A copy gets its first mirror only from `reconcile --materialize OPERATION_ID`, naming the operation id the copy printed. Mirrors are yours to edit: reconcile re-indexes an edited mirror and never re-converts over it; replacing a file converts the new bytes and keeps the previous mirror under a retained name. `verify` reports any mirror it cannot index.
 
 ## Troubleshooting and safety
 

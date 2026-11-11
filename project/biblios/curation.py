@@ -400,6 +400,9 @@ def execute(
                         or any((entry.size or 0) > limits.file_bytes for entry in files)
                     ):
                         raise ConsumerError("inventory-limit", stage="curation")
+                    from biblios.mirrors import record_copy_intent
+
+                    record_copy_intent(bound.binding.palace_root, request.operation_id)
             dispatched = True
             result = execute_namespace(handle, compiled, sources)
         except ConsumerError:

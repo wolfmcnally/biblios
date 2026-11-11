@@ -10,5 +10,6 @@ Definitions and canonical lifecycle state live in `phases/` and `events/`. The o
 - [Adapter-reached adoption](phases/adapter-consumer-adoption.md).
 - [Explicit conversion envelopes](phases/conversion-envelope-budgets.md), a bounded compatibility correction depending on the completed adoption work.
 - [Responsive provider reads](phases/responsive-provider-reads.md), a bounded correction preserving admitted reads during document embedding.
+- [User-owned mirrors](phases/user-owned-mirrors.md), per-entry mirror isolation, read-only re-index of edits and an explicit validated update.
 
 Read the target definition, its brief references and actual dependencies before phase work; use the repository's supported custody and review workflow. Product code lives in `project/biblios/`, tests in `project/tests/`, and installation instructions in [the README](../README.md).

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from castle import cas
 from palace.index._errors import IdentityMismatchError
@@ -21,6 +20,12 @@ from biblios.shelf import Shelf
 class VerifyReport:
     ok: bool
     problems: tuple[str, ...]
+    mirrors: dict[str, str] = field(default_factory=dict)
+    """Each converted entry whose mirror is not searchable, with its state."""
+    retained: int = 0
+    """Retained mirror files kept across the shelf, live entries or not."""
+    unattributed: int = 0
+    """Retained files with no provenance record."""
 
 
 def verify_shelf(shelf: Shelf) -> VerifyReport:
@@ -28,22 +33,31 @@ def verify_shelf(shelf: Shelf) -> VerifyReport:
     castle = cas.verify(shelf.castle_root)
     if not castle.ok:
         problems.extend(f"castle: {error}" for error in castle.errors)
+    from biblios.mirrors import (
+        PENDING_CONVERSION,
+        PENDING_REINDEX,
+        classify_shelf,
+        retained_summary,
+    )
+
+    retained, unattributed = retained_summary(shelf.palace_store, shelf.mirror_root)
+
+    states = classify_shelf(shelf)
     expected: dict[str, str] = {}
-    for entry in shelf.files():
-        metadata = entry.metadata
-        if metadata is None or not metadata.converted:
+    mirrors: dict[str, str] = {}
+    for entry_id, state in sorted(states.items()):
+        if state.searchable:
+            expected[entry_id] = state.digest
             continue
-        if not metadata.current_for(entry.cas_id):
-            problems.append(f"conversion recorded over replaced bytes: {entry.entry_id}")
-            continue
-        mirror = shelf.mirror_path(entry.entry_id)
-        if not mirror.is_file():
-            problems.append(f"mirror missing: {entry.entry_id}")
-            continue
-        digest = hashlib.sha256(mirror.read_bytes()).hexdigest()
-        if digest != metadata.mirror_sha256:
-            problems.append(f"mirror digest differs from the namespace record: {entry.entry_id}")
-        expected[entry.entry_id] = digest
+        mirrors[entry_id] = state.state
+        if state.state == PENDING_CONVERSION:
+            problems.append(f"replaced bytes not yet converted: {entry_id}")
+        elif state.state == PENDING_REINDEX:
+            problems.append(
+                f"mirror digest differs from the namespace record (not yet re-indexed): {entry_id}"
+            )
+        else:
+            problems.append(f"mirror isolated ({state.state}): {entry_id}")
     try:
         indexed = indexed_files(shelf)
     except (sqlite3.Error, BibliosError) as error:
@@ -54,7 +68,8 @@ def verify_shelf(shelf: Shelf) -> VerifyReport:
             problems.append(f"palace holds no file hash for entry {entry_id}")
         elif indexed[entry_id] != digest:
             problems.append(f"palace file hash differs from the live mirror: {entry_id}")
-    for entry_id in sorted(set(indexed) - set(expected)):
+    # A non-searchable entry's rows are reported through its state above.
+    for entry_id in sorted(set(indexed) - set(expected) - set(mirrors)):
         problems.append(f"palace indexes an entry that is not live and current: {entry_id}")
     store = shelf.palace_store
     if not embedder_config_path(store).exists():
@@ -71,4 +86,10 @@ def verify_shelf(shelf: Shelf) -> VerifyReport:
         from biblios.seal import verify_seal
 
         problems.extend(verify_seal(shelf).problems)
-    return VerifyReport(ok=not problems, problems=tuple(problems))
+    return VerifyReport(
+        ok=not problems,
+        problems=tuple(problems),
+        mirrors=mirrors,
+        retained=retained,
+        unattributed=unattributed,
+    )

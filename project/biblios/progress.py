@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 WATERMARK_SCHEMA = "biblios.watermark/1"
 WATERMARK_NAME = "watermark.json"
 EMBED_SLICE = 16
-STAGES = ("stored", "converting", "indexing", "searchable", "unconverted")
+STAGES = ("stored", "converting", "indexing", "searchable", "unconverted", "withheld")
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,6 +48,10 @@ class EntryProgress:
     done: int | None = None
     total: int | None = None
     eta_seconds: int | None = None
+    mirror: str | None = None
+    """The mirror's state (see :mod:`biblios.mirrors`) when a conversion is recorded."""
+    retained: int = 0
+    """Displaced or retired mirror files Biblios keeps for this entry."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,8 @@ class IndexStatus:
     unconverted: int
     entries: tuple[EntryProgress, ...]
     """Every live file entry that is not yet searchable."""
+    isolated: int = 0
+    """Entries withheld for their own mirror state; they never block the others."""
     # ``lagging`` is true while the watermark is behind the namespace revision or any entry
     # is pending: a store rebuilt from scratch with an old watermark is behind too.
 
@@ -155,19 +161,14 @@ def prepare_readable(shelf: Shelf) -> IndexStatus:
     import hashlib
 
     from biblios.control import ConsumerError
+    from biblios.mirrors import classify_shelf
 
     shelf._refuse_if_sealed()
-    expected = {}
-    for entry in shelf.files():
-        if entry.searchable and entry.metadata is not None:
-            file = shelf.mirror_path(entry.entry_id)
-            if (
-                file.is_symlink()
-                or hashlib.sha256(file.read_bytes()).hexdigest() != entry.metadata.mirror_sha256
-            ):
-                raise ConsumerError("mirror-unavailable", stage="index")
-            expected[entry.entry_id] = entry.metadata.mirror_sha256
-    if indexed_files(shelf) != expected:
+    states = classify_shelf(shelf)
+    expected, _ = membership(shelf, states)
+    # The checkpoint names exactly what a reader may answer; every other state is listed.
+    withheld = {entry_id: state.state for entry_id, state in states.items() if not state.searchable}
+    if {k: v for k, v in indexed_files(shelf).items() if k not in withheld} != expected:
         raise ConsumerError("index-membership-mismatch", stage="index")
     if shelf.chunks_db.is_file():
         connection = sqlite3.connect(shelf.chunks_db)
@@ -184,6 +185,7 @@ def prepare_readable(shelf: Shelf) -> IndexStatus:
     document = {
         "revision": status.revision,
         "membership": expected,
+        "withheld": withheld,
         "database_sha256": hashlib.sha256(shelf.chunks_db.read_bytes()).hexdigest()
         if shelf.chunks_db.is_file()
         else None,
@@ -203,28 +205,66 @@ def recorded_root(shelf: Shelf) -> str | None:
     return rows[0][1] if rows else None
 
 
-def index_status(shelf: Shelf) -> IndexStatus:
+def membership(shelf: Shelf, states: dict) -> tuple[dict[str, str], dict[str, str]]:
+    """Expected index membership and the withheld entries' states.
+
+    Expected is every entry whose mirror is searchable, at its recorded digest. Isolated
+    entries are withheld: their rows are excluded on both sides of every membership
+    comparison, so they never block the rest of the shelf.
+    """
+    expected: dict[str, str] = {}
+    withheld: dict[str, str] = {}
+    for entry in shelf.files():
+        state = states.get(entry.entry_id)
+        if state is None or entry.metadata is None:
+            continue
+        if state.searchable:
+            expected[entry.entry_id] = entry.metadata.mirror_sha256
+        elif state.isolated:
+            withheld[entry.entry_id] = state.state
+    return expected, withheld
+
+
+def index_status(shelf: Shelf, states: dict | None = None) -> IndexStatus:
     """How far the index is behind the namespace, computed from the three layers now."""
+    from biblios.mirrors import classify_shelf
+
     revision = shelf.revision
     searchable_revision = read_watermark(shelf)
     built = store_built(shelf)
     index = indexed_files(shelf) if built else {}
-    files = searchable = pending = unconverted = 0
+    entries = list(shelf.files())
+    states = classify_shelf(shelf, entries) if states is None else states
+    files = searchable = pending = unconverted = isolated = 0
     rows: list[EntryProgress] = []
-    for entry in shelf.files():
+    for entry in entries:
         files += 1
         metadata = entry.metadata
         current = metadata is not None and metadata.current_for(entry.cas_id)
+        state = states.get(entry.entry_id)
+        mirror = state.state if state is not None else None
+        retained = state.retained if state is not None else 0
         if current and metadata.conversion.startswith(UNCONVERTED_PREFIX):
             unconverted += 1
             stage = "unconverted"
-        elif current and metadata.converted and index.get(entry.entry_id) == metadata.mirror_sha256:
+        elif (
+            state is not None
+            and state.searchable
+            and index.get(entry.entry_id) == metadata.mirror_sha256
+        ):
             searchable += 1
             continue
+        elif state is not None and state.isolated:
+            isolated += 1
+            stage = "withheld"
         else:
             pending += 1
             stage = "stored"
-        rows.append(EntryProgress(shelf.shelf_id, entry.entry_id, entry.path, stage))
+        rows.append(
+            EntryProgress(
+                shelf.shelf_id, entry.entry_id, entry.path, stage, mirror=mirror, retained=retained
+            )
+        )
     return IndexStatus(
         shelf_id=shelf.shelf_id,
         revision=revision,
@@ -236,4 +276,5 @@ def index_status(shelf: Shelf) -> IndexStatus:
         pending=pending,
         unconverted=unconverted,
         entries=tuple(rows),
+        isolated=isolated,
     )

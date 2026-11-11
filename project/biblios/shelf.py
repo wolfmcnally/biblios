@@ -543,8 +543,8 @@ class Shelf:
     def copy(self, path: str, destination: str, *, operation_id: str | None = None) -> Mutation:
         """Duplicate an entry (and its subtree) under new entry ids at ``destination``.
 
-        The copies carry the source's metadata and content address; their mirrors and
-        chunks are derived by the next reconcile.
+        The copies carry the source's metadata and content address. Their first mirrors
+        are created by a reconcile that names this operation in ``materialize``.
         """
         request_id = self._request_id(
             operation_id, "copy", path=_split(path), destination=_split(destination)
@@ -558,6 +558,9 @@ class Shelf:
             {"source_id": source, "new_id": _uuid()}
             for source in self._subtree(record.entry_id, self._live())
         ]
+        from biblios.mirrors import record_copy_intent
+
+        record_copy_intent(self.palace_store, request_id)
         return self._mutate(
             "duplicate",
             {
@@ -691,11 +694,19 @@ class Shelf:
         embedder: Embedder | None = None,
         progress: Callable[[EntryProgress], None] | None = None,
         should_yield: Callable[[], bool] | None = None,
+        materialize: tuple[str, ...] = (),
     ) -> ReconcileReport:
+        """Bring mirrors and index up to date; ``materialize`` names copy operations whose
+        new entries get their first mirror."""
         from biblios.reconcile import reconcile
 
         return reconcile(
-            self, settings, embedder=embedder, progress=progress, should_yield=should_yield
+            self,
+            settings,
+            embedder=embedder,
+            progress=progress,
+            should_yield=should_yield,
+            materialize=materialize,
         )
 
     def verify(self) -> VerifyReport:

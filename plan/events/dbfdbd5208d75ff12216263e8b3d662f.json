@@ -1,0 +1,15 @@
+{
+  "acceptance": {
+    "path": ".kickoff/runs/44337d6e9c05e3c34d247e19812b2fac/closure.json",
+    "sha256": "968b356e5673ca3368c6898ffdd0c845f0ab988b85175e166803a5a52cfb3fee"
+  },
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/d464483cce8cba5220f74b650e6e80959d4d6caa0485860b9c2cccca4518d02f;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "in-progress",
+  "id": "dbfdbd5208d75ff12216263e8b3d662f",
+  "owner": "biblios-opus-successor",
+  "phase": "user-owned-mirrors",
+  "previous": "fd1ed32087564e2aaf4b397bcc3a679b",
+  "reason": "User-owned mirrors accepted: edits re-indexed without conversion or writes, replacement as new ingestion with retention and provenance, per-entry isolation, copy materialization by receipt; one Opus code advice adopted; source delivery is distinct from the later release and manual usability acceptance",
+  "state": "completed",
+  "writer": "biblios-opus-successor"
+}

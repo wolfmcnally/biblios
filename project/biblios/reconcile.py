@@ -17,7 +17,6 @@ probe, no write.
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import time
 from collections.abc import Callable, Sequence
@@ -38,9 +37,25 @@ from palace.index.schema import assert_identity
 from palace.index.update import update
 
 from biblios.config import Settings
+from biblios.control import ConsumerError
 from biblios.convert import convert_entry, recorded
 from biblios.entries import Entry
 from biblios.errors import BibliosError, IndexLagError, SealedShelfError, UndeclaredEmbedderError
+from biblios.mirrors import (
+    EDIT_CONVERTER,
+    PENDING_CONVERSION,
+    PENDING_REINDEX,
+    MirrorInvalid,
+    Provenance,
+    classify_shelf,
+    copy_evidence,
+    digest,
+    lane_for,
+    read_mirror,
+    retire_mirror,
+    validate_mirror,
+    write_mirror,
+)
 from biblios.progress import (
     EMBED_SLICE,
     EntryProgress,
@@ -77,6 +92,8 @@ class ReconcileReport:
     yielded: bool
     revision: int
     searchable_revision: int
+    isolated: tuple[tuple[str, str], ...] = ()
+    """Entries withheld for their mirror's state, each kept on disk as found."""
 
 
 def require_identity(shelf: Shelf) -> None:
@@ -97,7 +114,13 @@ def reconcile(
     embedder: Embedder | None = None,
     progress: Progress | None = None,
     should_yield: ShouldYield | None = None,
+    materialize: tuple[str, ...] = (),
 ) -> ReconcileReport:
+    """Re-index changed mirrors and convert new data; never re-convert an existing mirror.
+
+    ``materialize`` names copy operations created by this code whose entries may each
+    receive one first mirror (see :func:`biblios.mirrors.copy_evidence`).
+    """
     if shelf.sealed:
         raise SealedShelfError("a sealed shelf is read-only; unseal it before reconciling")
     require_identity(shelf)
@@ -106,7 +129,9 @@ def reconcile(
         embedder, _ = resolve_embedder(shelf.palace_store, purpose="document")
     try:
         embedder.probe()
-        return _Step(shelf, settings, embedder, progress, should_yield).run()
+        step = _Step(shelf, settings, embedder, progress, should_yield)
+        step.materialize = tuple(materialize)
+        return step.run()
     finally:
         if owned:
             embedder.close()
@@ -162,6 +187,8 @@ class _Step:
         self.should_yield = should_yield or (lambda: False)
         self.expected_revision = shelf.revision
         self.external = False
+        self.materialize: tuple[str, ...] = ()
+        self.isolated: list[tuple[str, str]] = []
 
     def _own(self, mutation: Mutation) -> None:
         if mutation.revision_before != self.expected_revision:
@@ -189,25 +216,61 @@ class _Step:
         shelf = self.shelf
         shelf.mirror_root.mkdir(exist_ok=True)
         live = [entry for entry in shelf.files() if entry.metadata is not None]
+        states = classify_shelf(shelf, live)
+        materializable: set[str] = set()
+        for operation_id in self.materialize:
+            materializable |= copy_evidence(shelf, operation_id)
         current: dict[str, str] = {}
         needs_conversion: set[str] = set()
+        # A replaced file is a new ingestion: the previous mirror's digest, to be retained.
+        displaced: dict[str, str] = {}
+        reindex: set[str] = set()
+        isolated: list[tuple[str, str]] = []
         for entry in live:
             metadata = entry.metadata
             assert metadata is not None
-            if not metadata.current_for(entry.cas_id):
+            state = states.get(entry.entry_id)
+            if state is None:
+                if not metadata.current_for(entry.cas_id):
+                    if shelf.mirror_path(entry.entry_id).exists():
+                        # A file at a never-converted entry's path is a user's mirror.
+                        isolated.append((entry.entry_id, "mirror-user-owned"))
+                    else:
+                        needs_conversion.add(entry.entry_id)
+            elif state.state == PENDING_CONVERSION:
                 needs_conversion.add(entry.entry_id)
-            elif metadata.converted:
-                if _mirror_matches(shelf, entry.entry_id, metadata.mirror_sha256):
-                    current[entry.entry_id] = metadata.mirror_sha256
-                else:
-                    needs_conversion.add(entry.entry_id)
-        # Derived state belongs to live entries that are converted and current, or that
-        # are about to be reconverted; everything else (dead entries, and entries whose
-        # current conversion is unconverted) leaves, whichever step first notices it.
-        keep = set(current) | needs_conversion
+                if state.digest is not None:
+                    displaced[entry.entry_id] = state.digest
+            elif state.searchable:
+                current[entry.entry_id] = metadata.mirror_sha256
+            elif state.state == PENDING_REINDEX:
+                current[entry.entry_id] = state.digest
+                reindex.add(entry.entry_id)
+            elif state.state == "mirror-missing" and entry.entry_id in materializable:
+                needs_conversion.add(entry.entry_id)
+            else:
+                isolated.append((entry.entry_id, state.state))
+        self.isolated = isolated
+        revision = shelf.revision
+
+        def provenance(entry, reason: str) -> Provenance:
+            metadata = entry.metadata if entry is not None else None
+            recorded = metadata is not None and metadata.converted
+            return Provenance(
+                shelf.palace_store,
+                reason,
+                metadata.source_cas_id if recorded else None,
+                metadata.mirror_sha256 if recorded else None,
+                None,
+                revision,
+            )
+
+        # A mirror no live entry keeps is retired (kept under a retained name), never
+        # deleted; an isolated entry's mirror stays exactly where the user left it.
+        keep = set(current) | needs_conversion | {entry_id for entry_id, _ in isolated}
         for stray in shelf.mirror_root.glob("*.md"):
             if stray.stem not in keep:
-                stray.unlink()
+                retire_mirror(stray, provenance=provenance(None, "stray"))
         store = shelf.palace_store
         built = False
         converted: list[str] = []
@@ -266,12 +329,27 @@ class _Step:
                 if entry.entry_id in needs_conversion:
                     self._row(entry, "converting")
                     result = convert_entry(shelf, entry, self.settings)
+                    if result.converted:
+                        try:
+                            write_mirror(
+                                shelf.mirror_path(entry.entry_id),
+                                result.data,
+                                expected=displaced.get(entry.entry_id),
+                                provenance=provenance(entry, "source-replaced"),
+                            )
+                        except ConsumerError:
+                            # A mirror appeared meanwhile: it is the user's; never replaced.
+                            isolated.append((entry.entry_id, "mirror-changed-concurrently"))
+                            continue
                     if not self._record(entry, result):
                         continue
                     if not result.converted:
                         unconverted.append(entry.entry_id)
                         current.pop(entry.entry_id, None)
-                        shelf.mirror_path(entry.entry_id).unlink(missing_ok=True)
+                        retire_mirror(
+                            shelf.mirror_path(entry.entry_id),
+                            provenance=provenance(entry, "unconverted"),
+                        )
                         if entry.entry_id in index:
                             update(
                                 store=store,
@@ -286,10 +364,23 @@ class _Step:
                     converted.append(entry.entry_id)
                     current[entry.entry_id] = result.mirror_sha256
                 if index.get(entry.entry_id) == current[entry.entry_id]:
-                    unchanged.append(entry.entry_id)
+                    if entry.entry_id in reindex and not self._record_edit(entry, index):
+                        isolated.append((entry.entry_id, "mirror-changed-concurrently"))
+                        current.pop(entry.entry_id, None)
+                    else:
+                        unchanged.append(entry.entry_id)
+                    continue
+                if entry.entry_id in reindex and not self._valid_edit(entry, current):
+                    # The bytes changed or became invalid after classification: withhold
+                    # the entry on both sides so it never fails the run.
+                    isolated.append((entry.entry_id, "mirror-changed-concurrently"))
+                    current.pop(entry.entry_id, None)
                     continue
                 wrapper = self._index(entry)
                 indexed.append(entry.entry_id)
+                if entry.entry_id in reindex and not self._record_edit(entry, indexed_files(shelf)):
+                    isolated.append((entry.entry_id, "mirror-changed-concurrently"))
+                    current.pop(entry.entry_id, None)
                 if wrapper.yield_requested:
                     yielded = True
                     break
@@ -302,7 +393,8 @@ class _Step:
                 for entry in live
                 if entry.entry_id in current and entry.entry_id not in unconverted
             }
-            after = indexed_files(shelf)
+            withheld = {entry_id for entry_id, _ in isolated}
+            after = {k: v for k, v in indexed_files(shelf).items() if k not in withheld}
             if after != expected:
                 raise IndexLagError(
                     f"index names {sorted(after)} but the live converted entries are "
@@ -312,7 +404,13 @@ class _Step:
             # transition, and never over a shelf sealed meanwhile.
             with shelf._handle.mutex:
                 final = shelf.revision
-                if not shelf.sealed and not self.external and final == self.expected_revision:
+                settled = not any(state == "mirror-changed-concurrently" for _, state in isolated)
+                if (
+                    settled
+                    and not shelf.sealed
+                    and not self.external
+                    and final == self.expected_revision
+                ):
                     write_watermark(shelf, final)
                     searchable_revision = final
         return ReconcileReport(
@@ -325,6 +423,7 @@ class _Step:
             yielded=yielded,
             revision=self.expected_revision,
             searchable_revision=searchable_revision,
+            isolated=tuple(isolated),
         )
 
     def _record(self, entry: Entry, result: Any) -> bool:
@@ -340,6 +439,46 @@ class _Step:
             if fresh.cas_id != entry.cas_id or fresh.metadata is None:
                 return False
             self._own(shelf.record_conversion(fresh, recorded(fresh, result)))
+        return True
+
+    def _valid_edit(self, entry: Entry, current: dict[str, str]) -> bool:
+        """Validate an edited mirror's bytes before Palace reads the file itself."""
+        try:
+            data = read_mirror(self.shelf.mirror_path(entry.entry_id), self.shelf.mirror_root)
+            if data is None or digest(data) != current[entry.entry_id]:
+                return False
+            validate_mirror(data, lane=lane_for(self.shelf.palace_store))
+        except MirrorInvalid:
+            return False
+        return True
+
+    def _record_edit(self, entry: Entry, index: dict[str, str]) -> bool:
+        """Record a re-indexed user edit only when the file, Palace and the validated
+        digest agree; otherwise nothing is recorded and the entry stays pending."""
+        shelf = self.shelf
+        with shelf._handle.mutex:
+            try:
+                fresh = shelf.resolve(entry.entry_id)
+                data = read_mirror(shelf.mirror_path(entry.entry_id), shelf.mirror_root)
+            except (BibliosError, MirrorInvalid):
+                return False
+            if data is None or fresh.cas_id != entry.cas_id or fresh.metadata is None:
+                return False
+            found = digest(data)
+            try:
+                validate_mirror(data, lane=lane_for(shelf.palace_store))
+            except MirrorInvalid:
+                return False
+            if index.get(entry.entry_id) != found:
+                return False
+            metadata = fresh.metadata.with_conversion(
+                converter=EDIT_CONVERTER,
+                converter_version="",
+                mirror_sha256=found,
+                source_cas_id=fresh.cas_id,
+                conversion=fresh.metadata.conversion,
+            )
+            self._own(shelf.record_conversion(fresh, metadata))
         return True
 
     def _index(self, entry: Entry) -> _SlicingEmbedder:
@@ -372,13 +511,6 @@ class _Step:
                 self._row(entry, "indexing")
 
         return report
-
-
-def _mirror_matches(shelf: Shelf, entry_id: str, digest: str) -> bool:
-    mirror = shelf.mirror_path(entry_id)
-    if not mirror.is_file():
-        return False
-    return hashlib.sha256(mirror.read_bytes()).hexdigest() == digest
 
 
 def _quiet(_line: str) -> None:

@@ -468,7 +468,7 @@ def _snapshot_envelope(
         snapshot(entry),
         fixture.bound._shelf.mirror_path(entry).read_bytes(),
         fixture.bound.view.revision,
-        fixture.bound.resolve(entry).searchable,
+        fixture.bound.resolve(entry).conversion_current,
     ) == (
         "derivation-failed",
         "index",
@@ -1365,8 +1365,6 @@ def test_conversion_lifecycle_is_observable_before_cross_thread_callback_release
 
 
 def _crash_mirror_stage(directory: Path) -> None:
-    import biblios.pipeline as module
-
     fixture = consumer_fixture(directory)
     pipeline, _ = _pipeline(fixture, [])
     entry = fixture.bound.curate(
@@ -1381,14 +1379,16 @@ def _crash_mirror_stage(directory: Path) -> None:
             default=str,
         )
     )
-    original_replace = module.os.replace
+    import biblios.mirrors as mirrors
 
-    def staged(source, destination):
+    original_rename = mirrors._rename
+
+    def staged(source, destination, flag):
         if Path(source) == fixture.bound._shelf.mirror_path(entry).with_suffix(".partial"):
             os._exit(80)
-        return original_replace(source, destination)
+        return original_rename(source, destination, flag)
 
-    module.os.replace = staged
+    mirrors._rename = staged
     fixture.bound.derive(pipeline, entry, operation_id=identifier())
     raise AssertionError("mirror staging boundary was not reached")
 

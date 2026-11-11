@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/d464483cce8cba5220f74b650e6e80959d4d6caa0485860b9c2cccca4518d02f;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "not-started",
+  "id": "fd1ed32087564e2aaf4b397bcc3a679b",
+  "owner": "biblios-opus-successor",
+  "phase": "user-owned-mirrors",
+  "previous": "1f4f7f2d5f9444859ab2b4083d41fcf4",
+  "reason": "Operator-directed user-owned mirror outcome relayed by the factotum with transcript evidence; new full plan/code review budget; completed phases and their budgets remain closed",
+  "state": "in-progress",
+  "writer": "biblios-opus-successor"
+}

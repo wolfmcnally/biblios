@@ -133,20 +133,16 @@ class BoundShelf:
         return view
 
     def _view(self) -> ShelfView:
+        from biblios.mirrors import classify_shelf
+
         view = self._admit()
         index = indexed_files(self._shelf)
-        mirrors = []
-        for entry in self._shelf.files():
-            if entry.metadata is not None and entry.metadata.converted:
-                file = self._shelf.mirror_path(entry.entry_id)
-                if file.is_symlink() or not file.resolve().is_relative_to(
-                    self.binding.mirror_root.resolve()
-                ):
-                    raise ConsumerError("artifact-outside-domain", stage="read")
-                digest = hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
-                if digest != entry.metadata.mirror_sha256:
-                    raise ConsumerError("mirror-unavailable", stage="read")
-                mirrors.append((entry.entry_id, entry.cas_id, entry.metadata.mirror_sha256, digest))
+        # Per-entry mirror states never refuse the view; they are bound into its digest
+        # so their appearance or clearing is still a view change for the strict fences.
+        mirrors = sorted(
+            (entry_id, state.state, state.digest, state.retained)
+            for entry_id, state in classify_shelf(self._shelf).items()
+        )
         marker = self.binding.palace_root / "consumer-generation.json"
         generation = marker.read_text() if marker.is_file() else ""
         selectors = [
@@ -213,23 +209,22 @@ class BoundShelf:
         control: CallControl = CallControl(),
     ) -> Page:
         def read() -> Page:
-            entry = self._shelf.resolve(entry_id)
-            if not entry.searchable or entry.metadata is None:
-                raise ConsumerError("mirror-unavailable", stage="read")
-            file = self._shelf.mirror_path(entry_id)
-            if (
-                file.is_symlink()
-                or not file.resolve().is_relative_to(self.binding.mirror_root.resolve())
-                or hashlib.sha256(file.read_bytes()).hexdigest() != entry.metadata.mirror_sha256
-            ):
-                raise ConsumerError("mirror-unavailable", stage="read")
+            from drawbridge.mirror import parse_mirror_header
             from palace.index.embedder_config import load_embedder_config
 
+            from biblios.search import MirrorUnavailable, readable_mirror
+
+            entry = self._shelf.resolve(entry_id)
+            try:
+                text, state = readable_mirror(self._shelf, entry)
+            except MirrorUnavailable as error:
+                raise ConsumerError(error.code, stage="read") from None
             if load_embedder_config(self.binding.palace_root).representation is not None:
                 # A supplied representation owns its complete Markdown view, including
                 # any front matter. It is not Drawbridge's provenance-envelope format.
-                return _page(entry, file.read_text(encoding="utf-8"), page=page)
-            return self._shelf.read(entry_id, page=page)
+                return _page(entry, text, page=page, mirror_state=state)
+            _header, body = parse_mirror_header(text)
+            return _page(entry, body, page=page, mirror_state=state)
 
         return self._read(read, control)
 
@@ -387,6 +382,7 @@ class BoundShelf:
         operation_id: str,
         donor: ReuseDonor | None = None,
         retry_uncertain: bool = False,
+        copied_by: str | None = None,
         control: CallControl = CallControl(),
         observer: Callable[[Observation], None] | None = None,
     ) -> DerivationStatus:
@@ -396,6 +392,32 @@ class BoundShelf:
                 entry_id,
                 operation_id=operation_id,
                 donor=donor,
+                retry_uncertain=retry_uncertain,
+                copied_by=copied_by,
+                control=control,
+                observer=observer,
+            )
+
+    def update_mirror(
+        self,
+        pipeline: ConsumerPipeline,
+        entry_id: str,
+        *,
+        operation_id: str,
+        markdown: str,
+        expected_sha256: str | None,
+        retry_uncertain: bool = False,
+        control: CallControl = CallControl(),
+        observer: Callable[[Observation], None] | None = None,
+    ) -> DerivationStatus:
+        """Replace an entry's mirror with user-supplied text and re-index it."""
+        with self._working():
+            return pipeline.update_mirror(
+                self,
+                entry_id,
+                operation_id=operation_id,
+                markdown=markdown,
+                expected_sha256=expected_sha256,
                 retry_uncertain=retry_uncertain,
                 control=control,
                 observer=observer,

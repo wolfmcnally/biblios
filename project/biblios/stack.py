@@ -105,9 +105,13 @@ class Stack:
             embedders={self._identity: embedder} if embedder is not None else None,
             reranker=reranker,
         )
+        from biblios.mirrors import classify_shelf
+
         live: dict[str, dict[str, Entry]] = {}
         indexed: dict[str, dict[str, str]] = {}
+        states: dict[str, dict] = {}
         for shelf in built:
+            states[shelf.shelf_id] = classify_shelf(shelf)
             live[shelf.shelf_id] = {
                 entry.entry_id: entry for entry in shelf.files() if entry.metadata is not None
             }
@@ -119,7 +123,7 @@ class Stack:
             hit = store_hit.hit
             entry_id = Path(hit.path).stem
             entry = live[shelf.shelf_id].get(entry_id)
-            if not current_hit(entry, indexed[shelf.shelf_id]):
+            if not current_hit(entry, indexed[shelf.shelf_id], states[shelf.shelf_id]):
                 refused.append((shelf.shelf_id, entry_id))
                 continue
             assert entry is not None

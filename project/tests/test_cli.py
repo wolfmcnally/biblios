@@ -271,7 +271,8 @@ def test_progress_binary_and_failure_streams(tmp_path, monkeypatch, capsysbinary
     monkeypatch.setattr(cli, "load_settings", load)
     progress = EntryProgress("shelf", "entry", "résumé.txt", "indexing", 1, 2, 3)
 
-    def reconcile(received, *, progress):
+    def reconcile(received, *, progress, materialize):
+        assert materialize == (), "reconcile materializes nothing unless named"
         assert received is settings, "reconcile configuration"
         progress(EntryProgress("shelf", "entry", "résumé.txt", "indexing", 1, 2, 3))
         return REPORT
