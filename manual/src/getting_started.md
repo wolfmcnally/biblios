@@ -1,6 +1,6 @@
 # Get Started
 
-This guide sets up Biblios's library and CLI from a checkout. You need Git and [uv](https://docs.astral.sh/uv/); uv installs the pinned Python 3.12 runtime itself. The checkout targets experimental 0.2.0; the published initial release is 0.1.0. Python 3.12 and 3.13 are supported; macOS and Linux have been exercised, and Windows is unqualified. No AI coding harness is needed to use the tool. MCP is not included.
+This guide sets up Biblios's library and CLI from a checkout. You need Git and [uv](https://docs.astral.sh/uv/); uv installs the pinned Python 3.12 runtime itself. The checkout targets experimental 0.2.1. Python 3.12 and 3.13 are supported; macOS and Linux have been exercised, and Windows is unqualified. No AI coding harness is needed to use the tool. MCP is not included.
 
 ## Set up the environment
 

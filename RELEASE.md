@@ -1,14 +1,18 @@
-# Biblios 0.2.0 release preparation
+# Biblios 0.2.1 release preparation
 
-Version 0.2.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It follows the published initial 0.1.0 release and includes the intervening library capabilities; it is not a backport labeled 0.1.1. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.2.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It is a patch release after the published experimental 0.2.0: one behavioural correction with unchanged public API, dependencies, CLI and storage formats. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.2.0`. The attached package artifacts are `biblios-0.2.0-py3-none-any.whl`, `biblios-0.2.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.2.1`. The attached package artifacts are `biblios-0.2.1-py3-none-any.whl`, `biblios-0.2.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
 
-## Changes since 0.1.0
+## Changes since 0.2.0
+
+Public reads and strict search now finish while a document embedding callback is held. Writer admission precedes namespace locking and the reader mutex is released during embedding; stale provider results still refuse publication, competing writers keep one admission order, and active work still protects the shelf lifetime. Conversion, rendering and input preparation remain synchronous. Waiting for writer admission observes cancellation and deadlines only after its existing bounded wait returns. A hard crash after mirror replacement but before index commit may require restoring the previous admitted mirror; no multi-store crash atomicity is claimed. Dependencies are the same published releases as 0.2.0: Palace v0.4.0, Castle v0.3.0, Drawbridge v0.3.1 and Conric v0.1.0.
+
+## Included from 0.2.0
 
 The library adds explicit consumer-controlled shelf binding and read-only use, revision-bound retry, injected conversion and rendering, same-shelf body-vector reuse with independent destination-name embeddings, strict search and publication observations, and coordinated finite retained-content/history/excision access. Destination rows remain independent after donor removal. Excision is an explicit library operation; the CLI still has 22 commands and logical removal retains source bytes. MCP remains held.
 
@@ -26,7 +30,7 @@ The package source allowlist includes the library, tests, examples, metadata, lo
 
 Release qualification inspects the actual wheel/source archive, installs each into an isolated environment outside the checkout, verifies dependency sources and installed package origin, and exercises synthetic library/CLI behavior. The repository's changed-path selection and final bare full gate bind the final release source. Their exact results and artifact digests belong to the release receipt and GitHub release notes; historical development runs are preserved separately.
 
-The configured per-file limit is tested with small synthetic fixtures. No 100 MiB stress test, full-RAG boundary run, memory benchmark or performance gate is part of this release. The known pinned mdBook/admonish version warning remains separate from successful generated-link, asset, anchor, search and print checks. Bounded desktop/narrow manual inspection passed on the unchanged affected guide sources. Human CLI/library usability judgments remain open.
+The configured per-file limit is tested with small synthetic fixtures. No 100 MiB stress test, full-RAG boundary run, memory benchmark or performance gate is part of this release. The known pinned mdBook/admonish version warning remains separate from successful generated-link, asset, anchor, search and print checks. The 0.2.1 guide edits are version and responsiveness wording only; no new manual browser inspection is claimed for them. Human CLI/library usability judgments remain open.
 
 Keep original documents. The API and on-disk formats may change before a stable release. Existing shelf data and configuration are not modified by installing or uninstalling the application. Biblios supplies no encryption, authentication or authorization; surrounding applications own those boundaries. No automatic legacy-shelf conversion or external provider call is implied by installation.
 

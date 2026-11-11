@@ -1,6 +1,6 @@
-# Biblios 0.2.0
+# Biblios 0.2.1
 
-Biblios 0.2.0 is an experimental Python library and command-line tool. It adds the six consumer library capability families and configurable source-file admission to the initial 0.1.0 library and CLI. It supports Python 3.12 and 3.13; the checked-in managed runtime is Python 3.12. macOS and Linux have been exercised during development. Windows and other Python versions are not qualified. The API and on-disk formats may change before a stable release; keep your original documents and inspect changes before updating an existing shelf.
+Biblios 0.2.1 is an experimental Python library and command-line tool. It keeps the 0.2.0 consumer library capability families and configurable source-file admission, and lets public reads and strict search complete while document embedding is in progress. It supports Python 3.12 and 3.13; the checked-in managed runtime is Python 3.12. macOS and Linux have been exercised during development. Windows and other Python versions are not qualified. The API and on-disk formats may change before a stable release; keep your original documents and inspect changes before updating an existing shelf.
 
 ## Install and use
 
