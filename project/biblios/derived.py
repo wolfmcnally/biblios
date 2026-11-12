@@ -438,6 +438,32 @@ class DerivedStore:
         )
 
 
+def read_derived(palace_root: Path) -> DerivedStore | None:
+    """The accepted store opened read-only, or None when there is none yet.
+
+    The first writer creates the file before its schema transaction commits, so the
+    file's existence is not the store's: a reader that finds the file but no committed
+    schema sees no store, exactly as when the file is absent."""
+    if not (palace_root / DERIVED_NAME).is_file():
+        return None
+    store = DerivedStore(palace_root, read_only=True)
+    try:
+        ready = (
+            store.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+            ).fetchone()
+            is not None
+            and store.meta("schema") is not None
+        )
+    except BaseException:
+        store.close()
+        raise
+    if not ready:
+        store.close()
+        return None
+    return store
+
+
 class VolatileStore:
     """In-flight state that is never sealed: ``palace_root/biblios-volatile.sqlite``.
 

@@ -96,7 +96,7 @@ from biblios.shelf import SHELF_SCHEMA, Mutation, Shelf, ShelfManifest, init_she
 from biblios.stack import Stack, StackResult, open_stack
 from biblios.verify import VerifyReport
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 __all__ = [
     "ShelfBinding",

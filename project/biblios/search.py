@@ -265,14 +265,10 @@ class _ServingCheck:
     """
 
     def __init__(self, shelf: Shelf) -> None:
-        from biblios.derived import DERIVED_NAME, DerivedStore
+        from biblios.derived import read_derived
 
         self.shelf = shelf
-        self.store = (
-            DerivedStore(shelf.palace_store, read_only=True)
-            if (shelf.palace_store / DERIVED_NAME).is_file()
-            else None
-        )
+        self.store = read_derived(shelf.palace_store)
         self._verified: dict[str, tuple | str] = {}
         self._withheld: dict[str, list] = {}
         self._served: dict[str, ServedStage] = {}
@@ -475,7 +471,7 @@ def readable_mirror(shelf: Shelf, entry: Entry) -> tuple[str, str]:
     Searchable and validated pending-reindex bytes are readable; every other state
     refuses with its class. The returned text is exactly the bytes classified.
     """
-    from biblios.derived import DERIVED_NAME, DerivedStore
+    from biblios.derived import read_derived
     from biblios.mirrors import (
         PENDING_REINDEX,
         SEARCHABLE,
@@ -487,8 +483,8 @@ def readable_mirror(shelf: Shelf, entry: Entry) -> tuple[str, str]:
     from biblios.mirrors import digest as sha256
 
     record = None
-    if (shelf.palace_store / DERIVED_NAME).is_file():
-        store = DerivedStore(shelf.palace_store, read_only=True)
+    store = read_derived(shelf.palace_store)
+    if store is not None:
         try:
             record = store.record(entry.entry_id)
         finally:

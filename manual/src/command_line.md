@@ -66,7 +66,8 @@ Every command requires `--shelf DIRECTORY`. Namespace paths refer to entries ins
 | `stat PATH` | Read a live entry. |
 | `tags PATH` | Read its tags. |
 | `set-tags PATH [--tag TAG] [--date NAME=VALUE \| --clear-dates]` | Replace tags; omit date options to preserve dates, use repeated `--date` to replace them, or `--clear-dates` to remove all dates. |
-| `reconcile --config FILE --config-root ROOT` | Update derived mirrors and index with progress. |
+| `reconcile --config FILE --config-root ROOT` | Bring mirrors and index current with progress; optional repeated `--entry ENTRY_ID` after editing a mirror, and `--sweep` to find unobserved mirror edits. |
+| `grant PATH` | Give a never-converted entry its first mirror at the next reconcile. |
 | `status` | Report index lag and per-entry progress. |
 | `search QUERY [--limit N] [--no-rerank]` | Search one shelf or several repeated shelf arguments. |
 | `resolve ENTRY_ID` | Find an entry's current path. |
@@ -77,7 +78,7 @@ Every command requires `--shelf DIRECTORY`. Namespace paths refer to entries ins
 | `verify-seal` | Check the recorded sealed digests. |
 | `unseal` | Return to dynamic mode; also repair an incomplete seal publication. |
 
-`add`, `mkdir`, `update`, `rename`, `move`, `copy` and `remove` accept `--operation-id ID`, forwarded unchanged to the library for idempotent retries. Other commands do not add their own retry mechanism. Use each command's `--help` for its argument grammar.
+`add`, `mkdir`, `update`, `rename`, `move`, `copy`, `remove` and `grant` accept `--operation-id ID`, forwarded unchanged to the library for idempotent retries. Other commands do not add their own retry mechanism. Use each command's `--help` for its argument grammar.
 
 ## Output and errors
 

@@ -61,9 +61,10 @@ def main(argv: list[str]) -> int:
             print(f"{file.name}: {error}")
     report = original.reconcile(settings, embedder=embedder)
     status = original.index_status()
+    searchable = sum(1 for item in report.entries if item.outcome == "searchable")
     print(
-        f"shelf {original.shelf_id}: {status.files} files, {status.searchable} searchable, "
-        f"{status.unconverted} unconverted; built={report.built}"
+        f"shelf {original.shelf_id}: {len(report.entries)} entries brought current, "
+        f"{searchable} searchable, {status.unconverted} unconverted; built={status.built}"
     )
     copy: Shelf | None = None
     print(
@@ -87,8 +88,9 @@ def main(argv: list[str]) -> int:
                     )
                 elif command == "reconcile":
                     r = original.reconcile(settings, embedder=embedder)
+                    indexed = sum(1 for item in r.entries if item.outcome == "searchable")
                     print(
-                        f"reconciled: indexed={len(r.indexed)} lagging={original.index_status().lagging}"
+                        f"reconciled: indexed={indexed} lagging={original.index_status().lagging}"
                     )
                 elif command == "seal":
                     record = seal(original)

@@ -48,6 +48,24 @@ def _counts(shelf) -> tuple[int | None, int | None, int, int]:
     return status.files, status.pending, status.searchable, status.unconverted
 
 
+def test_a_store_file_created_before_its_schema_reads_as_no_store(tmp_path: Path) -> None:
+    """Failure mode: the first writer creates the accepted store's file before its schema
+    commits, and a reader in that gap treats the file as the store and fails with a raw
+    SQLite error (observed: status polled while a first reconcile ran)."""
+    from biblios.derived import DERIVED_NAME
+
+    shelf, _ = make_shelf(tmp_path)
+    with shelf:
+        shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
+        before = shelf.index_status()
+        shelf.palace_store.mkdir(parents=True, exist_ok=True)
+        gap = sqlite3.connect(shelf.palace_store / DERIVED_NAME)
+        gap.execute("PRAGMA journal_mode=WAL")
+        gap.close()
+        assert shelf.index_status() == before
+        assert diagnose(shelf)[0].pending == 1
+
+
 def test_bytes_and_listing_are_available_before_the_index_catches_up(tmp_path: Path) -> None:
     """Failure mode: a curation call converts or embeds synchronously, a fresh shelf reads as
     lagging, or ordinary status guesses a count it cannot know in constant cost."""

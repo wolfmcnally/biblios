@@ -100,7 +100,7 @@ def main() -> None:
                     binding.palace_root, replace(selector, representation=pipeline.representation)
                 )
                 derived = bound.derive(pipeline, entry_id, operation_id=str(uuid.uuid4()))
-                print("Derivation:", derived.state)
+                print("Derivation:", derived.outcome(entry_id).outcome)
                 found = bound.search(
                     "Lighthouse lens", embedder=HashEmbedder(), reranker=OverlapReranker()
                 )

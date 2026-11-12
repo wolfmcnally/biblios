@@ -627,11 +627,11 @@ def _disposition(binding: ShelfBinding, document: dict) -> tuple[str, ...]:
 def _recorded_by_content(binding: ShelfBinding, entries, contents) -> dict[str, object]:
     """The unselected entries whose accepted record was produced from a selected content
     (a source replaced but not yet converted again), by keyed reads of ``entries``."""
-    from biblios.derived import DERIVED_NAME, DerivedStore
+    from biblios.derived import read_derived
 
-    if not contents or not entries or not (binding.palace_root / DERIVED_NAME).is_file():
+    store = read_derived(binding.palace_root) if contents and entries else None
+    if store is None:
         return {}
-    store = DerivedStore(binding.palace_root, read_only=True)
     with closing(store.conn):
         records = store.records(list(entries))
     wanted = set(contents)

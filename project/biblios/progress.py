@@ -154,11 +154,11 @@ def indexed_files(shelf: Shelf) -> dict[str, str]:
 
 def _accepted(shelf: Shelf) -> dict[str, tuple[str, str]]:
     """Every accepted record's ``(mirror digest, stage digest)``; diagnosis only."""
-    from biblios.derived import DERIVED_NAME, DerivedStore
+    from biblios.derived import read_derived
 
-    if not (shelf.palace_store / DERIVED_NAME).is_file():
+    store = read_derived(shelf.palace_store)
+    if store is None:
         return {}
-    store = DerivedStore(shelf.palace_store, read_only=True)
     try:
         return {
             entry_id: (mirror, stage or "")
@@ -173,11 +173,11 @@ def _accepted(shelf: Shelf) -> dict[str, tuple[str, str]]:
 
 def _imported(shelf: Shelf) -> bool:
     """Whether the preservation import has run on this shelf (its derived counter)."""
-    from biblios.derived import DERIVED_NAME, DerivedStore
+    from biblios.derived import read_derived
 
-    if not (shelf.palace_store / DERIVED_NAME).is_file():
+    store = read_derived(shelf.palace_store)
+    if store is None:
         return False
-    store = DerivedStore(shelf.palace_store, read_only=True)
     try:
         return store.counter("legacy-import") > 0
     finally:
@@ -245,7 +245,7 @@ def index_status(shelf: Shelf) -> IndexStatus:
     How many live entries were never recorded needs Castle's live-file count, which is
     not yet adopted, so ``files`` and ``pending`` are None (unknown), never zero.
     """
-    from biblios.derived import DERIVED_NAME, DerivedStore
+    from biblios.derived import read_derived
 
     revision = shelf.revision
     counts = {"accepted": 0, "unconverted": 0, "isolated": 0}
@@ -255,8 +255,8 @@ def index_status(shelf: Shelf) -> IndexStatus:
     unsettled = 0
     # A seal writes the watermark at the sealed revision after a full diagnosis; that
     # stays the floor whatever the core's own counter observed before the seal's snapshot.
-    if (shelf.palace_store / DERIVED_NAME).is_file():
-        store = DerivedStore(shelf.palace_store, read_only=True)
+    store = read_derived(shelf.palace_store)
+    if store is not None:
         try:
             counts = {key: store.counter("state:" + key) for key in counts}
             counts["isolated"] = store.counter("state:served-rows-damaged")
@@ -293,7 +293,7 @@ def diagnose(shelf: Shelf) -> tuple[IndexStatus, dict[str, str], dict[str, str]]
     Returns the exact status, the expected index membership (each searchable entry at
     its accepted mirror digest) and the withheld entries with their states.
     """
-    from biblios.derived import DERIVED_NAME, GRANULARITY_NS, DerivedStore
+    from biblios.derived import GRANULARITY_NS, read_derived
     from biblios.mirrors import classify, lane_for, retained_index
 
     revision = shelf.revision
@@ -311,11 +311,7 @@ def diagnose(shelf: Shelf) -> tuple[IndexStatus, dict[str, str], dict[str, str]]
     withheld: dict[str, str] = {}
     rows: list[EntryProgress] = []
     files = searchable = pending = unconverted = isolated = 0
-    store = (
-        DerivedStore(shelf.palace_store, read_only=True)
-        if (shelf.palace_store / DERIVED_NAME).is_file()
-        else None
-    )
+    store = read_derived(shelf.palace_store)
     try:
         for entry in shelf.files():
             files += 1

@@ -153,14 +153,14 @@ class BoundShelf:
         one); absent, the accepted counters decide, so a deleted marker cannot make
         accepted state read as never built.
         """
-        from biblios.derived import DERIVED_NAME, DerivedStore, accepted_ever
+        from biblios.derived import accepted_ever, read_derived
 
         root = self.binding.palace_root
         if accepted_ever(root):
             return True
-        if not (root / DERIVED_NAME).is_file():
+        store = read_derived(root)
+        if store is None:
             return False
-        store = DerivedStore(root, read_only=True)
         try:
             return store.counter("state:accepted") > 0
         finally:

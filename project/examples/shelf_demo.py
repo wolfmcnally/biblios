@@ -56,18 +56,19 @@ def main(argv: list[str]) -> int:
                 print(f"adding the same bytes again: {duplicate}")
 
         report = shelf.reconcile(settings, embedder=embedder)
-        print(
-            f"reconcile: built={report.built} converted={len(report.converted)} "
-            f"unconverted={len(report.unconverted)}"
-        )
-        for entry_id in report.unconverted:
+        outcomes = {item.entry_id: item.outcome for item in report.entries}
+        tally = {
+            name: list(outcomes.values()).count(name) for name in sorted(set(outcomes.values()))
+        }
+        print(f"reconcile: {tally} provider calls={report.provider_calls}")
+        for entry_id in [key for key, outcome in outcomes.items() if outcome == "unconverted"]:
             unconverted = shelf.resolve(entry_id)
-            assert unconverted.metadata is not None
-            print(f"  unconverted {unconverted.path}: {unconverted.metadata.conversion}")
+            print(f"  unconverted {unconverted.path}: {report.outcome(entry_id).code}")
         print(f"verify: {shelf.verify()}")
 
-        converted = [shelf.resolve(e.entry_id) for e in entries]
-        converted = [e for e in converted if e.conversion_current]
+        converted = [
+            shelf.resolve(e.entry_id) for e in entries if outcomes.get(e.entry_id) == "searchable"
+        ]
         if not converted:
             print("\nno file converted, so there is nothing to search; the reasons are above")
             return 0

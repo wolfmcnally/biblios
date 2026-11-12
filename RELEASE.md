@@ -1,16 +1,28 @@
-# Biblios 0.2.2 release preparation
+# Biblios 0.3.0 release preparation
 
-Version 0.2.2 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It is a patch release after the published experimental 0.2.1 that selects the published Palace v0.4.1 dependency correction; the Biblios public API, CLI and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.3.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It is a minor release after the published experimental 0.2.2: the indexing pipeline, public API, CLI and on-disk formats change, and it requires the published Castle v0.4.0 and Palace v0.5.0. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.2.2`. The attached package artifacts are `biblios-0.2.2-py3-none-any.whl`, `biblios-0.2.2.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.3.0`. The attached package artifacts are `biblios-0.3.0-py3-none-any.whl`, `biblios-0.3.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
 
-## Changes since 0.2.1
+## Changes since 0.2.2
 
-Biblios now requires the published Palace v0.4.1 instead of v0.4.0. Palace v0.4.1 lets its Bedrock embedding provider authenticate with a Bedrock API key from AWS_BEARER_TOKEN_BEDROCK when no SigV4 credentials resolve, keeps its mandatory account data-retention check before any embedding, and raises its declared AWS SDK minimum to boto3 1.43.26; environments pinned below that must upgrade. Biblios code, its other dependencies (Castle v0.3.0, Drawbridge v0.3.1, Conric v0.1.0) and its lockfile otherwise stay as in 0.2.1. Real-key acceptance by the Bedrock service is not proved by this release.
+One indexing core now serves the library, CLI and bound entry points; the separate conversion and reconciliation modules are gone. Each entry is authorized, staged and promoted on its own, so a slow or failed document no longer holds back the others, a crash at any stage boundary never serves unauthenticated state or re-embeds, and replayed calls return their recorded result. Castle v0.4.0's touched-record admission keeps per-entry work flat as a shelf grows (counted at 20, 60 and 200 entries).
+
+Mirrors belong to the user once created. Reconcile re-indexes an edited mirror without converting over it; replacing a file is a new ingestion that converts the new bytes and keeps the previous mirror under a retained name; a damaged mirror isolates only its entry. A copy receives one first mirror converted from its source, and the new `grant` command gives a never-converted entry its first mirror explicitly. `reconcile --entry` and `--sweep` bring edited mirrors current.
+
+Search checks every hit through Palace v0.5.0's per-hit evidence: a hit whose stored body, input digest or vector differs from the entry's accepted record is withheld, and only that entry is affected. Delete stays logical: the entry leaves search at once, its index rows leave at the next reconcile and its bytes stay in Castle; delete is not reversible, and restoring from backup is the way back. Excise, meant for cleaning up information spills, now merges the full-text index's segments before vacuuming, so no excised word survives in any Biblios-managed index, journal or free page; it makes no claim about storage-layer copies, backups, sync, provider-side copies or operating-system temporary files.
+
+Status, search and diagnosis read a shelf whose first reconcile is still creating its index store as a shelf with no store yet, instead of failing with a raw SQLite error. The packaged examples use the new result types.
+
+A shelf written by 0.2.x is refused until its owner migrates its Castle namespace once, explicitly and with a backup; see [update guidance](project/RELEASE.md). Biblios never migrates it. Drawbridge v0.3.1 and Conric v0.1.0 are unchanged.
+
+## Included from 0.2.2
+
+Biblios required the published Palace v0.4.1, whose Bedrock embedding provider authenticates with a Bedrock API key from AWS_BEARER_TOKEN_BEDROCK when no SigV4 credentials resolve, keeps its mandatory account data-retention check before any embedding, and declares boto3 1.43.26 as its minimum. Real-key acceptance by the Bedrock service was not proved.
 
 ## Included from 0.2.1
 
@@ -34,7 +46,9 @@ The package source allowlist includes the library, tests, examples, metadata, lo
 
 Release qualification inspects the actual wheel/source archive, installs each into an isolated environment outside the checkout, verifies dependency sources and installed package origin, and exercises synthetic library/CLI behavior. The repository's changed-path selection and final bare full gate bind the final release source. Their exact results and artifact digests belong to the release receipt and GitHub release notes; historical development runs are preserved separately.
 
-The configured per-file limit is tested with small synthetic fixtures. No 100 MiB stress test, full-RAG boundary run, memory benchmark or performance gate is part of this release. The known pinned mdBook/admonish version warning remains separate from successful generated-link, asset, anchor, search and print checks. The 0.2.1 and 0.2.2 guide edits are version, responsiveness and dependency wording only; no new manual browser inspection is claimed for them. Human CLI/library usability judgments remain open.
+The configured per-file limit is tested with small synthetic fixtures. No 100 MiB stress test, full-RAG boundary run, memory benchmark or performance gate is part of this release. The known pinned mdBook/admonish version warning remains separate from successful generated-link, asset, anchor, search and print checks. The 0.2.1 and 0.2.2 guide edits were version, responsiveness and dependency wording only; the 0.3.0 guide edits describe user-owned mirrors, the `grant` command and the new reconcile options, and no new manual browser inspection is claimed for them. Human CLI/library usability judgments remain open.
+
+Two assurance limits are disclosed for 0.3.0. The membership-proof representation and the changes made after the single independent code review this release cycle allowed (the Castle v0.4.0 and Palace v0.5.0 adoption, per-hit verification, spill-grade excision and two concurrency fixes) have had no independent code review; they are covered by the automated suite. And 39 membership proofs in the test suite were admitted without an observed failing run, under the owner's named exception; the repository's test-governance check lists them as unwitnessed until each is witnessed. Upgrading a 0.2.x shelf is proved on synthetic fixtures only; no real 0.2.x shelf was migrated during qualification.
 
 Keep original documents. The API and on-disk formats may change before a stable release. Existing shelf data and configuration are not modified by installing or uninstalling the application. Biblios supplies no encryption, authentication or authorization; surrounding applications own those boundaries. No automatic legacy-shelf conversion or external provider call is implied by installation.
 
