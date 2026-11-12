@@ -72,6 +72,17 @@ DISPOSITION_FIELDS = {
 ADMISSION_FIELDS = DISPOSITION_FIELDS
 RETIREMENT_FIELDS = DISPOSITION_FIELDS
 REPAIR_FIELDS = DISPOSITION_FIELDS
+# An operator's named exception to the red-witness requirement for one admitted proof:
+# it identifies the proof, who approved it and when, and why; it never stands in for a
+# receipt anywhere else, and the proof is reported as unwitnessed for as long as it is.
+EXCEPTION_FIELDS = {
+    "record_type",
+    "proof_id",
+    "authority",
+    "approved_at",
+    "reason",
+    "baseline_inventory_sha256",
+}
 SELF_BOUND_DISPOSITIONS = {"retain", "repair"}
 WITNESS_FIELDS = {
     "record_type",
@@ -609,6 +620,7 @@ def validate(
         "proof_retirement",
         "proof_repair",
         "proof_modification",
+        "proof_witness_exception",
     }
     unknown_record_types = sorted(
         {
@@ -785,8 +797,10 @@ def validate(
     admitted_or_repaired = {
         str(row.get("proof_id")) for row in admission_rows + repair_rows
     } & active
-    for proof_id in sorted(admitted_or_repaired - witnessed):
+    excepted = _witness_exceptions(ledger, admission_rows, repair_rows, active, baseline, errors)
+    for proof_id in sorted(admitted_or_repaired - witnessed - excepted):
         errors.append(f"admitted or repaired proof has no witness receipt: {proof_id}")
+    unwitnessed_by_exception = sorted(excepted - witnessed)
 
     used_modification_receipts: set[tuple[str, int]] = set()
     for row in ledger:
@@ -826,10 +840,63 @@ def validate(
         "admissions": len(admission_rows),
         "post_reset_retirements": len(retirement_rows),
         "post_reset_repairs": len(repair_rows),
+        # Admitted proofs released without a red witness under a recorded operator
+        # exception: reported by name, never counted as witnessed.
+        "unwitnessed_by_exception": unwitnessed_by_exception,
         "post_reset_modifications": sum(
             row.get("record_type") == "proof_modification" for row in ledger
         ),
     }
+
+
+def _witness_exceptions(
+    ledger: list[dict[str, Any]],
+    admission_rows: list[dict[str, Any]],
+    repair_rows: list[dict[str, Any]],
+    active: set[str],
+    baseline: dict[str, Any],
+    errors: list[str],
+) -> set[str]:
+    """The admitted proofs an operator exception exempts from the receipt requirement.
+
+    Each exception names exactly one active admitted proof that no repair or modification
+    touches, once, with a non-empty authority, an ISO-8601 UTC approval time and a reason,
+    bound to the current baseline. Anything else refuses and exempts nothing."""
+    import re
+
+    admitted = {str(row.get("proof_id")) for row in admission_rows}
+    repaired = {str(row.get("proof_id")) for row in repair_rows} | {
+        str(row.get("proof_id")) for row in ledger if row.get("record_type") == "proof_modification"
+    }
+    excepted: set[str] = set()
+    for row in ledger:
+        if row.get("record_type") != "proof_witness_exception":
+            continue
+        proof_id = row.get("proof_id")
+        if set(row) != EXCEPTION_FIELDS:
+            errors.append(f"wrong witness exception fields for {proof_id}")
+            continue
+        problems = []
+        if proof_id in excepted:
+            problems.append("is recorded more than once")
+        if proof_id not in admitted or proof_id not in active:
+            problems.append("names no active admitted proof")
+        if proof_id in repaired:
+            problems.append("names a repaired or modified proof")
+        for field in ("authority", "reason"):
+            if not isinstance(row.get(field), str) or not row[field].strip():
+                problems.append(f"has no {field}")
+        if not isinstance(row.get("approved_at"), str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", row["approved_at"]
+        ):
+            problems.append("has no ISO-8601 UTC approval time")
+        if row.get("baseline_inventory_sha256") != baseline.get("inventory_sha256"):
+            problems.append("is bound to a stale baseline")
+        if problems:
+            errors.extend(f"witness exception {problem}: {proof_id}" for problem in problems)
+            continue
+        excepted.add(str(proof_id))
+    return excepted
 
 
 DOCUMENT_READER_ROOTS = ("tests", "lib", "bin")
@@ -1355,6 +1422,26 @@ def author_inputs(root: Path, source: Path, manifest_sha: str, ledger_sha: str) 
                 "retire": "proof_retirement",
                 "disposition": "proof_disposition",
             }
+            if action == "except":
+                if set(semantic) != {
+                    "action",
+                    "proof_id",
+                    "authority",
+                    "approved_at",
+                    "reason",
+                }:
+                    raise GovernanceError("proof input has missing or derived fields")
+                appended.append(
+                    {
+                        "record_type": "proof_witness_exception",
+                        "proof_id": semantic["proof_id"],
+                        "authority": semantic["authority"],
+                        "approved_at": semantic["approved_at"],
+                        "reason": semantic["reason"],
+                        "baseline_inventory_sha256": baseline["inventory_sha256"],
+                    }
+                )
+                continue
             if action not in types:
                 raise GovernanceError("unknown proof authoring action")
             allowed = evidence | {"action", "proof_id"}

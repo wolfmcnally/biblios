@@ -29,20 +29,28 @@ from castle.namespace import NamespaceError, SnapshotRecord, open_namespace
 
 from biblios.errors import BibliosError, IndexLagError
 from biblios.progress import (
-    index_status,
+    diagnose,
     read_only_index,
     read_watermark,
     store_built,
     write_watermark,
 )
-from biblios.reconcile import require_identity
-from biblios.shelf import MANIFEST_NAME, SEAL_NAME, Shelf, ShelfManifest, _session
+from biblios.shelf import (
+    MANIFEST_NAME,
+    SEAL_NAME,
+    Shelf,
+    ShelfManifest,
+    _open_existing,
+    _session,
+    require_identity,
+)
 from biblios.verify import VerifyReport
 
 SEAL_SCHEMA = "biblios.seal/1"
 DIGESTED = (
     "shelf.json",
     "palace/index/chunks.sqlite",
+    "palace/biblios.sqlite",
     "palace/meta/embedder.toml",
     "palace/watermark.json",
 )
@@ -122,8 +130,9 @@ def seal(shelf: Shelf) -> SealRecord:
         require_identity(shelf)
         if not store_built(shelf):
             raise BibliosError("the index has never been built; reconcile before sealing")
-        status = index_status(shelf)
-        if status.lagging:
+        # The explicit diagnosis is the one place readiness is evaluated anew.
+        status, _expected, _withheld = diagnose(shelf)
+        if status.pending:
             raise IndexLagError(
                 f"the index lags: {status.pending} pending, revision {status.revision}, "
                 f"index at {status.searchable_revision}; reconcile before sealing"
@@ -158,7 +167,8 @@ def _transition(shelf: Shelf) -> SealRecord:
     staged_record = record_path.with_name(record_path.name + ".tmp")
     try:
         write_watermark(shelf, sealed_revision)
-        _set_journal(shelf.chunks_db, "delete")
+        for db in _stores(shelf.root):
+            _set_journal(db, "delete")
         manifest = replace(shelf.manifest, mode="sealed", generation=shelf.manifest.generation + 1)
         staged_manifest.write_text(manifest.dumps())
         digests = {
@@ -179,7 +189,8 @@ def _transition(shelf: Shelf) -> SealRecord:
         # dynamic shelf whose only trace of the attempt is one more Castle snapshot.
         staged_manifest.unlink(missing_ok=True)
         staged_record.unlink(missing_ok=True)
-        _set_journal(shelf.chunks_db, "wal")
+        for db in _stores(shelf.root):
+            _set_journal(db, "wal")
         write_watermark(shelf, previous_watermark)
         raise
     # The manifest is published: from here the open object is sealed too, whatever
@@ -245,10 +256,9 @@ def unseal(root: Path) -> Shelf:
     manifest = ShelfManifest.read(root / MANIFEST_NAME)
     if manifest.mode != "sealed":
         raise BibliosError(f"shelf at {root} is not sealed")
-    handle = open_namespace(root / "namespace", root / "castle", _session(root, create=False))
+    handle = _open_existing(open_namespace, root, _session(root, create=False))
     try:
-        db = root / "palace" / "index" / "chunks.sqlite"
-        if db.is_file():
+        for db in _stores(root):
             _set_journal(db, "wal")
         replace(manifest, mode="dynamic").write(root / MANIFEST_NAME)
         (root / SEAL_NAME).unlink(missing_ok=True)
@@ -256,6 +266,12 @@ def unseal(root: Path) -> Shelf:
         handle.close()
         raise
     return Shelf(root, ShelfManifest.read(root / MANIFEST_NAME), handle)
+
+
+def _stores(root: Path) -> list[Path]:
+    """The sealed SQLite stores: Palace's index and the accepted derived state."""
+    stores = (root / "palace" / "index" / "chunks.sqlite", root / "palace" / "biblios.sqlite")
+    return [db for db in stores if db.is_file()]
 
 
 def _set_journal(db: Path, mode: str) -> None:

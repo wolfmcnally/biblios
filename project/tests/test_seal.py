@@ -24,8 +24,8 @@ from biblios import (
     unseal,
     verify_seal,
 )
+from biblios.control import ConsumerError
 from biblios.progress import EntryProgress, read_watermark, recorded_root
-from biblios.reconcile import reconcile
 from biblios.seal import DIGESTED
 from biblios.shelf import MANIFEST_NAME, SEAL_NAME, ShelfManifest
 from biblios.testing import HashEmbedder, OverlapReranker
@@ -85,7 +85,7 @@ def test_seal_is_refused_before_any_write_when_the_index_lags_or_the_stamp_disag
                 refusals.append(str(refused.value))
 
         report = shelf.reconcile(settings, embedder=embedder, progress=progress)
-        assert report.indexed and refusals and "pending" in refusals[0]
+        assert report.accepted and refusals and "pending" in refusals[0]
         assert not shelf.index_status().lagging
 
         selector = shelf.palace_store / "meta" / "embedder.toml"
@@ -192,7 +192,6 @@ def test_sealed_shelf_has_no_sidecars_refuses_every_write_and_verifies_after_cop
                 "tide.txt", TIDE.encode(), media_type="text/plain", operation_id=add_id
             ),
             lambda: shelf.reconcile(settings, embedder=embedder),
-            lambda: reconcile(shelf, settings, embedder=embedder),
         ):
             with pytest.raises(SealedShelfError):
                 call()
@@ -255,7 +254,7 @@ def test_a_copied_sealed_shelf_answers_search_and_citations_without_writing(tmp_
         assert recorded_root(copied) != str(copied.mirror_root.resolve())
         found = copied.search("fresnel lens kerosene", embedder=embedder, reranker=reranker)
         assert found.hits[0].entry_id == notes.entry_id and found.hits[0].path == "docs/notes.txt"
-        assert not found.indexing and found.refused == ()
+        assert not found.indexing and found.withheld == ()
         assert "second section" in copied.read(guide.entry_id, page=2).text
         assert copied.download(notes.entry_id) == NOTES.encode()
         stacked = open_stack([copied]).search("bowline fixed loop", embedder=embedder, rerank=False)
@@ -283,23 +282,28 @@ def test_unseal_returns_to_dynamic_and_a_moved_copy_is_rebuilt(tmp_path: Path) -
         assert view.snapshot == record.snapshot
         tide = original.add("tide.txt", TIDE.encode(), media_type="text/plain")
         report = original.reconcile(settings, embedder=embedder)
-        assert report.indexed == (tide.entry_id,) and not original.index_status().lagging
+        assert [stage.entry_id for stage in report.accepted] == [tide.entry_id]
+        assert not original.index_status().lagging
 
     with unseal(copy) as moved:
-        assert recorded_root(moved) != str(moved.mirror_root.resolve())
+        recorded = recorded_root(moved)
+        assert recorded != str(moved.mirror_root.resolve())
         moved.add("long.md", LONG.encode(), media_type="text/markdown")
-        report = moved.reconcile(settings, embedder=embedder)
-        assert report.built and recorded_root(moved) == str(moved.mirror_root.resolve())
+        before = moved.chunks_db.read_bytes()
+        # Interim, pending a ruling on re-rooting a moved store: extending it would mix two
+        # roots in one index, so the call is refused before any effect.
+        with pytest.raises(ConsumerError, match="index-root-moved"):
+            moved.reconcile(settings, embedder=embedder)
+        assert moved.chunks_db.read_bytes() == before and recorded_root(moved) == recorded
         found = moved.search("fresnel lens kerosene", embedder=embedder, rerank=False)
-        assert found.hits[0].entry_id == notes.entry_id and not found.indexing
-        assert moved.verify().ok, moved.verify().problems
+        assert found.hits[0].entry_id == notes.entry_id
 
 
 def test_a_step_or_an_opener_racing_a_seal_cannot_write_into_the_sealed_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Failure mode: a step admitted while the shelf was dynamic resumes after the seal and
-    rebuilds the sealed store, or an opener that read a dynamic manifest returns a writable
+    """Failure mode: a step admitted while the shelf was dynamic writes into the sealed
+    store, or an opener that read a dynamic manifest returns a writable
     handle over the sealed directory."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
@@ -307,8 +311,6 @@ def test_a_step_or_an_opener_racing_a_seal_cannot_write_into_the_sealed_artifact
         shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
         shelf.reconcile(settings, embedder=embedder)
         seal(shelf)
-    copy = tmp_path / "copy"
-    shutil.copytree(shelf.root, copy)
 
     class PausingEmbedder(HashEmbedder):
         """Pauses inside the probe that precedes a step, after the step was admitted."""
@@ -326,8 +328,8 @@ def test_a_step_or_an_opener_racing_a_seal_cannot_write_into_the_sealed_artifact
     def digests(root: Path) -> dict[str, str]:
         return {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in DIGESTED}
 
-    # A copy unsealed at a new location is current, so a seal admits it; the step admitted
-    # just before, which would rebuild the moved store, must refuse once it resumes.
+    # A seal attempted while a step is admitted and running is refused before any write,
+    # and succeeds once the step returns.
     pausing = PausingEmbedder()
     outcome: dict[str, BaseException | None] = {"error": None}
 
@@ -337,22 +339,21 @@ def test_a_step_or_an_opener_racing_a_seal_cannot_write_into_the_sealed_artifact
         except BaseException as error:  # noqa: BLE001 - the proof inspects it
             outcome["error"] = error
 
-    with unseal(copy) as moved:
-        assert recorded_root(moved) != str(moved.mirror_root.resolve())
+    with unseal(shelf.root) as moved:
         worker = threading.Thread(target=step, args=(moved,))
         worker.start()
         try:
             assert pausing.entered.wait(60)
-            record = seal(moved)
-            sealed = digests(copy)
+            before = _listing(moved.root, runtime=False)
+            with pytest.raises(BibliosError, match="reconcile step is running"):
+                seal(moved)
+            assert _listing(moved.root, runtime=False) == before and not moved.sealed
         finally:
             pausing.resume.set()
             worker.join(60)
-        assert not worker.is_alive()
-        assert isinstance(outcome["error"], SealedShelfError), (
-            "a step admitted before the seal wrote after it: " + repr(outcome["error"])
-        )
-        assert digests(copy) == sealed == record.digests
+        assert not worker.is_alive() and outcome["error"] is None, repr(outcome["error"])
+        record = seal(moved)
+        assert digests(moved.root) == record.digests
         assert _sidecars(moved.chunks_db) == [] and verify_seal(moved).ok
 
     # An opener that read a dynamic manifest, then lost the race to a seal, must come back

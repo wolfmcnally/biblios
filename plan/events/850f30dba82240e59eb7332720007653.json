@@ -1,0 +1,15 @@
+{
+  "acceptance": {
+    "path": ".kickoff/runs/run.3byjm879/closure.json",
+    "sha256": "4f84332a00e4a45d2c99a634f21962b56bfdff26fdde0b0cf93babcbf3271b10"
+  },
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/28ab0635fc19e23f0b49d7f2a035650208d62904e42557a503ccf29ad5bc01f6;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "in-progress",
+  "id": "850f30dba82240e59eb7332720007653",
+  "owner": "biblios-opus-successor",
+  "phase": "indexing-core-publication",
+  "previous": "ca66205769334d9080ceb96b11f6538e",
+  "reason": "Accepted primary close of run A5 (successor of A4) with gates green; review limits and the operator's named unwitnessed exception preserved",
+  "state": "completed",
+  "writer": "biblios-opus-successor"
+}

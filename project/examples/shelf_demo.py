@@ -100,7 +100,7 @@ def main(argv: list[str]) -> int:
             kept = cas.require_object(shelf.castle_root, victim.cas_id).read_bytes()
             print(f"its {len(kept)} bytes remain in castle/")
             still = shelf.search(query, embedder=embedder, reranker=reranker)
-            print(f"search still answers {len(still.hits)} hit(s); refused={still.refused}")
+            print(f"search still answers {len(still.hits)} hit(s); withheld={still.withheld}")
         print(f"verify: {shelf.verify()}")
     return 0
 

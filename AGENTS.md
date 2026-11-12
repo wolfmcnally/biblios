@@ -25,6 +25,7 @@ Biblios builds standalone, portable knowledge bases ("shelves") that can be sear
 
 - [Biblios: thesis, operator requirements, the shelf design, access planes, consumers, proposals, rulings and unresolved decisions](briefs/BRIEF.md)
 - [Requirement sent upstream: a Bedrock embedding provider in Palace, read from a top-level Conric section](briefs/palace-bedrock-provider-requirement.md)
+- [Requirement sent upstream and its adoption: incremental, touched-record admission and replay facts in Castle, satisfied by Castle v0.4.0](briefs/castle-incremental-admission-requirement.md)
 - [AWS qualification results: what one approved run of the lanes on EC2 with the shelves on EBS established, in venue classes and measurements only](briefs/aws-qualification-results.md)
 
 ## Project surfaces

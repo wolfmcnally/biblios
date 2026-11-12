@@ -16,13 +16,14 @@ from castle.namespace import SnapshotRecord
 
 from biblios import (
     BibliosError,
+    BringCurrentResult,
     Entry,
     EntryMetadata,
+    EntryOutcome,
     EntryProgress,
     IndexStatus,
     Mutation,
     Page,
-    ReconcileReport,
     SealRecord,
     SearchResult,
     Shelf,
@@ -30,6 +31,7 @@ from biblios import (
     Stack,
     StackResult,
     VerifyReport,
+    Withheld,
     cli,
     open_shelf,
 )
@@ -51,7 +53,9 @@ STATUS = IndexStatus(
     (EntryProgress("shelf", "entry", "résumé.txt", "stored"),),
 )
 PAGE = Page(ENTRY, 2, "page two\n", 3)
-REPORT = ReconcileReport(("entry",), (), ("entry",), (), (), True, False, 2, 2)
+REPORT = BringCurrentResult(
+    "00000000-0000-4000-8000-000000000000", 2, (EntryOutcome("entry", "searchable"),), ()
+)
 
 # An independent contract inventory: these inputs must retain all public arguments.
 CASES = [
@@ -128,6 +132,14 @@ CASES = [
         ("old",),
         {"operation_id": "retry"},
         MUTATION,
+    ),
+    (
+        "grant",
+        ["notes/a.md", "--operation-id", "retry"],
+        "grant_first_ingestion",
+        ("notes/a.md",),
+        {"operation_id": "retry"},
+        True,
     ),
     ("ls", ["folder"], "ls", ("folder",), {}, [ENTRY]),
     ("stat", ["résumé.txt"], "stat", ("résumé.txt",), {}, ENTRY),
@@ -233,10 +245,12 @@ def test_search_single_stack_and_partial_open_cleanup(tmp_path, monkeypatch, cap
     a, b = MagicMock(spec=Shelf), MagicMock(spec=Shelf)
     for shelf in (a, b):
         shelf.__enter__.return_value = shelf
-    single = SearchResult((), "disabled", ("dead",), 2, 1, True)
+    single = SearchResult((), "disabled", (Withheld("a", "dead", "not-live", 1),), (), 2, 1, True)
     a.search.return_value = single
     stack = MagicMock(spec=Stack)
-    union = StackResult((), "failed", (("shelf", "dead"),), ("shelf",), {"shelf": STATUS})
+    union = StackResult(
+        (), "failed", (Withheld("shelf", "dead", "not-live", 1),), (), ("shelf",), {"shelf": STATUS}
+    )
     stack.search.return_value = union
     declared = MagicMock(return_value=stack)
     monkeypatch.setattr(cli, "open_stack", declared)
@@ -271,8 +285,8 @@ def test_progress_binary_and_failure_streams(tmp_path, monkeypatch, capsysbinary
     monkeypatch.setattr(cli, "load_settings", load)
     progress = EntryProgress("shelf", "entry", "résumé.txt", "indexing", 1, 2, 3)
 
-    def reconcile(received, *, progress, materialize):
-        assert materialize == (), "reconcile materializes nothing unless named"
+    def reconcile(received, *, progress, entry_ids, sweep):
+        assert entry_ids is None and not sweep, "reconcile sweeps nothing unless asked"
         assert received is settings, "reconcile configuration"
         progress(EntryProgress("shelf", "entry", "résumé.txt", "indexing", 1, 2, 3))
         return REPORT
@@ -434,6 +448,7 @@ def test_console_and_module_entrypoints(entrypoint):
         "tags",
         "set-tags",
         "reconcile",
+        "grant",
         "status",
         "verify",
         "verify-seal",

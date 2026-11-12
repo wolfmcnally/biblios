@@ -83,6 +83,13 @@ class ShelfBinding:
             "index/chunks.sqlite",
             "index/chunks.sqlite-wal",
             "index/chunks.sqlite-shm",
+            "biblios.sqlite",
+            "biblios.sqlite-wal",
+            "biblios.sqlite-shm",
+            "biblios-volatile.sqlite",
+            "biblios-volatile.sqlite-wal",
+            "biblios-volatile.sqlite-shm",
+            "accepted-ever",
             "consumer-records",
             "consumer-excision.json",
             "watermark.json",
@@ -107,8 +114,8 @@ def local_backend(binding: ShelfBinding) -> None:
     """Model injection alone does not constrain Palace's separate vector backend."""
     try:
         selected = load_vector_backend_config(binding.palace_root)
-    except Exception:
-        raise ConsumerError("backend-invalid", stage="binding") from None
+    except Exception as error:
+        raise ConsumerError("backend-invalid", stage="binding") from error
     if selected.backend != BACKEND_SQLITE_VEC:
         raise ConsumerError("backend-not-admitted", stage="binding")
 
@@ -177,9 +184,9 @@ def validate_handle(binding: ShelfBinding, handle: NamespaceHandle) -> ShelfView
     except ConsumerError:
         raise
     except NamespaceError as error:
-        raise ConsumerError(error.code, stage="binding", effect=error.effect) from None
-    except Exception:
-        raise ConsumerError("binding-unreadable", stage="binding") from None
+        raise ConsumerError(error.code, stage="binding", effect=error.effect) from error
+    except Exception as error:
+        raise ConsumerError("binding-unreadable", stage="binding") from error
 
 
 def bind_shelf(binding: ShelfBinding, handle: NamespaceHandle) -> BoundShelf:
@@ -208,6 +215,11 @@ def open_bound_shelf(binding: ShelfBinding, session: AuthorizedSession) -> Bound
     After an excision, explicit opening of the declared successor is the consumer's
     instruction to resume. The consumer must finish its own publication first;
     Biblios separately requires completed local derived disposition.
+
+    A namespace Castle refuses to open as an unsupported format is
+    ``namespace-format-unsupported``: a shelf written with Castle 0.3 opens only after
+    the operator migrates it explicitly with Castle's
+    ``castle.namespace_migrate_v1.migrate_namespace_v1``; Biblios never migrates it.
     """
     if binding.ownership != "owned":
         raise ConsumerError("owned-binding-required", stage="binding")
@@ -219,7 +231,7 @@ def open_bound_shelf(binding: ShelfBinding, session: AuthorizedSession) -> Bound
     except ConsumerError:
         raise
     except NamespaceError as error:
-        raise ConsumerError(error.code, stage="binding", effect=error.effect) from None
-    except Exception:
-        raise ConsumerError("binding-unreadable", stage="binding") from None
+        raise ConsumerError(error.code, stage="binding", effect=error.effect) from error
+    except Exception as error:
+        raise ConsumerError("binding-unreadable", stage="binding") from error
     return bind_shelf(binding, handle)

@@ -122,6 +122,57 @@ def test_metadata_only_cutover_preserves_downloads_and_requires_explicit_success
         fixture.close()
 
 
+def test_excised_words_leave_every_file_while_the_survivor_stays_searchable(
+    tmp_path: Path,
+) -> None:
+    """Failure mode: an FTS5 delete only tombstones the excised chunk, so its words stay in
+    the keyword index's segments and survive VACUUM as raw bytes in the database file."""
+    word = b"zanzibarquux"
+    fixture = consumer_fixture(tmp_path)
+    reader = None
+    try:
+        chosen = fixture.bound.curate(fixture.request("selected.txt", b"the " + word + b" nests"))
+        survivor = fixture.bound.curate(fixture.request("survivor.txt", b"surviving lighthouse"))
+        fixture.bound._shelf.reconcile(fixture.settings, embedder=HashEmbedder())
+        selected_id = chosen.mutation.affected_entry_ids[0]
+        survivor_id = survivor.mutation.affected_entry_ids[0]
+        database = fixture.binding.palace_root / "index" / "chunks.sqlite"
+        assert word in database.read_bytes(), "the selected words were never indexed"
+        request = ExcisionRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            ExcisionSelection(
+                content_ids=(fixture.bound.resolve(selected_id).cas_id,),
+                entry_ids=(selected_id,),
+            ),
+            (),
+            fixture.binding.root / "successor",
+        )
+        proposed = fixture.bound.preview_excision(request)
+        assert proposed.request is not None
+        result = fixture.bound.excise(proposed.request)
+        remnants = sorted(
+            str(path.relative_to(tmp_path))
+            for path in tmp_path.rglob("*")
+            if path.is_file() and word in path.read_bytes()
+        )
+        declared = replace(result.successor_binding, ownership="owned")
+        reader = open_bound_shelf(
+            declared,
+            LocalSession(
+                declared.namespace_root, declared.castle_root, declared.root / "namespace.lock"
+            ),
+        )
+        found = reader.search("lighthouse", embedder=HashEmbedder(), reranker=OverlapReranker())
+        assert (remnants, {hit.entry_id for hit in found.hits}) == ([], {survivor_id}), (
+            "excised words survived on disk or the survivor lost its keyword index"
+        )
+    finally:
+        if reader is not None:
+            reader.close()
+        fixture.close()
+
+
 def _crash_cutover(directory: Path, boundary: str) -> None:
     """Disposable child only; interrupt actual persisted stages without fake receipts."""
     import castle.namespace_excision as castle_excision

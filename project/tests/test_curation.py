@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from biblios import BibliosError, DuplicateContentError, Mutation
-from biblios.reconcile import indexed_files
+from biblios.progress import indexed_files
 from biblios.testing import HashEmbedder
 from tests.support import NOTES, RECIPE, TIDE, make_shelf
 
@@ -218,7 +218,8 @@ def test_copy_of_a_directory_replays_its_root_and_remove_returns_at_the_commit(
         replay = shelf.remove("docs/a.txt", operation_id=remove_id)
         assert replay.replayed and replay.entry_id == victim.entry_id
         report = shelf.reconcile(settings, embedder=embedder)
-        assert report.removed == (victim.entry_id,) and embedder.calls == []
+        removed_now = [item.entry_id for item in report.entries if item.outcome == "removed"]
+        assert removed_now == [victim.entry_id] and embedder.calls == []
         assert victim.entry_id not in indexed_files(shelf)
         assert not shelf.mirror_path(victim.entry_id).exists()
 

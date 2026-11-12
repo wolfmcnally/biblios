@@ -11,8 +11,7 @@ from palace.index.embedder_config import embedder_config_path, identity_for, loa
 from palace.index.schema import assert_identity
 
 from biblios.errors import BibliosError
-from biblios.progress import read_only_index
-from biblios.reconcile import indexed_files
+from biblios.progress import diagnose, indexed_files, read_only_index
 from biblios.shelf import Shelf
 
 
@@ -33,31 +32,24 @@ def verify_shelf(shelf: Shelf) -> VerifyReport:
     castle = cas.verify(shelf.castle_root)
     if not castle.ok:
         problems.extend(f"castle: {error}" for error in castle.errors)
-    from biblios.mirrors import (
-        PENDING_CONVERSION,
-        PENDING_REINDEX,
-        classify_shelf,
-        retained_summary,
-    )
+    from biblios.mirrors import PENDING_CONVERSION, PENDING_REINDEX, retained_summary
 
     retained, unattributed = retained_summary(shelf.palace_store, shelf.mirror_root)
-
-    states = classify_shelf(shelf)
-    expected: dict[str, str] = {}
-    mirrors: dict[str, str] = {}
-    for entry_id, state in sorted(states.items()):
-        if state.searchable:
-            expected[entry_id] = state.digest
+    status, expected, withheld = diagnose(shelf)
+    mirrors: dict[str, str] = dict(withheld)
+    for row in status.entries:
+        if row.stage == "withheld" or row.mirror is None:
             continue
-        mirrors[entry_id] = state.state
-        if state.state == PENDING_CONVERSION:
-            problems.append(f"replaced bytes not yet converted: {entry_id}")
-        elif state.state == PENDING_REINDEX:
+        mirrors[row.entry_id] = row.mirror
+        if row.mirror == PENDING_CONVERSION:
+            problems.append(f"replaced bytes not yet converted: {row.entry_id}")
+        elif row.mirror == PENDING_REINDEX:
             problems.append(
-                f"mirror digest differs from the namespace record (not yet re-indexed): {entry_id}"
+                f"mirror digest differs from the accepted record (not yet re-indexed): "
+                f"{row.entry_id}"
             )
-        else:
-            problems.append(f"mirror isolated ({state.state}): {entry_id}")
+    for entry_id, state in sorted(withheld.items()):
+        problems.append(f"mirror isolated ({state}): {entry_id}")
     try:
         indexed = indexed_files(shelf)
     except (sqlite3.Error, BibliosError) as error:

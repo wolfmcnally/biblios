@@ -29,12 +29,14 @@ def test_stack_search_attributes_hits_and_reranks_once(tmp_path: Path) -> None:
         a.rename("notes.txt", "keeper.txt")
         federated = open_stack([a, b])
         # The rename advanced a's revision past its watermark: the stack says so until a
-        # step runs, and that step embeds nothing.
+        # step runs, and that step embeds only the renamed entry's name row.
         assert federated.search("fresnel", embedder=embedder, rerank=False).indexing == (
             a.shelf_id,
         )
         embedder.calls.clear()
-        assert a.reconcile(settings, embedder=embedder).indexed == () and embedder.calls == []
+        stepped = a.reconcile(settings, embedder=embedder)
+        assert [stage.entry_id for stage in stepped.accepted] == [notes.entry_id]
+        assert [item.embedded for item in stepped.entries if item.entry_id == notes.entry_id] == [1]
         assert federated.shelf_ids == (a.shelf_id, b.shelf_id)
         result = federated.search("fresnel lens kerosene", embedder=embedder, reranker=reranker)
         by_shelf = {}
@@ -47,7 +49,7 @@ def test_stack_search_attributes_hits_and_reranks_once(tmp_path: Path) -> None:
             by_shelf[b.shelf_id].entry_id == log.entry_id and by_shelf[b.shelf_id].path == "log.txt"
         )
         assert len(reranker.calls) == 1 and result.rerank_status == "applied"
-        assert result.indexing == () and result.refused == ()
+        assert result.indexing == () and result.withheld == ()
         assert not result.status[a.shelf_id].lagging and not result.status[b.shelf_id].lagging
 
 
@@ -94,7 +96,7 @@ def test_lagging_member_is_admitted_and_named(tmp_path: Path) -> None:
         assert [hit.entry_id for hit in behind.hits] == [notes.entry_id]
         assert behind.indexing == (b.shelf_id,)
         assert behind.status[b.shelf_id].lagging and not behind.status[b.shelf_id].built
-        assert behind.status[b.shelf_id].pending == 1
+        assert behind.status[b.shelf_id].pending is None  # unknown until Castle's count
 
         b.reconcile(settings, embedder=embedder)
         current = federated.search("fresnel lens", embedder=embedder, rerank=False)
@@ -121,7 +123,7 @@ def test_dead_entry_hit_is_refused_and_reported_by_shelf(tmp_path: Path) -> None
         federated = open_stack([a, b])
         b._mutate("delete-entry", {"entry_id": tide.entry_id}, operation_id=None)
         result = federated.search("spring tides new moon", embedder=embedder, rerank=False)
-        assert (b.shelf_id, tide.entry_id) in result.refused
+        assert (b.shelf_id, tide.entry_id) in {(w.shelf_id, w.entry_id) for w in result.withheld}
         assert all(hit.entry_id != tide.entry_id for hit in result.hits)
 
 

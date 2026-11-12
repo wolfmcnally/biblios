@@ -65,13 +65,18 @@ families:
   - project/pyproject.toml
   - project/tests/test_shelf.py
   contract: init creates the five-part shelf layout, declares the embedder to Palace
-    alone, and a manifest of another schema or with bad fields is refused.
+    alone, a manifest of another schema or with bad fields is refused, and a namespace
+    in Castle's older storage format is refused with the typed error naming Castle's
+    explicit migration and is never migrated.
   risk_class: product-contract
   oracle: Over a temporary shelf the layout files exist, the selector file names the
     declared provider, no manifest field or key mentions an embedder, and open or
-    construction refuses a wrong schema, an empty id and an unknown mode.
-  admission: Replaces the stamped seed proof with layout proofs over a shelf on disk
-    (first product phase).
+    construction refuses a wrong schema, an empty id and an unknown mode; an older-format
+    namespace raises NamespaceFormatError with Castle's cause and leaves every namespace
+    byte unchanged.
+  admission: 'Replaces the stamped seed proof with layout proofs over a shelf on disk
+    (first product phase). As of 2026-11-12, indexing-core-publication: one new proof
+    for the Castle storage-format refusal, red-witnessed; nothing retired.'
   nearest_overlap: shelf-curation exercises the same shelf object but asserts nothing
     about layout or manifest refusal.
   tier: changed
@@ -1484,21 +1489,27 @@ families:
   - project/pyproject.toml
   - project/tests/test_progress.py
   contract: 'The index is visibly derived state: bytes and listing are readable before
-    any conversion, reconcile reports per-entry progress smallest first and yields
-    between entries, the watermark advances only after a complete step that no other
-    writer interrupted, search answers from the index as it stands and says when it
-    is behind, a replacement is refused until its new chunks are indexed, and readers
+    any conversion, ordinary status never guesses a count it cannot know cheaply while
+    diagnose gives the exact recount, reconcile reports per-entry progress smallest
+    first and yields between entries, a yield or a provider failure leaves unfinished
+    entries pending and resumes without re-embedding, indexing never writes Castle,
+    a lost store reads as lagging and only an explicit sweep rebuilds it from the
+    retained mirrors, search answers from the index as it stands and says when it
+    is behind, a replacement is withheld until its new chunks are indexed, and readers
     in another thread see only committed tree views.'
   risk_class: product-contract
-  oracle: 'Over temporary shelves with the deterministic embedder: status counts and
-    stage rows before and after reconcile; the order of searchable rows and the chunk
-    totals against the embedder''s calls; yielded and failed steps leaving the watermark
-    and resuming without re-embedding; search results on fresh, lagging and bootstrapping
-    stores; stale and vanished chunks refused; a worker thread''s step observed from
-    the test thread with complete counts and a reader blocked behind Castle''s handle
-    lock.'
+  oracle: 'Over temporary shelves with the deterministic embedder: index_status and
+    diagnose counts before and after reconcile; the order of searchable rows and chunk
+    totals against the embedder''s calls; accepted lists and per-entry outcomes across
+    yielded and failed calls with no finished text re-submitted; Castle metadata after
+    a step; index-missing from an ordinary call and a sweep that converts nothing
+    and leaves mirror bytes unchanged; search results on fresh, lagging and bootstrapping
+    stores; stale and vanished chunks withheld; a worker thread''s step observed from
+    the test thread and a reader blocked behind Castle''s handle lock.'
   admission: 'Second product phase: the operator''s ruling that the index lags and
-    must say so.'
+    must say so. As of 2026-11-12, indexing-core-publication: the watermark and IndexLagError
+    were removed; four renamed proofs are admitted, red-witnessed, and their predecessors
+    retired by consolidation.'
   nearest_overlap: shelf-reconcile proves what a complete step produces; shelf-search
     proves hit fields on a current index; this family proves the step's behaviour
     in time and the lag it reports.
@@ -1775,17 +1786,25 @@ families:
   - project/pyproject.toml
   - project/uv.lock
   - project/tests/test_consumer_responsiveness.py
-  contract: Contained injected conversion, exact compatible body reuse with fresh
-    filename vectors and durable provider/index completion.
+  contract: 'The provider bundle''s contract through the one indexing core: conversion
+    envelopes, callback results and their uncertainty, cancellation before and during
+    dispatch, the own-name row, replay and conflicting requests, crash and post-commit
+    recovery at Palace''s real commit boundary, contested writers that never hold
+    the reader mutex, source changes during a provider window that are never published
+    over, and excision of a crash-left staged mirror.'
   risk_class: consumer-public-contract
   oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
     expected bytes/revisions/effects/provider counts and full pre/post inventories;
     finite actual durable interruption boundaries where applicable.
-  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+  admission: 'As of 2026-11-09, bounded six-family capability development; per-scenario
     marginal value and attempted work are recorded in the append-only admissions.
-    No baseline reassessment or retirement.
-  nearest_overlap: Ordinary reconcile uses breadcrumb inputs and lacks nominated body
-    reuse, exclusive callback uncertainty and restart composition.
+    As of 2026-11-12, indexing-core-publication: the pipeline and responsiveness files
+    were rewritten against the one core; renamed and new proofs are admitted with
+    receipts, and their predecessors are retired by consolidation where a keeper preserves
+    the scenario.'
+  nearest_overlap: donor-reuse owns nominated body and vector reuse; indexing-core
+    owns the core's stage lifecycle through the shelf facade; this family owns the
+    consumer binding's provider callbacks, their uncertainty and their windows.
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
@@ -1876,7 +1895,10 @@ families:
     Castle/Palace storage; exact mirror and retained bytes, provenance records, typed
     refusal codes and search membership.
   admission: 'As of 2026-11-11, phase user-owned-mirrors: nine new proofs, each red-witnessed
-    against the specific guard it protects. No retirement.'
+    against the specific guard it protects. No retirement. As of 2026-11-12, indexing-core-publication:
+    the file was rewritten against the one core; renamed and new proofs are admitted
+    with receipts, and predecessors are retired by consolidation where a keeper preserves
+    the scenario.'
   nearest_overlap: consumer-pipeline and reconcile families exercise conversion and
     indexing but assert nothing about displaced bytes, retention provenance, per-entry
     isolation or copy receipts.
@@ -1904,6 +1926,487 @@ families:
     red-witnessed. No retirement.'
   nearest_overlap: Every repository fixture commits, but none asserts that personal
     signing is neutralised; their setup failures were the only signal.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: indexing-core
+  kind: pytest
+  selectors:
+  - project/tests/test_core.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_core.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_core.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: One indexing core brings entries current incrementally with no Castle
+    writes, grants first mirrors only from positive creation authority, publishes
+    each entry through its own stage (authorize, promote, recheck, serve) that survives
+    restarts and lost results without re-embedding or re-signing, never serves replaced,
+    tampered, fenced or forged state, replays curation exactly, settles stores for
+    read-only readers, and keeps Castle work per call independent of shelf size.
+  risk_class: product-contract
+  oracle: 'Over temporary shelves with the deterministic embedder and an in-process
+    signing authority: outcome codes, accepted stage digests, embedder/authorization/promotion
+    counts, pending stages, Castle revisions, mirror bytes and inodes, retained files,
+    search hits and withheld categories, store header bytes and counted Castle record
+    reads.'
+  admission: 'As of 2026-11-12, indexing-core-publication: the core and per-entry
+    publication path that every Shelf, CLI and bound-consumer entry point calls; each
+    proof red-witnessed. None of its proofs is retired; removed facade copy, direct-edit
+    and replacement proofs consolidate onto three of them.'
+  nearest_overlap: shelf-reconcile and shelf-index-progress prove the facade's derived
+    layers and lag; user-owned-mirrors proves edit ownership; this family proves the
+    core's stage authority, replay and serving discipline.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: checkpoint-seal
+  kind: pytest
+  selectors:
+  - project/tests/test_checkpoint_seal.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_checkpoint_seal.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_checkpoint_seal.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Under a stage authority the caller seals each conversion and rendering
+    this call produced before it is persisted, verifies every persisted checkpoint
+    before use, never re-seals persisted content, and each stage names the checkpoint
+    it used; changed, foreign, unsealed or refused checkpoints are never reused, converted
+    again or embedded.
+  risk_class: consumer-public-contract
+  oracle: 'Over a synthetic consumer domain with a recording converter and a caller
+    that signs with its own key: sealed and verified checkpoint lists and states,
+    persisted checkpoint documents, accepted stage checkpoint and donor fields, outcome
+    codes, converter/embedder/authorization counts and callback threads.'
+  admission: 'As of 2026-11-12, indexing-core-publication: checkpoint and seal across
+    the derived store; each proof red-witnessed. No retirement.'
+  nearest_overlap: indexing-core proves stage evidence; donor-reuse proves vector
+    reuse; this family proves the caller's seal over persisted conversions.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: bounded-provider-concurrency
+  kind: pytest
+  selectors:
+  - project/tests/test_concurrency.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_concurrency.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_concurrency.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Independent entries' provider calls overlap up to the smaller of the policy
+    bound and the embedder's declared max_concurrency, while every caller callback,
+    store write and commit stays on the calling thread in entry order; failures, cancellation
+    and yields settle per entry and leave no provider thread.
+  risk_class: concurrency
+  oracle: A barrier-held recording provider's most-outstanding count and threads,
+    an owner-locked caller's foreign-callback list, outcome order, replay equality,
+    live provider threads and derived accepted records.
+  admission: 'As of 2026-11-12, indexing-core-publication: bounded concurrency in
+    the core; each proof red-witnessed. No retirement.'
+  nearest_overlap: indexing-core proves serial publication; shelf-index-progress proves
+    serial yields; this family proves the overlapped loop.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: failure-diagnostics
+  kind: pytest
+  selectors:
+  - project/tests/test_diagnostics.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_diagnostics.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_diagnostics.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: A translated failure keeps a stable code, stage and effect, and its cause
+    chain reaches the original exception and the frame that raised it, whether a caller
+    callback or a dependency; a replayed outcome carries no stale cause.
+  risk_class: public-contract
+  oracle: ConsumerError code and stage, the cause chain's last element identity, traceback
+    frame names and filenames, and the replayed outcome's cause.
+  admission: 'As of 2026-11-12, indexing-core-publication: cause-preserving translation;
+    each proof red-witnessed. No retirement.'
+  nearest_overlap: consumer-curation and consumer-search prove refusal codes; this
+    family proves their causes.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: donor-reuse
+  kind: pytest
+  selectors:
+  - project/tests/test_donor.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_donor.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_donor.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: A caller-nominated donor lends its recorded converted body and, only for
+    identical ordered embedding inputs, its vectors; it is never selected automatically;
+    a foreign, changed, unaccepted or edited nominee lends nothing, and a store with
+    a disagreeing recorded identity refuses without rebuilding.
+  risk_class: consumer-public-contract
+  oracle: 'Over a synthetic consumer domain: reused/embedded counts, submitted provider
+    inputs, accepted vector digests against the donor''s, accepted stage donor fields,
+    converter calls, refusal codes and causes, mirror and download bytes, index_meta
+    rows and post-removal search membership.'
+  admission: 'As of 2026-11-12, indexing-core-publication: donor reuse through the
+    core; each proof red-witnessed. None of its proofs is retired; the removed pipeline
+    donor-eligibility cases and the duplicate-reuse proof consolidate onto it.'
+  nearest_overlap: consumer-pipeline proves duplicate body reuse through the earlier
+    pipeline; checkpoint-seal proves the donor checkpoint under a seal; this family
+    proves eligibility and vector reuse.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: excision-stores
+  kind: pytest
+  selectors:
+  - project/tests/test_excision_stores.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_excision_stores.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_excision_stores.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Excision disposes the selected entries' and contents' rows, mirrors and
+    retained renderings from Biblios's own stores, keeps the replay ledgers, keeps
+    and reports user-edited files, and refuses before any effect while a selected
+    entry has a persisted stage.
+  risk_class: data-loss
+  oracle: Actual public curate/derive/preview/excise over unique synthetic storage;
+    store-file byte scans for a marker, exact derived/volatile table rows, residue
+    counts, kept_retained names, successor-shelf replay outcomes and search membership.
+  admission: 'As of 2026-11-12, indexing-core-publication: nine new proofs, each red-witnessed.
+    No retirement.'
+  nearest_overlap: consumer-history proves Castle/Palace excision and cutover; it
+    never inspects Biblios's derived/volatile stores, retained renderings or replay
+    ledgers.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: legacy-import
+  kind: pytest
+  selectors:
+  - project/tests/test_import.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_import.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_import.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: A shelf written by an earlier release keeps answering for exactly matched
+    entries with zero embedding; nothing else becomes searchable, converted or rewritten
+    without an explicit call; first ingestion is explicit and only for entries never
+    converted and never over an existing file.
+  risk_class: data-loss
+  oracle: 'Over a temporary shelf rewritten into the earlier metadata-only shape:
+    per-entry outcome codes, embedder call counts, revisions, mirror bytes and inodes,
+    grant results, caller authorization/promotion records, derived-store records and
+    counters, and exact replay equality.'
+  admission: 'As of 2026-11-12, indexing-core-publication: seven new proofs, each
+    red-witnessed. No retirement.'
+  nearest_overlap: shelf-reconcile and shelf-index-progress build current-release
+    shelves; user-owned-mirrors proves copy receipts but not first ingestion on an
+    imported shelf.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: name-projection
+  kind: pytest
+  selectors:
+  - project/tests/test_name_projection.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_name_projection.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_name_projection.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: A renamed entry is indexed under its current filename from an in-memory
+    projection of its mirror (exact, appended or replaced) without changing the mirror;
+    a projection that cannot be made exactly is reported, and a tampered persisted
+    projection is refused.
+  risk_class: product-contract
+  oracle: 'Over temporary shelves with the deterministic embedder: signed stage projection
+    and path, derived record digests and indexed name, mirror bytes, converter and
+    embedder counts, name-row hit text, and outcome codes under a patched chunker
+    or altered resume document.'
+  admission: 'As of 2026-11-12, indexing-core-publication: seven new proofs, each
+    red-witnessed. No retirement.'
+  nearest_overlap: shelf-curation proves rename in the namespace and shelf-reconcile
+    proves conversion; neither asserts the indexed name or projection.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: read-observations
+  kind: pytest
+  selectors:
+  - project/tests/test_read_observations.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_read_observations.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_checkpoint_seal.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_read_observations.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_checkpoint_seal.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Readers that withhold a mismatched entry report a read observation; only
+    writable bindings persist the mark; a write-grade call verifies reports under
+    the writer lock, isolates only proven damage, drops stale, disproved and malformed
+    reports, reports a check that cannot run with its cause, and repairs from Palace's
+    exact rows only under current authority.
+  risk_class: consumer-public-contract
+  oracle: 'Over temporary shelves and consumer fixtures with one damaged accepted
+    per-hit row: returned ReadObservations, volatile dirty rows, derived entry state
+    and served_seq, outcome codes and causes, authorization counts, embedder calls
+    and search membership, including across a two-member stack.'
+  admission: 'As of 2026-11-12, indexing-core-publication: fourteen new proofs, each
+    red-witnessed. No retirement.'
+  nearest_overlap: shelf-search and consumer-search prove hit shape, lag and refusal
+    of dead chunks; none returns or acts on read-side observations.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: drawbridge-representation
+  kind: pytest
+  selectors:
+  - project/tests/test_representation.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_representation.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_representation.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: The Drawbridge adapter raises configuration refusals with their cause,
+    raises document refusals typed with Drawbridge's error, maps deferred and pending
+    results to unconverted and only a finished rendering (semantic preferred) to a
+    body converted from a copy named for the entry; the core records a refusal as
+    unconverted with its cause given once.
+  risk_class: product-contract
+  oracle: 'Synthetic Drawbridge stand-ins patched into the adapter: raised exception
+    types and exact __cause__ identity, (outcome, body, reason) triples, converter
+    identity, the scratch source path and bytes, and the core''s first, replayed and
+    retried outcomes with convert_file call counts.'
+  admission: 'As of 2026-11-12, indexing-core-publication: seven new proofs, each
+    red-witnessed. No retirement.'
+  nearest_overlap: shelf-reconcile runs the real adapter end to end but never a configuration
+    failure, deferral, pending OCR or typed refusal.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: stage-cancellation
+  kind: pytest
+  selectors:
+  - project/tests/test_stage_cancellation.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_stage_cancellation.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_stage_cancellation.py
+  - project/tests/support.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: A caller-signed cancellation disposes of a serving stage at each publication
+    window, undoing only what publication wrote and restoring nothing; it restarts
+    from persisted signed bytes without a new signature, replays only on the caller's
+    completed recognition, refuses conflicts, forgeries, tampering and obsolete generations
+    with no effect, supersedes as one linear chain, and never moves bytes it does
+    not own.
+  risk_class: consumer-public-contract
+  oracle: 'Over temporary shelves with an HMAC-signing caller and B4 interrupted at
+    windows W1-W4: cancellation states and error codes with effects, signature and
+    recheck lists, pending stage states, mirror and retained bytes, retention records,
+    Palace index digests, cancellation receipt and chain rows, grant rows, and search
+    membership.'
+  admission: 'As of 2026-11-12, indexing-core-publication: twenty-one new proofs,
+    each red-witnessed. No retirement.'
+  nearest_overlap: stage-queries reports stage state and unaccepted-removal disposes
+    of never-accepted mirrors; no other family disposes of a serving stage.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: stage-queries
+  kind: pytest
+  selectors:
+  - project/tests/test_stage_queries.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_stage_queries.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_stage_queries.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: 'Bounded stage queries: a keyed stage status that can answer absent and
+    recorded, paged pending stages by entry with a terminating cursor and bounded
+    named form, a keyed entry status, and a resume-only call that finishes persisted
+    stages without preparation or provider work.'
+  risk_class: consumer-public-contract
+  oracle: 'Over a temporary five-entry shelf with a holding caller: stage_status and
+    entry_status fields, page contents, cursors and page counts, typed page-invalid
+    and request-invalid refusals, resume outcomes, embedder and seal counts, and replay
+    equality.'
+  admission: 'As of 2026-11-12, indexing-core-publication: five new proofs, each red-witnessed.
+    No retirement.'
+  nearest_overlap: stage-cancellation and others read stage status incidentally; this
+    family is the primary proof of the query interfaces.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: unaccepted-removal
+  kind: pytest
+  selectors:
+  - project/tests/test_unaccepted_removal.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_unaccepted_removal.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_unaccepted_removal.py
+  - project/tests/support.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: An entry removed before any accepted stage has the core's own exact first
+    mirror retired only by an authenticated removal stage with no predecessor; anything
+    else at the path stays the user's; a refusal moves, persists and voids nothing;
+    a removed entry's pending publication is never promoted or served without the
+    caller's decision.
+  risk_class: data-loss
+  oracle: 'Over temporary shelves with a caller that records first-mirror digests:
+    removal stage fields, outcome codes, retained file bytes, mirror bytes, pending
+    stages, promotion lists and search membership, including a forged grant row.'
+  admission: 'As of 2026-11-12, indexing-core-publication: five new proofs, each red-witnessed.
+    No retirement.'
+  nearest_overlap: user-owned-mirrors retains displaced bytes of accepted mirrors;
+    no other family covers removal before acceptance.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
+- id: per-hit-membership
+  kind: pytest
+  selectors:
+  - project/tests/test_membership.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_membership.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_membership.py
+  - project/tests/support.py
+  - project/tests/consumer_fixtures.py
+  - project/tests/test_core.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: Each served hit proves its one accepted row against the root its signed
+    stage carries, in O(log n) keyed reads, and only that stage binds the row to the
+    entry.
+  risk_class: security
+  oracle: 'Over temporary shelves with the deterministic embedder: proof results,
+    withholding categories and served hits.'
+  admission: 'As of 2026-11-12, indexing-core-publication: 39 proofs admitted without
+    red witnesses under the operator''s named exception of 2026-11-12T15:52:57Z; reported
+    as unwitnessed by validate.'
+  nearest_overlap: test_search's per-hit evidence proof checks served rows against
+    the accepted rows this family proves.
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-import biblios.convert as convert_module
+import biblios.representation as convert_module
 from biblios import UndeclaredEmbedderError
-from biblios.reconcile import indexed_files
+from biblios.progress import indexed_files
 from biblios.testing import HashEmbedder, OverlapReranker
 from tests.support import NOTES, RECIPE, TIDE, make_shelf
 
@@ -24,7 +24,7 @@ def test_curate_reconcile_search_follows_the_phase_scenario(tmp_path: Path) -> N
         notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
         recipe = shelf.add("recipe.txt", RECIPE.encode(), media_type="text/plain")
         first = shelf.reconcile(settings, embedder=embedder)
-        assert first.built and set(first.converted) == {notes.entry_id, recipe.entry_id}
+        assert _searchable(first) == {notes.entry_id, recipe.entry_id}
         assert shelf.verify().ok, shelf.verify().problems
 
         shelf.update("notes.txt", TIDE.encode())
@@ -32,10 +32,14 @@ def test_curate_reconcile_search_follows_the_phase_scenario(tmp_path: Path) -> N
         shelf.rename("recipe.txt", "bread.txt")
         embedder.calls.clear()
         second = shelf.reconcile(settings, embedder=embedder)
-        assert second.converted == (notes.entry_id,)
-        assert second.indexed == (notes.entry_id,)
-        assert second.unchanged == (recipe.entry_id,)
-        assert all(TIDE.split()[0].lower() in " ".join(call).lower() for call in embedder.calls)
+        # The replaced entry is a new ingestion. The renamed one is re-indexed under its
+        # current name with its mirror untouched: only its name row is embedded again.
+        assert _outcomes(second) == {notes.entry_id: "searchable", recipe.entry_id: "searchable"}
+        assert {stage.entry_id for stage in second.accepted} == {notes.entry_id, recipe.entry_id}
+        renamed = next(item for item in second.entries if item.entry_id == recipe.entry_id)
+        assert renamed.embedded == 1
+        assert any("bread.txt" in " ".join(call) for call in embedder.calls)
+        assert "recipe.txt" in shelf.mirror_path(recipe.entry_id).read_text()
         assert shelf.verify().ok, shelf.verify().problems
 
         found = shelf.search("neap tides smallest range", embedder=embedder, reranker=reranker)
@@ -58,13 +62,13 @@ def test_curate_reconcile_search_follows_the_phase_scenario(tmp_path: Path) -> N
         # the next reconcile; meanwhile the dead entry's hits are refused, never returned.
         assert recipe.entry_id in indexed_files(shelf) and embedder.calls == []
         meanwhile = shelf.search("sourdough starter cold retard", embedder=embedder, rerank=False)
-        assert recipe.entry_id in meanwhile.refused
+        assert recipe.entry_id in {w.entry_id for w in meanwhile.withheld}
         assert all(hit.entry_id != recipe.entry_id for hit in meanwhile.hits)
         from castle import cas
 
         assert cas.require_object(shelf.castle_root, recipe_bytes).read_bytes() == RECIPE.encode()
         third = shelf.reconcile(settings, embedder=embedder)
-        assert third.removed == (recipe.entry_id,) and third.unchanged == (notes.entry_id,)
+        assert _outcomes(third) == {recipe.entry_id: "removed"}  # notes: not a candidate
         assert recipe.entry_id not in indexed_files(shelf)
         assert not shelf.mirror_path(recipe.entry_id).exists()
         after = shelf.search("sourdough starter cold retard", embedder=embedder, reranker=reranker)
@@ -84,14 +88,13 @@ def test_unconvertible_and_replaced_by_unconvertible_files_are_marked_and_absent
         blob = shelf.add("blob.bin", binary)
         text = shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
         report = shelf.reconcile(settings, embedder=embedder)
-        assert report.unconverted == (blob.entry_id,) and report.converted == (text.entry_id,)
-        assert shelf.stat("blob.bin").metadata.conversion.startswith("unconverted:")
+        assert _outcomes(report) == {blob.entry_id: "unconverted", text.entry_id: "searchable"}
         assert not shelf.mirror_path(blob.entry_id).exists()
         assert set(indexed_files(shelf)) == {text.entry_id}
 
         shelf.update("tide.txt", binary + b"\x00more")
         again = shelf.reconcile(settings, embedder=embedder)
-        assert again.unconverted == (text.entry_id,)
+        assert _outcomes(again) == {text.entry_id: "unconverted"}
         assert indexed_files(shelf) == {}
         assert shelf.search("neap tides", embedder=embedder, rerank=False).hits == ()
         assert shelf.verify().ok, shelf.verify().problems
@@ -132,7 +135,7 @@ def test_interrupted_builds_recover_on_the_next_reconcile(tmp_path: Path) -> Non
         shelf.chunks_db.parent.mkdir(parents=True)
         sqlite3.connect(shelf.chunks_db).close()
         report = shelf.reconcile(settings, embedder=embedder)
-        assert report.built and set(indexed_files(shelf)) == {one.entry_id}
+        assert _searchable(report) == {one.entry_id} == set(indexed_files(shelf))
 
         two = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
         interrupted = HashEmbedder()
@@ -141,10 +144,10 @@ def test_interrupted_builds_recover_on_the_next_reconcile(tmp_path: Path) -> Non
             raise RuntimeError("interrupted mid-build")
 
         interrupted.embed = embed_never  # type: ignore[method-assign]
-        with pytest.raises(RuntimeError, match="interrupted"):
-            shelf.reconcile(settings, embedder=interrupted)
-        completed = shelf.reconcile(settings, embedder=embedder)
-        assert not completed.built
+        # A provider failure is scoped to its entry and reported, never the whole call.
+        failed = shelf.reconcile(settings, embedder=interrupted)
+        assert _outcomes(failed) == {two.entry_id: "uncertain"}
+        shelf.reconcile(settings, embedder=embedder)
         assert set(indexed_files(shelf)) == {one.entry_id, two.entry_id}
         assert shelf.verify().ok, shelf.verify().problems
 
@@ -197,10 +200,17 @@ def test_a_configured_stage_rendering_becomes_the_mirror(
         assert seen["stages"] is True
         page = reopened.read(entry.entry_id)
         assert "groomed words" in page.text
-        assert reopened.stat("tide.txt").metadata.converter.endswith(":semantic")
 
 
 def biblios_open(root: Path):
     from biblios import open_shelf
 
     return open_shelf(root)
+
+
+def _outcomes(result) -> dict[str, str]:
+    return {item.entry_id: item.outcome for item in result.entries}
+
+
+def _searchable(result) -> set[str]:
+    return {item.entry_id for item in result.entries if item.outcome == "searchable"}

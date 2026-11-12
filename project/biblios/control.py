@@ -94,8 +94,8 @@ class CallControl:
         if self.cancelled is not None:
             try:
                 cancelled = self.cancelled()
-            except Exception:
-                raise ConsumerError("cancellation-failed", stage=stage, effect=effect) from None
+            except Exception as error:
+                raise ConsumerError("cancellation-failed", stage=stage, effect=effect) from error
             if cancelled:
                 raise ConsumerError("cancelled", stage=stage, effect=effect)
 
@@ -135,10 +135,10 @@ def save_checkpoint(
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-    except Exception:
+    except Exception as error:
         raise ConsumerError(
             "checkpoint-write-failed", stage=stage, effect="recovery-required"
-        ) from None
+        ) from error
 
 
 def controlled[T](
@@ -148,12 +148,13 @@ def controlled[T](
     *,
     effect: Effect = "none",
 ) -> T:
-    """Fence a supplied callback and discard its unsafe exception diagnostics."""
+    """Fence a supplied callback: its failure becomes ``callback-failed`` with the
+    original exception kept as ``__cause__``, so the traceback reaches the raising frame."""
     control.check(stage, effect=effect)
     try:
         result = call()
-    except Exception:
-        raise ConsumerError("callback-failed", stage=stage, effect=effect) from None
+    except Exception as error:
+        raise ConsumerError("callback-failed", stage=stage, effect=effect) from error
     control.check(stage, effect=effect)
     return result
 
@@ -173,4 +174,4 @@ def observe(
             stage="observer",
             effect=observation.effect,
             observation=observation,
-        ) from None
+        ) from error

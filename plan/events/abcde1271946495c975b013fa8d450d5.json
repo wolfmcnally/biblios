@@ -1,0 +1,10 @@
+{
+  "from": null,
+  "id": "abcde1271946495c975b013fa8d450d5",
+  "owner": null,
+  "phase": "persistent-edit-observation",
+  "previous": null,
+  "reason": "New phase; not a claim or acceptance",
+  "state": "not-started",
+  "writer": "biblios-opus-successor"
+}

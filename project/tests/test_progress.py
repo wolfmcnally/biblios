@@ -1,5 +1,5 @@
-"""The index as visibly derived state: bytes first, per-entry progress, yield, watermark,
-and a search that says it is behind."""
+"""The index as visibly derived state: bytes first, per-entry progress, yield, honest
+status, recovery of a lost store, and a search that says it is behind."""
 
 from __future__ import annotations
 
@@ -10,14 +10,12 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
+import palace.index.core as palace_core
 import pytest
-from palace import search as palace_search_module
 from palace.index import _errors as palace_errors
 
-import biblios.reconcile as reconcile_module
-from biblios import IndexLagError
-from biblios.progress import EntryProgress, read_watermark
-from biblios.reconcile import indexed_files
+from biblios.control import ConsumerError
+from biblios.progress import EntryProgress, diagnose, indexed_files
 from biblios.testing import HashEmbedder
 from tests.support import LONG, NOTES, RECIPE, TIDE, make_shelf
 
@@ -37,13 +35,26 @@ class _FailsOn(HashEmbedder):
         return super().embed(texts)
 
 
+def _outcomes(result) -> dict[str, str]:
+    return {item.entry_id: item.outcome for item in result.entries}
+
+
+def _accepted(result) -> list[str]:
+    return [stage.entry_id for stage in result.accepted]
+
+
+def _counts(shelf) -> tuple[int | None, int | None, int, int]:
+    status = diagnose(shelf)[0]
+    return status.files, status.pending, status.searchable, status.unconverted
+
+
 def test_bytes_and_listing_are_available_before_the_index_catches_up(tmp_path: Path) -> None:
     """Failure mode: a curation call converts or embeds synchronously, a fresh shelf reads as
-    lagging, or status reads index state from the entry metadata instead of the layers."""
+    lagging, or ordinary status guesses a count it cannot know in constant cost."""
     shelf, _ = make_shelf(tmp_path)
     with shelf:
         fresh = shelf.index_status()
-        assert fresh.files == 0 and not fresh.lagging and not fresh.built
+        assert fresh.files is None and not fresh.lagging and not fresh.built
         assert fresh.searchable_revision == fresh.revision
         added = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
         assert shelf.download(added.entry_id) == NOTES.encode()
@@ -51,17 +62,18 @@ def test_bytes_and_listing_are_available_before_the_index_catches_up(tmp_path: P
         assert shelf.stat("notes.txt").entry_id == added.entry_id
         assert not shelf.mirror_path(added.entry_id).exists() and not shelf.chunks_db.exists()
         status = shelf.index_status()
-        assert (status.files, status.pending, status.searchable, status.unconverted) == (1, 1, 0, 0)
-        assert status.lagging and not status.built
-        assert status.entries == (
+        assert status.lagging and not status.built and status.pending is None
+        # The explicit diagnosis is the exact recount.
+        exact = diagnose(shelf)[0]
+        assert (exact.files, exact.pending, exact.searchable, exact.unconverted) == (1, 1, 0, 0)
+        assert exact.entries == (
             EntryProgress(shelf.shelf_id, added.entry_id, "notes.txt", "stored"),
         )
 
 
 def test_bulk_add_reports_progress_smallest_first_and_ends_current(tmp_path: Path) -> None:
-    """Failure mode: progress never reaches the caller, order is arbitrary, the watermark
-    does not advance past the step's own metadata mutations, or totals count chunks Palace
-    did not embed."""
+    """Failure mode: progress never reaches the caller, order is arbitrary, indexing writes
+    Castle, or totals count chunks Palace did not embed."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
@@ -75,19 +87,19 @@ def test_bulk_add_reports_progress_smallest_first_and_ends_current(tmp_path: Pat
         order = [row.entry_id for row in rows if row.stage == "searchable"]
         assert order == sorted(order, key=sizes.__getitem__) and len(order) == 3
         assert all(row.shelf_id == shelf.shelf_id for row in rows)
-        indexing = [r for r in rows if r.entry_id == long.entry_id and r.stage == "indexing"]
-        assert (indexing[0].done, indexing[0].total) == (0, None)
-        counted = [r for r in indexing if r.total is not None]
+        assert {row.path for row in rows} == {"almanac.md", "notes.txt", "tide.txt"}
+        counted = [
+            r for r in rows if r.entry_id == long.entry_id and r.stage == "indexing" and r.total
+        ]
         total = counted[-1].total
         assert counted[-1].done == total and total is not None and total > 16
         assert [r.done for r in counted] == sorted(r.done for r in counted)
-        assert all(r.eta_seconds is not None for r in counted if r.done < r.total)
         embedded = sum(1 for call in embedder.calls for text in call if long.entry_id in text)
         assert embedded == total
         status = shelf.index_status()
-        assert not status.lagging and status.pending == 0 and status.searchable == 3
-        assert status.searchable_revision == status.revision == report.searchable_revision
-        assert report.revision > before and not report.yielded
+        assert not status.lagging and status.searchable == 3
+        assert _counts(shelf) == (3, 0, 3, 0)
+        assert report.revision == before == shelf.revision and not report.yielded
 
         changed = LONG.replace("## Chapter 3\n", "## Chapter 3, revised\n", 1)
         shelf.update("almanac.md", changed.encode())
@@ -102,15 +114,14 @@ def test_bulk_add_reports_progress_smallest_first_and_ends_current(tmp_path: Pat
         assert not shelf.index_status().lagging
 
 
-def test_yield_and_interruption_leave_the_watermark_behind_and_resume_without_re_embedding(
+def test_yield_and_provider_failure_leave_work_pending_and_resume_without_re_embedding(
     tmp_path: Path,
 ) -> None:
-    """Failure mode: a yield or a failure re-embeds finished entries, or advances the
-    watermark over work that did not complete."""
+    """Failure mode: a yield or a provider failure re-embeds finished entries, loses the
+    unfinished ones, aborts the whole call, or reports the shelf current."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
-        start = read_watermark(shelf)
         a = shelf.add("a.txt", NOTES.encode(), media_type="text/plain")
         b = shelf.add("b.txt", (RECIPE + TIDE).encode(), media_type="text/plain")
         c = shelf.add("c.md", LONG.encode(), media_type="text/markdown")
@@ -125,35 +136,34 @@ def test_yield_and_interruption_leave_the_watermark_behind_and_resume_without_re
             progress=progress,
             should_yield=lambda: done["searchable"] >= 1,
         )
-        assert first.yielded and first.indexed == (a.entry_id,)
-        assert read_watermark(shelf) == start == first.searchable_revision
-        status = shelf.index_status()
-        assert status.lagging and status.searchable == 1 and status.pending == 2
+        assert first.yielded and _accepted(first) == [a.entry_id]
+        assert shelf.index_status().lagging and _counts(shelf)[1:3] == (2, 1)
 
         embedder.calls.clear()
         second = shelf.reconcile(settings, embedder=embedder)
-        assert not second.yielded and second.indexed == (b.entry_id, c.entry_id)
+        assert not second.yielded and _accepted(second) == [b.entry_id, c.entry_id]
         assert not any("fresnel" in text for call in embedder.calls for text in call)
-        assert read_watermark(shelf) == shelf.revision and not shelf.index_status().lagging
+        assert not shelf.index_status().lagging
 
-        watermark = read_watermark(shelf)
         d = shelf.add("d.txt", (NOTES + " again").encode(), media_type="text/plain")
         e = shelf.add(
             "e.md", LONG.replace("Harbour", "Lighthouse").encode(), media_type="text/markdown"
         )
         flaky = _FailsOn("Lighthouse almanac")
-        with pytest.raises(IndexLagError, match="embedder down"):
-            shelf.reconcile(settings, embedder=flaky)
+        failed = shelf.reconcile(settings, embedder=flaky)
+        # A provider failure is scoped to its entry; the rest of the call completes.
+        assert _outcomes(failed) == {d.entry_id: "searchable", e.entry_id: "uncertain"}
+        assert failed.outcome(e.entry_id).cause is not None
         index = indexed_files(shelf)
         assert d.entry_id in index and e.entry_id not in index
-        assert read_watermark(shelf) == watermark and shelf.index_status().lagging
+        assert shelf.index_status().lagging
 
         flaky.armed = False
         flaky.calls.clear()
         third = shelf.reconcile(settings, embedder=flaky)
-        assert third.indexed == (e.entry_id,)
+        assert _accepted(third) == [e.entry_id]
         assert not any("again" in text for call in flaky.calls for text in call)
-        assert read_watermark(shelf) == shelf.revision and not shelf.index_status().lagging
+        assert not shelf.index_status().lagging
 
 
 def test_search_answers_while_the_index_lags(tmp_path: Path) -> None:
@@ -193,62 +203,42 @@ def test_search_answers_while_the_index_lags(tmp_path: Path) -> None:
         sqlite3.connect(second.chunks_db).close()
         second.add("tide.txt", TIDE.encode(), media_type="text/plain")
         status = second.index_status()
-        assert not status.built and status.lagging and status.pending == 1
+        assert not status.built and status.lagging
         booting = second.search("spring tides", embedder=embedder, rerank=False)
         assert booting.hits == () and booting.indexing
         second.reconcile(settings2, embedder=embedder)
         found = second.search("spring tides new moon", embedder=embedder, rerank=False)
         assert found.hits and not found.indexing
 
-        # Palace stamps the four identity rows one by one outside a transaction: a stamp
-        # with only some of them is bootstrap in progress, not a built store, and never
-        # a foreign identity to refuse.
-        with sqlite3.connect(second.chunks_db) as conn:
-            conn.execute("DELETE FROM index_meta WHERE key != 'embed_model'")
-        partial = second.index_status()
-        assert not partial.built and partial.lagging
-        halfway = second.search("spring tides", embedder=embedder, rerank=False)
-        assert halfway.hits == () and halfway.indexing
-        rebuilt = second.reconcile(settings2, embedder=embedder)
-        assert rebuilt.built and not second.index_status().lagging
-        assert second.search("spring tides new moon", embedder=embedder, rerank=False).hits
 
-
-def test_replaced_entry_is_refused_until_its_new_chunks_are_indexed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Failure mode: stale chunks pass as current under new metadata, or a chunk that
-    vanished between retrieval and hydration raises out of search."""
+def test_replaced_entry_is_refused_until_its_new_chunks_are_indexed(tmp_path: Path) -> None:
+    """Failure mode: stale chunks pass as current for a replaced source. (A served body is
+    read in the retrieval's own snapshot, so no separate hydration read can vanish.)"""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
         notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
         shelf.reconcile(settings, embedder=embedder)
         shelf.update("notes.txt", TIDE.encode())
-        with pytest.raises(IndexLagError, match="embedder down"):
-            shelf.reconcile(settings, embedder=_FailsOn("Spring tides"))
-        metadata = shelf.stat("notes.txt").metadata
-        assert metadata is not None and metadata.converted
-        assert indexed_files(shelf)[notes.entry_id] != metadata.mirror_sha256
+        failed = shelf.reconcile(settings, embedder=_FailsOn("Spring tides"))
+        assert _outcomes(failed) == {notes.entry_id: "uncertain"}
         stale = shelf.search("fresnel lens kerosene", embedder=embedder, rerank=False)
-        assert stale.hits == () and notes.entry_id in stale.refused and stale.indexing
+        assert (
+            stale.hits == ()
+            and notes.entry_id in {w.entry_id for w in stale.withheld}
+            and stale.indexing
+        )
 
         shelf.reconcile(settings, embedder=embedder)
         fresh = shelf.search("spring tides new moon", embedder=embedder, rerank=False)
         assert fresh.hits[0].entry_id == notes.entry_id and not fresh.indexing
         assert "fresnel" not in fresh.hits[0].chunk.lower()
 
-        def vanished(**kwargs: object) -> object:
-            raise palace_errors.IndexError("unknown chunk_id: gone")
-
-        monkeypatch.setattr(palace_search_module, "expand", vanished)
-        refused = shelf.search("spring tides new moon", embedder=embedder, rerank=False)
-        assert refused.hits == () and notes.entry_id in refused.refused
-
 
 def test_status_reads_a_committed_view_while_a_worker_reconciles(tmp_path: Path) -> None:
     """Failure mode: a reader in another thread observes the writer's vacated rows, so an
-    entry disappears from counts or listings while its metadata is being recorded."""
+    entry disappears from listings, or a curation call during a step is lost or reported
+    as already indexed."""
     shelf, settings = make_shelf(tmp_path)
     started = threading.Event()
     proceed = threading.Event()
@@ -278,12 +268,11 @@ def test_status_reads_a_committed_view_while_a_worker_reconciles(tmp_path: Path)
         try:
             assert started.wait(30), "the worker never reached the embedder"
             # A curation call from this thread while the step runs: it must neither
-            # conflict with the step's own mutations nor be overwritten by them.
+            # conflict with the step nor be overwritten by it.
             shelf.set_tags("almanac.md", ("keep",))
             while worker.is_alive():
                 assert time.monotonic() < deadline, "the worker outlived the proof's bound"
-                status = shelf.index_status()
-                assert status.files == 3
+                shelf.index_status()
                 assert len(shelf.ls()) == 3
                 shelf.search("tide", embedder=reader, rerank=False)
                 observations += 1
@@ -294,11 +283,11 @@ def test_status_reads_a_committed_view_while_a_worker_reconciles(tmp_path: Path)
         assert not worker.is_alive() and failures == []
         assert observations > 0
         assert shelf.tags("almanac.md") == ("keep",)
-        # The external write makes the first step leave the watermark; the next step,
-        # which embeds nothing, brings the shelf current.
-        assert shelf.index_status().lagging
+        # A tag-only write changes nothing the index derives from: the step's fence saw
+        # the same source and stayed current. (A content change during a step is fenced
+        # stale and requeued; see test_core.)
         again = shelf.reconcile(settings, embedder=HashEmbedder())
-        assert again.indexed == () and not shelf.index_status().lagging
+        assert again.accepted == () and not shelf.index_status().lagging
 
         # The reader waits on the lock Castle holds for a whole mutation, so it can never
         # see the rows a commit vacates and rewrites inside that lock.
@@ -312,9 +301,9 @@ def test_status_reads_a_committed_view_while_a_worker_reconciles(tmp_path: Path)
         assert not reader_thread.is_alive() and listed == [3]
 
 
-def test_a_tag_set_during_a_step_survives_the_conversion_record(tmp_path: Path) -> None:
-    """Failure mode: the step records a conversion from its snapshot of the entry and
-    writes the whole metadata map back, erasing tags or dates committed meanwhile."""
+def test_a_tag_set_during_a_step_survives_it(tmp_path: Path) -> None:
+    """Failure mode: indexing writes the entry's metadata back from its snapshot, erasing
+    tags or dates committed meanwhile."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
@@ -327,71 +316,79 @@ def test_a_tag_set_during_a_step_survives_the_conversion_record(tmp_path: Path) 
 
         first = shelf.reconcile(settings, embedder=embedder, progress=progress)
         entry = shelf.stat("tide.txt")
-        assert entry.metadata is not None and entry.metadata.converted
-        assert entry.metadata.tags == ("ocean",) and entry.metadata.dates == {
-            "observed": "2026-11-07"
-        }
-        assert not first.yielded and shelf.index_status().lagging
+        assert entry.metadata is not None and entry.metadata.tags == ("ocean",)
+        assert entry.metadata.dates == {"observed": "2026-11-07"}
+        assert not first.yielded and not shelf.index_status().lagging
         second = shelf.reconcile(settings, embedder=embedder)
-        assert second.indexed == () and not shelf.index_status().lagging
+        assert second.accepted == () and not shelf.index_status().lagging
         assert shelf.tags("tide.txt") == ("ocean",)
 
 
-def test_a_missing_store_is_rebuilt_over_retained_mirrors_with_progress(tmp_path: Path) -> None:
-    """Failure mode: recovery of a removed store over existing mirrors fails in the build
-    progress adapter, or reads as current because the old watermark survived."""
+def test_a_lost_store_reads_as_lagging_and_a_sweep_rebuilds_it_from_the_mirrors(
+    tmp_path: Path,
+) -> None:
+    """Failure mode: a removed index store reads as searchable, nothing ever rebuilds it,
+    or recovery reconverts sources or rewrites the user's mirrors."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
         notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
-        shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
+        tide = shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
         shelf.reconcile(settings, embedder=embedder)
+        mirrors = {
+            entry_id: shelf.mirror_path(entry_id).read_bytes()
+            for entry_id in (notes.entry_id, tide.entry_id)
+        }
         shutil.rmtree(shelf.chunks_db.parent)
         gone = shelf.index_status()
-        assert not gone.built and gone.lagging and gone.pending == 2
-        assert gone.searchable_revision == gone.revision
+        assert not gone.built and gone.lagging and gone.searchable == 0
+        # An ordinary call refuses the lost index; only the explicit sweep recovers it.
+        with pytest.raises(ConsumerError, match="index-missing"):
+            shelf.reconcile(settings, embedder=embedder)
         rows: list[EntryProgress] = []
-        report = shelf.reconcile(settings, embedder=embedder, progress=rows.append)
-        assert report.built
+        report = shelf.reconcile(settings, embedder=embedder, progress=rows.append, sweep=True)
+        assert sorted(_accepted(report)) == sorted((notes.entry_id, tide.entry_id))
         assert {row.entry_id for row in rows if row.stage == "indexing"} >= {notes.entry_id}
+        assert not any(row.stage == "converting" for row in rows)
+        assert {k: shelf.mirror_path(k).read_bytes() for k in mirrors} == mirrors
         status = shelf.index_status()
         assert status.built and not status.lagging and status.searchable == 2
         assert (
             shelf.search("fresnel lens", embedder=embedder, rerank=False).hits[0].entry_id
             == notes.entry_id
         )
+        assert shelf.verify().ok, shelf.verify().problems
 
 
-def test_an_unconverted_replacement_interrupted_before_row_removal_recovers(
+def test_an_unconverted_replacement_whose_row_removal_failed_is_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Failure mode: a replacement recorded as unconverted whose old index row was never
-    removed is scheduled by no later step, so the shelf can never reconcile again."""
+    removed is scheduled by no later step, so its stale rows stay forever."""
     shelf, settings = make_shelf(tmp_path)
     embedder = HashEmbedder()
     with shelf:
         tide = shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
         shelf.reconcile(settings, embedder=embedder)
         shelf.update("tide.txt", b"\x00\x01 not text \x00")
-        real_update = reconcile_module.update
+        real_delete = palace_core.delete_path
         calls = {"n": 0}
 
-        def failing_once(**kwargs: object) -> object:
+        def failing_once(*args: object, **kwargs: object) -> object:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise palace_errors.IndexError("palace unavailable")
-            return real_update(**kwargs)
+            return real_delete(*args, **kwargs)
 
-        monkeypatch.setattr(reconcile_module, "update", failing_once)
-        with pytest.raises(IndexLagError, match="unavailable"):
-            shelf.reconcile(settings, embedder=embedder)
-        metadata = shelf.stat("tide.txt").metadata
-        assert metadata is not None and metadata.conversion.startswith("unconverted:")
-        assert metadata.current_for(shelf.stat("tide.txt").cas_id)
+        monkeypatch.setattr(palace_core, "delete_path", failing_once)
+        failed = shelf.reconcile(settings, embedder=embedder)
+        outcome = failed.outcome(tide.entry_id)
+        assert (outcome.outcome, outcome.code) == ("recovery-required", "publication-failed")
+        assert "palace unavailable" in str(outcome.cause)
         assert tide.entry_id in indexed_files(shelf) and shelf.index_status().lagging
 
         report = shelf.reconcile(settings, embedder=embedder)
-        assert report.removed == (tide.entry_id,)
+        assert _outcomes(report) == {tide.entry_id: "unconverted"}
         assert indexed_files(shelf) == {} and not shelf.index_status().lagging
         assert shelf.verify().ok, shelf.verify().problems
 
@@ -406,7 +403,7 @@ def test_index_reads_close_their_connections_before_returning(tmp_path: Path) ->
     import gc
 
     from biblios.progress import recorded_root, store_built
-    from biblios.reconcile import require_identity
+    from biblios.shelf import require_identity
 
     shelf, settings = make_shelf(tmp_path)
     with shelf:

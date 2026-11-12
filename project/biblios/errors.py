@@ -22,6 +22,30 @@ class DuplicateContentError(BibliosError):
         super().__init__(f"content already held by live entries: {', '.join(entry_ids)}")
 
 
+class NamespaceFormatError(BibliosError):
+    """Castle refused to open the shelf's namespace as a format this release does not open.
+
+    A shelf written with Castle 0.3 keeps its namespace in Castle's v1 format, which
+    Castle 0.4 opens only after the operator migrates it explicitly, once, with a
+    backup, through ``castle.namespace_migrate_v1.migrate_namespace_v1(namespace_root,
+    cas_root, session, backup)``. Biblios never migrates and never alters the store:
+    the migrator verifies the exact v1 shape and refuses anything else, so a namespace
+    that is not v1 but damaged is left for Castle's explicit diagnosis.
+    """
+
+    MIGRATION = "castle.namespace_migrate_v1.migrate_namespace_v1"
+
+    def __init__(self, namespace_root: object) -> None:
+        self.namespace_root = namespace_root
+        super().__init__(
+            f"the Castle namespace at {namespace_root} is not in a format this release "
+            "opens (namespace-format-unsupported). A shelf written with Castle 0.3 is "
+            "opened only after the operator migrates it explicitly with "
+            f"{self.MIGRATION}(namespace_root, cas_root, session, backup); Biblios never "
+            "migrates it, and the migrator refuses a namespace that is not exactly v1."
+        )
+
+
 class UndeclaredEmbedderError(BibliosError):
     """The shelf's Palace store has no declared embedder selector.
 

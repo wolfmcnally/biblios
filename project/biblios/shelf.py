@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 import unicodedata
@@ -32,16 +33,18 @@ from typing import TYPE_CHECKING, Any
 from castle import cas
 from castle.journal import ensure_store
 from castle.namespace import (
+    EntryChange,
     EntryRecord,
     InitializeRequest,
     MutationRequest,
     MutationResult,
     NamespaceError,
     ReadRequest,
+    ReadResult,
     SnapshotRecord,
     create_namespace,
     execute_namespace,
-    namespace_operation,
+    namespace_operation_target,
     open_namespace,
     open_namespace_readonly,
     read_namespace,
@@ -56,18 +59,27 @@ from palace.settings import initialize_store
 
 from biblios.config import Settings
 from biblios.entries import DIRECTORY_METADATA, Entry, EntryMetadata, path_of, view
-from biblios.errors import BibliosError, DuplicateContentError, SealedShelfError
+from biblios.errors import (
+    BibliosError,
+    DuplicateContentError,
+    NamespaceFormatError,
+    SealedShelfError,
+)
 from biblios.progress import write_watermark
 
 if TYPE_CHECKING:
     from biblios.binding import ShelfBinding
+    from biblios.core import BringCurrentResult
     from biblios.progress import EntryProgress, IndexStatus
-    from biblios.reconcile import ReconcileReport
     from biblios.seal import SealRecord
     from biblios.search import Page, SearchResult
     from biblios.verify import VerifyReport
 
 SHELF_SCHEMA = "biblios.shelf/1"
+# Castle's entry-id form; anything else names no entry.
+_ENTRY_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+# Entry records per change-discovery page.
+CHANGE_PAGE = 1000
 """Schema identifier written into every shelf manifest."""
 
 MANIFEST_NAME = "shelf.json"
@@ -279,38 +291,100 @@ class Shelf:
     # ---- namespace plumbing -----------------------------------------------------------
 
     def _live(self) -> dict[str, EntryRecord]:
+        """Every live entry record: the whole-sequence read, for whole-tree operations
+        only. Castle validates each record as it is read; every page is pinned to one
+        revision, so the set is one committed state (a commit between pages refuses it
+        and it is read again, bounded)."""
         self._ensure_open()
         # Castle holds this re-entrant lock for the whole of a mutation, so a reader in
         # another thread sees only committed entry sets, never the vacated rows inside one.
         with self._handle.mutex:
-            return self._handle.entries()
+            for attempt in range(3):
+                probe = self._read("probe", {})
+                try:
+                    return {
+                        change.entry.entry_id: change.entry
+                        for change in self._changes(
+                            0, probe.database_generation, at_revision=probe.revision
+                        )
+                        if change.live
+                    }
+                except NamespaceError as error:
+                    if error.code != "namespace-revision-conflict" or attempt == 2:
+                        raise
+        raise AssertionError("unreachable")
+
+    def _changes(
+        self,
+        from_revision: int,
+        generation: str,
+        *,
+        at_revision: int | None = None,
+        read: Callable[..., Any] | None = None,
+    ) -> Iterator[EntryChange]:
+        """Every entry record touched at or after ``from_revision`` in ``generation``,
+        live or removed, in Castle's (revision, entry) order, one bounded page per read.
+        Castle's cursor excludes the (revision, entry) it names, so with no entry it
+        starts at that revision. ``read`` replaces the plain read (a counting adapter)."""
+        read = read or self._read_result
+        after_revision, after_entry = from_revision, None
+        while True:
+            page = read(
+                "changes-since",
+                {
+                    "database_generation": generation,
+                    "after_revision": after_revision,
+                    "after_entry_id": after_entry,
+                    "limit": CHANGE_PAGE,
+                },
+                at_revision,
+            ).value
+            yield from page.changes
+            if page.next_revision is None:
+                return
+            after_revision, after_entry = page.next_revision, page.next_entry_id
+
+    def _chain(
+        self, record: EntryRecord, get: Callable[[str], EntryRecord] | None = None
+    ) -> dict[str, EntryRecord]:
+        """``record`` with its parent chain to the root, each parent read through
+        ``get`` (by default one validated ``get-entry``): what a path needs, no more."""
+        get = get or (lambda entry_id: self._read("get-entry", {"entry_id": entry_id}))
+        records = {record.entry_id: record}
+        parent = record.parent_id
+        while parent is not None:
+            if parent in records:
+                raise BibliosError(f"entry {record.entry_id} has a cyclic path")
+            records[parent] = get(parent)
+            parent = records[parent].parent_id
+        return records
+
+    def _entry(self, entry_id: str) -> EntryRecord | None:
+        """One live entry record, validated by Castle, or None when no live entry has
+        this id."""
+        if not isinstance(entry_id, str) or _ENTRY_ID.fullmatch(entry_id) is None:
+            return None
+        try:
+            return self._read("get-entry", {"entry_id": entry_id})
+        except NamespaceError as error:
+            if error.code == "namespace-entry-missing":
+                return None
+            raise
 
     @property
     def revision(self) -> int:
         """The namespace revision: the shelf's authority, which the index follows."""
-        return self._read("info", {}).revision
+        return self._read("probe", {}).revision
 
     def _read(self, kind: str, args: dict[str, Any]) -> Any:
+        return self._read_result(kind, args).value
+
+    def _read_result(
+        self, kind: str, args: dict[str, Any], at_revision: int | None = None
+    ) -> ReadResult:
         self._ensure_open()
-        request = ReadRequest(self._namespace_id, self._cas, None, kind, args)
-        return read_namespace(self._handle, request).value
-
-    def _stored_request(self, operation_id: str) -> dict[str, Any] | None:
-        """Castle's own record of a committed operation's canonical request, or None.
-
-        Castle keeps the canonical request so that a retry can be checked against it;
-        Biblios reads that record to re-issue the exact original request, so Castle's
-        fingerprint check and stored result answer the retry.
-        """
-        status = namespace_operation(self._handle, operation_id)
-        if status.state != "committed":
-            return None
-        row = self._handle.db.execute(
-            "SELECT canonical_request FROM operations WHERE operation_id = ?", (operation_id,)
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return json.loads(row[0])
+        request = ReadRequest(self._namespace_id, self._cas, at_revision, kind, args)
+        return read_namespace(self._handle, request)
 
     def _request_id(self, operation_id: str | None, operation: str, **request: Any) -> str:
         """The Castle operation id for one public request.
@@ -333,27 +407,57 @@ class Shelf:
         return str(uuid.UUID(bytes=bytes(digest)))
 
     def _replay(self, request_id: str) -> Mutation | None:
-        """Answer a retry from Castle's record before any admission work.
+        """Answer a retry through public interfaces only, before any admission work.
 
-        The original canonical request is re-issued verbatim, so Castle's fingerprint
-        check and its stored result answer the retry, whether or not the paths it named
-        still exist.
+        A request this release recorded is re-issued verbatim, so Castle's fingerprint
+        check and stored result answer it whatever paths changed since; a tampered
+        record fails that check and has no effect. An operation committed before the
+        record existed is answered from Castle's public result and its targeted
+        operation read, which names the entry the operation acted on from Castle's own
+        validated stored request (the new root of a copy, the root of a subtree removal),
+        so the answer is exact for every kind this shelf issues, whatever paths changed
+        since, and nothing is executed again. An operation with no such entry is
+        ``replay-root-unresolved``.
         """
+        from biblios.control import ConsumerError
+        from biblios.derived import VolatileStore
+
         self._refuse_if_sealed()
-        stored = self._stored_request(request_id)
-        if stored is None:
+        status = namespace_operation_target(self._handle, request_id)
+        if status.state != "committed" or status.result is None:
             return None
-        args = stored["args"]
-        request = MutationRequest(
-            stored["namespace_id"],
-            self._cas,
-            stored["expected_revision"],
-            request_id,
-            stored["kind"],
-            args,
+        volatile = VolatileStore(self.palace_store)
+        try:
+            stored = volatile.stored_request(request_id)
+        finally:
+            volatile.close()
+        if stored is not None:
+            recorded = json.loads(stored)
+            request = MutationRequest(
+                recorded["namespace_id"],
+                self._cas,
+                recorded["expected_revision"],
+                request_id,
+                recorded["kind"],
+                recorded["args"],
+            )
+            try:
+                result = execute_namespace(self._handle, request, {})
+            except NamespaceError as error:
+                raise ConsumerError("operation-conflict", stage="curation") from error
+            return _mutation(result, recorded["args"], replayed=True)
+        result = status.result
+        if status.primary_entry_id is None:
+            raise ConsumerError("replay-root-unresolved", stage="curation")
+        return Mutation(
+            operation_id=result.operation_id,
+            kind=result.kind,
+            entry_id=status.primary_entry_id,
+            affected_entry_ids=tuple(result.affected_entry_ids),
+            revision_before=result.revision_before,
+            revision_after=result.revision_after,
+            replayed=True,
         )
-        result = execute_namespace(self._handle, request, {})
-        return _mutation(result, args, replayed=True)
 
     def _mutate(
         self,
@@ -368,17 +472,46 @@ class Shelf:
         # and turn a valid curation call into a spurious revision conflict.
         with self._handle.mutex:
             self._refuse_if_sealed()
+            revision = self._read("info", {}).revision
             request = MutationRequest(
-                self._namespace_id,
-                self._cas,
-                self._read("info", {}).revision,
-                operation_id or _uuid(),
-                kind,
-                args,
+                self._namespace_id, self._cas, revision, operation_id or _uuid(), kind, args
             )
-            return _mutation(
-                execute_namespace(self._handle, request, content or {}), args, replayed=False
+            from biblios.curation import creation_intents
+            from biblios.derived import VolatileStore
+
+            needs_live = kind in ("duplicate", "delete-entry", "delete-subtree")
+            intents = creation_intents(kind, args, self._live() if needs_live else {})
+
+            # The exact request is recorded inside this mutex hold before Castle is
+            # called, so a retry re-issues it verbatim (decision 4, curation replay).
+            volatile = VolatileStore(self.palace_store)
+            volatile.record_request(
+                request.operation_id,
+                json.dumps(
+                    {
+                        "namespace_id": request.namespace_id,
+                        "expected_revision": request.expected_revision,
+                        "kind": request.kind,
+                        "args": request.args,
+                    },
+                    sort_keys=True,
+                ),
             )
+            if intents:
+                # A creation's positive authority: the intent is written, inside this same
+                # mutex hold, before Castle is called; the grant only after it commits.
+                volatile.record_intents(request.operation_id, revision, list(intents))
+            try:
+                result = execute_namespace(self._handle, request, content or {})
+            except BaseException:
+                volatile.close()
+                raise
+        try:
+            if intents:
+                volatile.grant(request.operation_id, result)
+        finally:
+            volatile.close()
+        return _mutation(result, args, replayed=False)
 
     def _record(self, path: str) -> EntryRecord:
         try:
@@ -459,10 +592,11 @@ class Shelf:
             tags=tuple(tags),
             dates=dict(dates or {}),
         )
+        entry_id = _uuid()
         return self._mutate(
             "create-file",
             {
-                "entry_id": _uuid(),
+                "entry_id": entry_id,
                 "parent_id": parent_id,
                 "name": name,
                 "metadata": metadata.to_mapping(),
@@ -492,8 +626,9 @@ class Shelf:
     def update(self, path: str, data: bytes, *, operation_id: str | None = None) -> Mutation:
         """Replace an entry's content under the same entry id, name and metadata.
 
-        One ``replace-content`` mutation. The recorded conversion keeps naming the old
-        bytes, which is how reconcile and verify see that the mirror is stale.
+        One ``replace-content`` mutation. Replacement is a new ingestion: the call grants
+        the new source's conversion, and the derived record keeps naming the old bytes
+        until it runs.
         """
         cas_id = _content_id(data)
         request_id = self._request_id(operation_id, "update", path=_split(path), cas_id=cas_id)
@@ -543,8 +678,9 @@ class Shelf:
     def copy(self, path: str, destination: str, *, operation_id: str | None = None) -> Mutation:
         """Duplicate an entry (and its subtree) under new entry ids at ``destination``.
 
-        The copies carry the source's metadata and content address. Their first mirrors
-        are created by a reconcile that names this operation in ``materialize``.
+        The copies carry the source's metadata and content address. The call grants
+        each copied file one first mirror, converted from its source, never from an
+        edited mirror.
         """
         request_id = self._request_id(
             operation_id, "copy", path=_split(path), destination=_split(destination)
@@ -558,9 +694,6 @@ class Shelf:
             {"source_id": source, "new_id": _uuid()}
             for source in self._subtree(record.entry_id, self._live())
         ]
-        from biblios.mirrors import record_copy_intent
-
-        record_copy_intent(self.palace_store, request_id)
         return self._mutate(
             "duplicate",
             {
@@ -590,15 +723,18 @@ class Shelf:
     # ---- reads -----------------------------------------------------------------------
 
     def ls(self, path: str = "") -> list[Entry]:
-        record = self._record(path) if _split(path) else self._live()[self._root_id]
-        if record.kind != "directory":
-            raise BibliosError(f"not a directory: {path!r}")
-        children = self._read("list-directory", {"entry_id": record.entry_id})
-        live = self._live()
-        return [view(child, live, self._root_id) for child in children]
+        with self._handle.mutex:
+            record = self._record(path)
+            if record.kind != "directory":
+                raise BibliosError(f"not a directory: {path!r}")
+            chain = self._chain(record)
+            children = self._read("list-directory", {"entry_id": record.entry_id})
+        return [view(child, {**chain, child.entry_id: child}, self._root_id) for child in children]
 
     def stat(self, path: str) -> Entry:
-        return view(self._record(path), self._live(), self._root_id)
+        with self._handle.mutex:
+            record = self._record(path)
+            return view(record, self._chain(record), self._root_id)
 
     def tags(self, path: str) -> tuple[str, ...]:
         entry = self.stat(path)
@@ -625,10 +761,11 @@ class Shelf:
 
     def resolve(self, entry_id: str) -> Entry:
         """A citation's entry id back to its current path; refuses a non-live entry."""
-        live = self._live()
-        if entry_id not in live or entry_id == self._root_id:
-            raise BibliosError(f"no live entry {entry_id}")
-        return view(live[entry_id], live, self._root_id)
+        with self._handle.mutex:
+            record = self._entry(entry_id)
+            if record is None or entry_id == self._root_id:
+                raise BibliosError(f"no live entry {entry_id}")
+            return view(record, self._chain(record), self._root_id)
 
     def files(self) -> Iterator[Entry]:
         """Every live file entry."""
@@ -638,12 +775,11 @@ class Shelf:
                 yield view(record, live, self._root_id)
 
     def path_of(self, entry_id: str) -> str:
-        return path_of(entry_id, self._live(), self._root_id)
-
-    def record_conversion(self, entry: Entry, metadata: EntryMetadata) -> Mutation:
-        """Write the conversion fields; used by reconcile, which accounts for the revision
-        this mutation advances."""
-        return self._set_metadata(entry.entry_id, metadata)
+        with self._handle.mutex:
+            record = self._entry(entry_id)
+            if record is None:
+                raise BibliosError(f"no live entry {entry_id}")
+            return path_of(entry_id, self._chain(record), self._root_id)
 
     def index_status(self) -> IndexStatus:
         from biblios.progress import index_status
@@ -687,6 +823,41 @@ class Shelf:
 
     # ---- derived layers ----------------------------------------------------------------
 
+    def local_binding(self) -> ShelfBinding:
+        """This open shelf as a write-grade binding over its own directories."""
+        from biblios.binding import ShelfBinding
+
+        if self._layout is not None:
+            return self._layout
+        scratch = self.root / "scratch"
+        scratch.mkdir(exist_ok=True)
+        return ShelfBinding(
+            root=self.root,
+            namespace_root=self.namespace_root,
+            castle_root=self.castle_root,
+            mirror_root=self.mirror_root,
+            palace_root=self.palace_store,
+            scratch_root=scratch,
+            shelf_id=self.shelf_id,
+            namespace_id=self._namespace_id,
+            expected_cas=self._cas,
+        )
+
+    def grant_first_ingestion(self, path: str, *, operation_id: str | None = None) -> bool:
+        """The explicit first-ingestion grant for the never-converted entry at ``path``,
+        bound to its current content; the next :meth:`reconcile` naming it converts it.
+        See :func:`biblios.grant_first_ingestion`."""
+        import uuid
+
+        from biblios.consumer import BoundShelf
+
+        entry = self.stat(path)
+        return BoundShelf(self.local_binding(), self).grant_first_ingestion(
+            entry.entry_id,
+            expected_cas_id=entry.cas_id,
+            operation_id=operation_id or str(uuid.uuid4()),
+        )
+
     def reconcile(
         self,
         settings: Settings,
@@ -694,20 +865,58 @@ class Shelf:
         embedder: Embedder | None = None,
         progress: Callable[[EntryProgress], None] | None = None,
         should_yield: Callable[[], bool] | None = None,
-        materialize: tuple[str, ...] = (),
-    ) -> ReconcileReport:
-        """Bring mirrors and index up to date; ``materialize`` names copy operations whose
-        new entries get their first mirror."""
-        from biblios.reconcile import reconcile
+        entry_ids: Sequence[str] | None = None,
+        sweep: bool = False,
+        operation_id: str | None = None,
+    ) -> BringCurrentResult:
+        """Bring the named entries, or the discovered changes, current through the core.
 
-        return reconcile(
-            self,
-            settings,
-            embedder=embedder,
-            progress=progress,
-            should_yield=should_yield,
-            materialize=materialize,
-        )
+        Discovery covers granted creations, namespace changes and marked entries; a
+        direct mirror edit nothing observed is found only by naming the entry or by
+        ``sweep``, the explicit whole-shelf form.
+        """
+        from palace.index.embedder_config import resolve_embedder
+
+        from biblios.consumer import BoundShelf
+        from biblios.core import BringCurrentRequest, bring_current
+        from biblios.errors import BibliosError
+        from biblios.pipeline import ConsumerPipeline
+        from biblios.representation import default_policy, drawbridge_converter, envelope_renderer
+
+        if self.sealed:
+            raise SealedShelfError("a sealed shelf is read-only; unseal it before reconciling")
+        require_identity(self)
+        owned = embedder is None
+        if embedder is None:
+            embedder, _ = resolve_embedder(self.palace_store, purpose="document")
+        if not self._step_lock.acquire(blocking=False):
+            raise BibliosError(f"a reconcile step is already running on shelf {self.shelf_id}")
+        try:
+            self._refuse_if_sealed()
+            embedder.probe()
+            pipeline = ConsumerPipeline(
+                converter=drawbridge_converter(settings),
+                renderer=envelope_renderer,
+                input_view=None,
+                policy=default_policy(),
+                embedder=embedder,
+                progress=progress,
+            )
+            request = BringCurrentRequest(
+                operation_id or _uuid(),
+                None if entry_ids is None else tuple(entry_ids),
+                sweep=sweep,
+            )
+            return bring_current(
+                BoundShelf(self.local_binding(), self),
+                request,
+                pipeline=pipeline,
+                should_yield=should_yield,
+            )
+        finally:
+            self._step_lock.release()
+            if owned:
+                embedder.close()
 
     def verify(self) -> VerifyReport:
         from biblios.verify import verify_shelf
@@ -745,6 +954,27 @@ class Shelf:
         from biblios.search import download
 
         return download(self, entry_id)
+
+
+def require_identity(shelf: Shelf) -> None:
+    """Refuse before any write unless the selector exists and matches a recorded stamp."""
+    from palace.index.embedder_config import (
+        embedder_config_path,
+        identity_for,
+        load_embedder_config,
+    )
+    from palace.index.schema import assert_identity
+
+    from biblios.errors import UndeclaredEmbedderError
+    from biblios.progress import read_only_index, store_built
+
+    store = shelf.palace_store
+    if not embedder_config_path(store).exists():
+        raise UndeclaredEmbedderError(f"no embedder selector declared at {store}")
+    if store_built(shelf):
+        expected = identity_for(load_embedder_config(store))
+        with read_only_index(shelf.chunks_db) as conn:
+            assert_identity(conn, expected)
 
 
 def _session(root: Path, *, create: bool, read_only: bool = False) -> LocalSession:
@@ -793,6 +1023,18 @@ def init_shelf(root: Path, settings: Settings, *, name: str, description: str = 
     return shelf
 
 
+def _open_existing(opener: Callable[..., NamespaceHandle], root: Path, session) -> NamespaceHandle:
+    """Open an existing shelf's namespace; a format Castle refuses to open is the typed
+    :class:`NamespaceFormatError` naming the operator's explicit migration. Nothing here
+    migrates or alters the store."""
+    try:
+        return opener(root / NAMESPACE_DIR, root / CASTLE_DIR, session)
+    except NamespaceError as error:
+        if error.code == "namespace-format-unsupported":
+            raise NamespaceFormatError(root / NAMESPACE_DIR) from error
+        raise
+
+
 def open_shelf(root: Path) -> Shelf:
     """Open an existing shelf; a sealed one opens read-only through Castle's read-only
     handle; a manifest of another schema, or a sealed manifest without its record, is refused.
@@ -811,15 +1053,11 @@ def open_shelf(root: Path) -> Shelf:
                     f"incomplete seal at {root}: the manifest is sealed but {SEAL_NAME} is "
                     "missing; unseal to repair"
                 )
-            handle = open_namespace_readonly(
-                root / NAMESPACE_DIR,
-                root / CASTLE_DIR,
-                _session(root, create=False, read_only=True),
+            handle = _open_existing(
+                open_namespace_readonly, root, _session(root, create=False, read_only=True)
             )
         else:
-            handle = open_namespace(
-                root / NAMESPACE_DIR, root / CASTLE_DIR, _session(root, create=False)
-            )
+            handle = _open_existing(open_namespace, root, _session(root, create=False))
         try:
             current = ShelfManifest.read(root / MANIFEST_NAME)
             if current.mode == manifest.mode and (

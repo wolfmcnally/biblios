@@ -124,3 +124,45 @@ def indexed_fixture(directory: Path) -> ConsumerFixture:
     fixture.bound.curate(fixture.request(data=b"Lighthouse lens tide and harbour maintenance."))
     fixture.bound._shelf.reconcile(fixture.settings, embedder=HashEmbedder())
     return fixture
+
+
+LANE_POLICY_FIELDS = ("injected", "1", "escaped/1", "palace", "palace", "palace", "filename/1")
+
+
+def lane_pipeline(fixture, calls: list, *, embedder=None, reuse_converted_body: bool = False):
+    """A consumer-lane pipeline over the fixture's store: an injected converter that
+    records each source, a renderer with two body sections and a name section, each
+    chunk's literal body as its input, and the store's selector declaring the
+    representation."""
+    from palace.index.embedder_config import load_embedder_config, save_embedder_config
+
+    from biblios.pipeline import (
+        ConsumerPipeline,
+        ConversionResult,
+        DerivationPolicy,
+        MirrorDocument,
+    )
+    from biblios.testing import HashEmbedder
+
+    def converter(request):
+        calls.append(request.source)
+        return ConversionResult("converted", request.source.decode(), "injected", "1")
+
+    def renderer(result, name):
+        return MirrorDocument(
+            "# Body\n\n" + result.body + "\n\n## Extra\n\nIndependent body row.\n\n"
+            "## Filename\n\n" + name + "\n",
+            "Filename",
+        )
+
+    pipeline = ConsumerPipeline(
+        converter=converter,
+        renderer=renderer,
+        input_view=lambda plan: [row.body for row in plan.rows],
+        policy=DerivationPolicy(*LANE_POLICY_FIELDS, reuse_converted_body=reuse_converted_body),
+        embedder=embedder or HashEmbedder(),
+    )
+    root = fixture.binding.palace_root
+    selector = load_embedder_config(root)
+    save_embedder_config(root, replace(selector, representation=pipeline.representation))
+    return pipeline

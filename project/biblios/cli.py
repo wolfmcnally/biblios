@@ -41,6 +41,7 @@ def _parser() -> argparse.ArgumentParser:
         "tags": "Read a file's tags",
         "set-tags": "Replace a file's tags and optionally dates",
         "reconcile": "Bring mirrors and index up to date, reporting progress",
+        "grant": "Grant a never-converted entry its first mirror (explicit first ingestion)",
         "status": "Report the index's lag and per-entry progress",
         "verify": "Verify the shelf and, when sealed, its seal",
         "verify-seal": "Verify a sealed artifact's recorded digests",
@@ -52,6 +53,7 @@ def _parser() -> argparse.ArgumentParser:
         "download": "Write an entry's exact source bytes",
     }
     path_commands = {
+        "grant",
         "add",
         "mkdir",
         "update",
@@ -63,7 +65,7 @@ def _parser() -> argparse.ArgumentParser:
         "tags",
         "set-tags",
     }
-    mutations = {"add", "mkdir", "update", "rename", "move", "copy", "remove"}
+    mutations = {"add", "mkdir", "update", "rename", "move", "copy", "remove", "grant"}
     for name, help_text in descriptions.items():
         command = commands.add_parser(name, help=help_text, description=help_text)
         command.add_argument(
@@ -96,11 +98,16 @@ def _parser() -> argparse.ArgumentParser:
             command.add_argument("--config-root", type=Path, required=True)
         if name == "reconcile":
             command.add_argument(
-                "--materialize",
+                "--entry",
                 action="append",
-                default=[],
-                metavar="OPERATION_ID",
-                help="Create mirrors for the entries this copy operation created (repeatable)",
+                default=None,
+                metavar="ENTRY_ID",
+                help="Bring only this entry current, e.g. after editing its mirror (repeatable)",
+            )
+            command.add_argument(
+                "--sweep",
+                action="store_true",
+                help="Stat every recorded and live entry to find unobserved mirror edits",
             )
         if name == "init":
             command.add_argument("--name", required=True)
@@ -174,11 +181,14 @@ def _invoke(args: argparse.Namespace, resources: ExitStack) -> Any:
             )
         case "status":
             return shelf.index_status()
+        case "grant":
+            return shelf.grant_first_ingestion(args.path, operation_id=args.operation_id)
         case "reconcile":
             return shelf.reconcile(
                 load_settings(args.config, args.config_root),
                 progress=_progress,
-                materialize=tuple(args.materialize),
+                entry_ids=args.entry,
+                sweep=args.sweep,
             )
         case "verify" | "verify-seal" | "seal":
             return getattr(shelf, name.replace("-", "_"))()

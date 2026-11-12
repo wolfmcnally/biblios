@@ -115,14 +115,19 @@ def test_retired_epoch_or_expired_provider_return_never_accepts_hits(
                 "deadline-exceeded",
             ), "provider completion accepted an expired answer"
         else:
-            # The query connection is still live in this reentrant callback. The
-            # cutover commits, while derived rollback-journal cleanup must wait.
-            assert (performed, cleanup_errors, refused.value.code, fixture.bound.active_work) == (
-                [("derived-recovery-required", "recovery-required", True)],
-                [("OperationalError", sqlite3.SQLITE_BUSY)],
-                "callback-failed",
-                0,
-            ), "query/epoch race hid retirement, accepted hits, or lost pending cleanup"
+            # Palace prepares the query (expansion and embedding) before it admits the
+            # store, so no query connection is live in this reentrant callback: the
+            # cutover and its derived cleanup complete, and the search that was in flight
+            # is refused on the retired binding without accepting a hit.
+            assert (
+                [type(item).__name__ for item in performed],
+                cleanup_errors,
+                refused.value.code,
+                fixture.bound.active_work,
+            ) == (["ExcisionResult"], [], "closed", 0), (
+                "query/epoch race hid retirement, accepted hits, or lost cleanup"
+            )
+            assert performed[0].mutation.outcome == "committed" and fixture.bound._closed
             with pytest.raises(ConsumerError, match="closed"):
                 fixture.bound.files()
             session = LocalSession(

@@ -1317,3 +1317,70 @@ def test_nested():
                 target.with_suffix(".calls").read_text() == "attempt\n"
                 and len((root / "worker-starts").read_text().splitlines()) - starts_before == 2
             ), "WORKER CRASH RETRIED"
+
+
+def test_an_operator_witness_exception_exempts_only_its_named_admitted_proof(
+    estate: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Failure mode: an exception record exempts a proof it does not name, a baseline,
+    repaired or modified proof, or a malformed or stale record; or the exempted proof is
+    reported as witnessed instead of by name as unwitnessed."""
+    original = governance.load_ledger
+    admitted, kept = SAMPLE + "test_admitted", SAMPLE + "test_kept"
+    state: dict[str, object] = {"receipts": False, "exceptions": []}
+
+    def altered(path: Path):
+        rows = original(path)
+        if path.name == "witnesses.jsonl":
+            return rows if state["receipts"] else []
+        if path.name == "reset.jsonl":
+            baseline = rows[0]["baseline_inventory_sha256"]
+            return [
+                *rows,
+                *(
+                    dict(
+                        row,
+                        baseline_inventory_sha256=row.get("baseline_inventory_sha256", baseline),
+                    )
+                    for row in state["exceptions"]
+                ),
+            ]
+        return rows
+
+    def exception(proof_id: str = admitted, **changes: object) -> dict[str, object]:
+        row: dict[str, object] = {
+            "record_type": "proof_witness_exception",
+            "proof_id": proof_id,
+            "authority": "operator, relayed by the coordinator",
+            "approved_at": "2026-11-12T15:52:57Z",
+            "reason": "released unwitnessed by a named operator exception",
+        }
+        row.update(changes)
+        return row
+
+    monkeypatch.setattr(governance, "load_ledger", altered)
+    state["exceptions"] = [exception()]
+    summary = governance.validate(estate)
+    assert summary["unwitnessed_by_exception"] == [admitted]
+    state["receipts"] = True
+    assert governance.validate(estate)["unwitnessed_by_exception"] == []
+    state["receipts"] = False
+    refusals = {
+        "names no active admitted proof": [exception(kept)],
+        "is recorded more than once": [exception(), exception()],
+        "has no reason": [exception(reason=" ")],
+        "has no ISO-8601 UTC approval time": [exception(approved_at="2026-11-12")],
+        "is bound to a stale baseline": [exception(baseline_inventory_sha256="0" * 64)],
+        "wrong witness exception fields": [exception(note="extra")],
+        "names a repaired or modified proof": [
+            exception(),
+            {"record_type": "proof_repair", "proof_id": admitted},
+        ],
+    }
+    for message, rows in refusals.items():
+        state["exceptions"] = rows
+        with pytest.raises(governance.GovernanceError, match=message) as refused:
+            governance.validate(estate)
+        if message == "names no active admitted proof":
+            # The proof the operator did not name still needs its receipt.
+            assert "admitted or repaired proof has no witness receipt" in str(refused.value)

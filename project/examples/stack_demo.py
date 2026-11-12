@@ -172,8 +172,8 @@ def main(argv: list[str]) -> int:
                         f"  [{shelf_name}] {hit.path} heading={hit.heading!r} rerank={hit.rerank_status}"
                     )
                     print("     ", hit.chunk[:120].replace("\n", " "))
-                if result.refused:
-                    print(f"refused (not live or not current): {result.refused}")
+                if result.withheld:
+                    print(f"withheld (not live or not current): {result.withheld}")
             elif command == "add" and len(rest) == 2 and rest[0] in workers:
                 file = Path(rest[1]).expanduser()
                 worker = workers[rest[0]]

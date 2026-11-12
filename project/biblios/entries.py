@@ -1,12 +1,13 @@
 """The ``biblios.entry/1`` metadata schema and the public view of a namespace entry.
 
-Castle's namespace is the only catalog. Everything Biblios knows about a file lives in the
-entry's metadata map under this schema and is validated on every read.
+Castle's namespace is the only catalog of entries and their descriptive metadata. What
+Biblios knows about indexing an entry lives in its own derived store
+(:mod:`biblios.derived`), never in Castle metadata.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any
 
 from castle.namespace import EntryRecord
@@ -16,32 +17,13 @@ from biblios.errors import BibliosError
 ENTRY_SCHEMA = "biblios.entry/1"
 """Schema identifier carried by every entry's metadata."""
 
-CONVERTED = "converted"
-UNCONVERTED_PREFIX = "unconverted:"
-
-_FILE_FIELDS = {
-    "schema",
-    "media_type",
-    "display_name",
-    "added_at",
-    "converter",
-    "converter_version",
-    "mirror_sha256",
-    "source_cas_id",
-    "conversion",
-    "tags",
-    "dates",
-}
-_STRING_FIELDS = (
-    "media_type",
-    "display_name",
-    "added_at",
-    "converter",
-    "converter_version",
-    "mirror_sha256",
-    "source_cas_id",
-    "conversion",
+_FILE_FIELDS = frozenset({"schema", "media_type", "display_name", "added_at", "tags", "dates"})
+_STRING_FIELDS = ("media_type", "display_name", "added_at")
+LEGACY_FIELDS = frozenset(
+    {"converter", "converter_version", "mirror_sha256", "source_cas_id", "conversion"}
 )
+"""Indexing fields earlier releases kept in Castle metadata. Only the bounded preservation
+import reads them; every metadata write carries them through verbatim and none adds them."""
 
 DIRECTORY_METADATA: dict[str, Any] = {"schema": ENTRY_SCHEMA, "kind": "directory"}
 
@@ -52,53 +34,16 @@ class EntryMetadataError(BibliosError):
 
 @dataclass(frozen=True, slots=True)
 class EntryMetadata:
-    """What Biblios records about one file entry.
-
-    ``source_cas_id`` is the content address the recorded conversion ran over. A live
-    entry whose cas id differs has been replaced since, and its mirror is stale.
-    """
+    """What Biblios records in Castle about one file entry: descriptive fields only."""
 
     media_type: str
     display_name: str
     added_at: str
-    converter: str = ""
-    converter_version: str = ""
-    mirror_sha256: str = ""
-    source_cas_id: str = ""
-    conversion: str = ""
     tags: tuple[str, ...] = ()
     dates: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def converted(self) -> bool:
-        return self.conversion == CONVERTED
-
-    @property
-    def pending(self) -> bool:
-        """No conversion has been recorded yet."""
-        return self.conversion == ""
-
-    def current_for(self, cas_id: str | None) -> bool:
-        """Whether the recorded conversion was run over the entry's live bytes."""
-        return not self.pending and self.source_cas_id == cas_id
-
-    def with_conversion(
-        self,
-        *,
-        converter: str,
-        converter_version: str,
-        mirror_sha256: str,
-        source_cas_id: str,
-        conversion: str,
-    ) -> EntryMetadata:
-        return replace(
-            self,
-            converter=converter,
-            converter_version=converter_version,
-            mirror_sha256=mirror_sha256,
-            source_cas_id=source_cas_id,
-            conversion=conversion,
-        )
+    legacy: dict[str, str] = field(default_factory=dict)
+    """The five legacy indexing keys exactly as stored, or empty; opaque to everything
+    except the preservation import."""
 
     def to_mapping(self) -> dict[str, Any]:
         return {
@@ -106,27 +51,24 @@ class EntryMetadata:
             "media_type": self.media_type,
             "display_name": self.display_name,
             "added_at": self.added_at,
-            "converter": self.converter,
-            "converter_version": self.converter_version,
-            "mirror_sha256": self.mirror_sha256,
-            "source_cas_id": self.source_cas_id,
-            "conversion": self.conversion,
             "tags": list(self.tags),
             "dates": dict(self.dates),
+            **self.legacy,
         }
 
     @classmethod
     def from_mapping(cls, value: Any) -> EntryMetadata:
-        if not isinstance(value, dict) or set(value) != _FILE_FIELDS:
+        if not isinstance(value, dict):
+            raise EntryMetadataError("entry metadata does not carry the biblios.entry/1 fields")
+        keys = set(value)
+        legacy_keys = keys - _FILE_FIELDS
+        if not _FILE_FIELDS <= keys or legacy_keys not in (set(), set(LEGACY_FIELDS)):
             raise EntryMetadataError("entry metadata does not carry the biblios.entry/1 fields")
         if value["schema"] != ENTRY_SCHEMA:
             raise EntryMetadataError(f"unsupported entry schema: {value['schema']!r}")
-        for key in _STRING_FIELDS:
+        for key in (*_STRING_FIELDS, *sorted(legacy_keys)):
             if not isinstance(value[key], str):
                 raise EntryMetadataError(f"entry metadata field {key} must be a string")
-        conversion = value["conversion"]
-        if conversion not in ("", CONVERTED) and not conversion.startswith(UNCONVERTED_PREFIX):
-            raise EntryMetadataError(f"unknown conversion state: {conversion!r}")
         tags = value["tags"]
         if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise EntryMetadataError("entry tags must be a list of strings")
@@ -139,13 +81,9 @@ class EntryMetadata:
             media_type=value["media_type"],
             display_name=value["display_name"],
             added_at=value["added_at"],
-            converter=value["converter"],
-            converter_version=value["converter_version"],
-            mirror_sha256=value["mirror_sha256"],
-            source_cas_id=value["source_cas_id"],
-            conversion=conversion,
             tags=tuple(tags),
             dates=dict(dates),
+            legacy={key: value[key] for key in sorted(legacy_keys)},
         )
 
 
@@ -164,15 +102,6 @@ class Entry:
     def is_file(self) -> bool:
         return self.kind == "file"
 
-    @property
-    def conversion_current(self) -> bool:
-        """A conversion is recorded over the live bytes; the mirror's own state is separate."""
-        return (
-            self.metadata is not None
-            and self.metadata.converted
-            and self.metadata.current_for(self.cas_id)
-        )
-
 
 def path_of(entry_id: str, live: dict[str, EntryRecord], root_id: str) -> str:
     """Resolve an entry's current path from the live tree."""
@@ -188,7 +117,7 @@ def path_of(entry_id: str, live: dict[str, EntryRecord], root_id: str) -> str:
 
 def view(record: EntryRecord, live: dict[str, EntryRecord], root_id: str) -> Entry:
     # Castle's explicit metadata-only excision preserves the live entry with {}.
-    # Absence is redaction, never newly invented conversion or descriptive data.
+    # Absence is redaction, never newly invented descriptive data.
     metadata = (
         EntryMetadata.from_mapping(record.metadata)
         if record.kind == "file" and record.metadata != {}

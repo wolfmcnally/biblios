@@ -179,9 +179,11 @@ def test_dynamic_readonly_read_and_refused_write_create_no_sidecars(tmp_path: Pa
                 )
             )
         reader.close()
+        # Ordinary status is the maintained counters: the live-file count is unknown
+        # (None, never a guessed number) until Castle's constant-cost count is adopted.
         assert (found, status.files, refused.value.code, inventory(fixture.binding.root)) == (
             b"source-marker",
-            1,
+            None,
             "read-only",
             before,
         ), "dynamic read-only operations wrote or created a sidecar"

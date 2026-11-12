@@ -27,7 +27,8 @@ def test_verify_detects_tampering_stale_binding_missing_rows_and_a_wrong_stamp(
         report = shelf.verify()
         assert not report.ok
         assert any("mirror digest differs" in p and notes.entry_id in p for p in report.problems)
-        shelf.reconcile(settings, embedder=HashEmbedder())
+        # A direct edit is indexed when it is named (or swept), never by plain discovery.
+        shelf.reconcile(settings, embedder=HashEmbedder(), entry_ids=[notes.entry_id])
         assert shelf.verify().ok
 
         shelf.update("tide.txt", NOTES.encode() + b"\nchanged\n")

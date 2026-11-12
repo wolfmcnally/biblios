@@ -1,0 +1,10 @@
+{
+  "from": null,
+  "id": "f29fd45ea21741c6a46f961e481fb023",
+  "owner": null,
+  "phase": "unified-indexing-core",
+  "previous": null,
+  "reason": "New phase; not a claim or acceptance",
+  "state": "not-started",
+  "writer": "biblios-opus-successor"
+}

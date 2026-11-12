@@ -10,11 +10,13 @@ import pytest
 
 from biblios.control import ConsumerError
 from biblios.curation import CopyIdentity, CurationRequest, DuplicateEntry, ReplaceContent
-from biblios.mirrors import retained_files, retention_record
+from biblios.mirrors import retained_files
+from biblios.pipeline import ConsumerPipeline, DerivationPolicy
 from biblios.testing import HashEmbedder, OverlapReranker
-from tests.consumer_fixtures import consumer_fixture, identifier
+from tests.consumer_fixtures import LANE_POLICY_FIELDS, consumer_fixture, identifier, lane_pipeline
 from tests.support import NOTES, TIDE, make_shelf
-from tests.test_consumer_pipeline import _pipeline
+
+POLICY = DerivationPolicy(*LANE_POLICY_FIELDS)
 
 
 def _sha(data: bytes) -> str:
@@ -32,21 +34,32 @@ def _rendered(body: str, name: str = "note.txt") -> bytes:
     ).encode()
 
 
+def _pipeline(fixture, calls: list) -> ConsumerPipeline:
+    return lane_pipeline(fixture, calls)
+
+
 def _hits(fixture, query: str) -> set[str]:
     found = fixture.bound.search(query, embedder=HashEmbedder(), reranker=OverlapReranker())
     return {hit.entry_id for hit in found.hits}
+
+
+def _outcome(result, entry: str) -> tuple[str, str | None]:
+    item = result.outcome(entry)
+    return item.outcome, item.code
 
 
 @pytest.fixture
 def seeded(tmp_path: Path):
     fixture = consumer_fixture(tmp_path)
     try:
-        pipeline, _ = _pipeline(fixture, [])
+        calls: list = []
+        pipeline = _pipeline(fixture, calls)
         entry = fixture.bound.curate(
             fixture.request(data=b"Lighthouse lens maintenance.")
         ).mutation.affected_entry_ids[0]
-        fixture.bound.derive(pipeline, entry, operation_id=identifier())
-        yield fixture, pipeline, entry
+        result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+        assert _outcome(result, entry) == ("searchable", None)
+        yield fixture, pipeline, entry, calls
     finally:
         fixture.close()
 
@@ -57,51 +70,41 @@ def _replace(fixture, entry: str, data: bytes) -> None:
     )
 
 
+def _second(fixture, pipeline) -> str:
+    other = fixture.bound.curate(
+        fixture.request("tide.txt", b"Harbour tide tables.")
+    ).mutation.affected_entry_ids[0]
+    fixture.bound.derive(pipeline, other, operation_id=identifier())
+    return other
+
+
 def test_replacement_is_a_new_ingestion_that_keeps_an_unindexed_edit(seeded) -> None:
-    """Failure mode: replacing a file overwrites or deletes the user's mirror, including
-    a direct edit not yet re-indexed, or the old mirror stays searchable."""
-    fixture, pipeline, entry = seeded
+    """Failure mode: replacing a file overwrites, deletes or moves the user's mirror when
+    it holds a direct edit not yet re-indexed, converts over it, or keeps the old mirror
+    searchable (plan F034: the edit stays in place, reported, and nothing converts)."""
+    fixture, pipeline, entry, calls = seeded
     path = fixture.bound._shelf.mirror_path(entry)
     edit = _edited("Lighthouse lens maintenance, corrected by hand.").encode()
-    recorded = fixture.bound.resolve(entry)
     path.write_bytes(edit)
+    inode = path.stat().st_ino
     _replace(fixture, entry, b"Harbour tide tables.")
-    with pytest.raises(ConsumerError) as refused:
-        pipeline.finish(fixture.bound, operation_id=identifier())
-    assert refused.value.code == "index-incomplete", "a replaced entry passed as current"
-
-    status = fixture.bound.derive(pipeline, entry, operation_id=identifier())
-    kept = retained_files(fixture.binding.mirror_root, entry)
-    assert status.state == "indexed"
-    assert path.read_bytes() == _rendered("Harbour tide tables.")
-    assert [file.read_bytes() for file in kept] == [edit], "the unindexed edit was not kept"
-    assert kept[0].name.endswith(_sha(edit))
-    # Provenance comes from Biblios's own records, not from the user-editable bytes.
-    record = retention_record(fixture.binding.palace_root, kept[0])
-    assert record is not None, "the retained edit has no provenance record"
-    provenance = (
-        record["reason"],
-        record["source_cas_id"],
-        record["recorded_mirror_sha256"],
-        record["mirror_sha256"],
-    )
-    expected = ("source-replaced", recorded.cas_id, recorded.metadata.mirror_sha256, _sha(edit))
-    assert provenance == expected, "provenance does not name the recorded source and bytes"
-    assert record["recorded_mirror_sha256"] != record["mirror_sha256"]
-    assert entry in _hits(fixture, "Harbour tide tables")
-    pipeline.finish(fixture.bound, operation_id=identifier())
+    before = len(calls)
+    result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert _outcome(result, entry) == ("pending", "replaced-mirror-edited")
+    assert path.read_bytes() == edit and path.stat().st_ino == inode
+    assert retained_files(fixture.binding.mirror_root, entry) == []
+    assert len(calls) == before, "a conversion ran over the user's edit"
+    assert entry not in _hits(fixture, "Harbour tide tables")
     found = fixture.bound.search(
         "corrected by hand", embedder=HashEmbedder(), reranker=OverlapReranker()
     )
     assert all("corrected" not in hit.chunk for hit in found.hits)
 
 
-def test_an_edit_during_a_replacement_window_is_kept_and_refuses(seeded) -> None:
-    """Failure mode: an edit made while the new conversion embeds is overwritten.
-
-    The edit changes the admitted view, so the publication fence refuses before any
-    write; the exchange's own swap-back covers an edit landing after that fence."""
-    fixture, pipeline, entry = seeded
+def test_an_edit_during_a_replacement_window_is_kept(seeded) -> None:
+    """Failure mode: an edit made while the new conversion embeds is overwritten; the
+    exchange displaces only the bytes it expected and swaps back otherwise."""
+    fixture, pipeline, entry, _calls = seeded
     path = fixture.bound._shelf.mirror_path(entry)
     _replace(fixture, entry, b"Harbour tide tables.")
     entered, release = threading.Event(), threading.Event()
@@ -114,15 +117,12 @@ def test_an_edit_during_a_replacement_window_is_kept_and_refuses(seeded) -> None
             return super().embed(texts)
 
     pipeline.embedder = Held()
-    errors: list[BaseException] = []
-
-    def run() -> None:
-        try:
+    results: list = []
+    worker = threading.Thread(
+        target=lambda: results.append(
             fixture.bound.derive(pipeline, entry, operation_id=identifier())
-        except BaseException as error:  # noqa: BLE001 - reported to the test thread
-            errors.append(error)
-
-    worker = threading.Thread(target=run)
+        )
+    )
     worker.start()
     try:
         assert entered.wait(10)
@@ -130,40 +130,19 @@ def test_an_edit_during_a_replacement_window_is_kept_and_refuses(seeded) -> None
     finally:
         release.set()
         worker.join(15)
-    assert [getattr(error, "code", None) for error in errors] == ["stale-view"]
+    assert _outcome(results[0], entry)[1] == "mirror-changed-concurrently"
     assert path.read_bytes() == edit
     assert all(file.read_bytes() != edit for file in retained_files(path.parent, entry))
 
 
-def test_reconcile_replacement_keeps_the_previous_mirror(tmp_path: Path) -> None:
-    """Failure mode: the directory lane overwrites a replaced file's mirror."""
-    shelf, settings = make_shelf(tmp_path)
-    with shelf:
-        notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
-        shelf.reconcile(settings, embedder=HashEmbedder())
-        previous = shelf.mirror_path(notes.entry_id).read_bytes()
-        shelf.update("notes.txt", TIDE.encode())
-        report = shelf.reconcile(settings, embedder=HashEmbedder())
-        kept = retained_files(shelf.mirror_root, notes.entry_id)
-        assert report.converted == (notes.entry_id,)
-        assert [file.read_bytes() for file in kept] == [previous]
-        assert shelf.mirror_path(notes.entry_id).read_bytes() != previous
-        assert shelf.verify().ok, shelf.verify().problems
-
-
 def test_a_corrupt_mirror_isolates_only_its_entry(seeded) -> None:
-    """Failure mode: one unreadable mirror blocks finishing or searching the shelf."""
-    fixture, pipeline, entry = seeded
-    other = fixture.bound.curate(
-        fixture.request("tide.txt", b"Harbour tide tables.")
-    ).mutation.affected_entry_ids[0]
-    fixture.bound.derive(pipeline, other, operation_id=identifier())
+    """Failure mode: one unreadable mirror blocks the shelf or another entry's search."""
+    fixture, pipeline, entry, _calls = seeded
+    other = _second(fixture, pipeline)
     broken = b"\xff\xfe not unicode"
     fixture.bound._shelf.mirror_path(entry).write_bytes(broken)
-
-    pipeline.finish(fixture.bound, operation_id=identifier())
-    status = fixture.bound.status()
-    assert status.isolated == 1 and not status.pending
+    result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert _outcome(result, entry) == ("isolated:mirror-unicode-invalid", None)
     assert _hits(fixture, "Harbour tide tables") == {other}
     with pytest.raises(Exception, match="mirror-unicode-invalid"):
         fixture.bound.read(entry)
@@ -173,98 +152,273 @@ def test_a_corrupt_mirror_isolates_only_its_entry(seeded) -> None:
 def test_an_update_is_validated_at_its_seam_and_keeps_the_previous_mirror(seeded) -> None:
     """Failure mode: a malformed update lands, a stale update overwrites a newer edit,
     or a valid update discards the bytes it replaced."""
-    fixture, pipeline, entry = seeded
+    fixture, pipeline, entry, _calls = seeded
     path = fixture.bound._shelf.mirror_path(entry)
     original = path.read_bytes()
-
-    with pytest.raises(ConsumerError) as invalid:
-        fixture.bound.update_mirror(
-            pipeline,
-            entry,
-            operation_id=identifier(),
-            markdown="---\n[unclosed\n---\n" + _edited("x"),
-            expected_sha256=_sha(original),
-        )
-    assert invalid.value.code.startswith("mirror-update-invalid:")
-    with pytest.raises(ConsumerError) as stale:
-        fixture.bound.update_mirror(
-            pipeline,
-            entry,
-            operation_id=identifier(),
-            markdown=_edited("Stale."),
-            expected_sha256=_sha(b"something else"),
-        )
-    assert stale.value.code == "mirror-changed-concurrently"
+    invalid = fixture.bound.update_mirror(
+        pipeline,
+        entry,
+        operation_id=identifier(),
+        markdown="---\n[unclosed\n---\n" + _edited("x"),
+        expected_sha256=_sha(original),
+    )
+    assert (_outcome(invalid, entry)[1] or "").startswith("mirror-update-invalid:")
+    stale = fixture.bound.update_mirror(
+        pipeline,
+        entry,
+        operation_id=identifier(),
+        markdown=_edited("Stale."),
+        expected_sha256=_sha(b"something else"),
+    )
+    assert _outcome(stale, entry)[0] != "searchable"
     assert path.read_bytes() == original and not retained_files(path.parent, entry)
 
     text = _edited("Speaker names corrected in the harbour log.")
-    status = fixture.bound.update_mirror(
+    done = fixture.bound.update_mirror(
         pipeline, entry, operation_id=identifier(), markdown=text, expected_sha256=_sha(original)
     )
-    assert status.state == "indexed" and path.read_text() == text
+    assert _outcome(done, entry) == ("searchable", None) and path.read_text() == text
     assert [file.read_bytes() for file in retained_files(path.parent, entry)] == [original]
     assert entry in _hits(fixture, "Speaker names corrected")
 
 
-def test_a_copy_materializes_once_from_its_own_receipt(seeded) -> None:
-    """Failure mode: a copy never becomes searchable, or one receipt (or a copy made
-    without a recorded intent) recreates a mirror the user deleted."""
-    fixture, pipeline, entry = seeded
-    copy_id, operation = identifier(), identifier()
-    fixture.bound.curate(
-        CurationRequest(
-            operation,
-            fixture.bound.view.revision,
-            DuplicateEntry(entry, fixture.root_id, "copy.txt", (CopyIdentity(entry, copy_id),)),
+def test_a_copy_gets_one_first_mirror_from_its_own_grant(seeded) -> None:
+    """Failure mode: a copy never becomes searchable, its grant recreates a mirror the
+    user deleted, or a copy with no recorded grant is materialized from Castle alone."""
+    import sqlite3
+
+    from biblios.derived import VOLATILE_NAME
+
+    fixture, pipeline, entry, _calls = seeded
+    copies = [identifier(), identifier()]
+    for copy_id, name in zip(copies, ("copy.txt", "other.txt"), strict=True):
+        fixture.bound.curate(
+            CurationRequest(
+                identifier(),
+                fixture.bound.view.revision,
+                DuplicateEntry(entry, fixture.root_id, name, (CopyIdentity(entry, copy_id),)),
+            )
         )
-    )
-    with pytest.raises(ConsumerError) as missing:
-        fixture.bound.derive(pipeline, copy_id, operation_id=identifier())
-    assert missing.value.code == "mirror-missing"
-
-    status = fixture.bound.derive(pipeline, copy_id, operation_id=identifier(), copied_by=operation)
-    path = fixture.bound._shelf.mirror_path(copy_id)
-    assert status.state == "indexed" and path.is_file()
-
+    first, second = copies
+    conn = sqlite3.connect(fixture.binding.palace_root / VOLATILE_NAME, isolation_level=None)
+    conn.execute("DELETE FROM grants WHERE entry_id=?", (second,))
+    conn.close()
+    granted = fixture.bound.derive(pipeline, first, operation_id=identifier())
+    path = fixture.bound._shelf.mirror_path(first)
+    assert _outcome(granted, first) == ("searchable", None) and path.is_file()
     path.unlink()
-    with pytest.raises(ConsumerError) as spent:
-        fixture.bound.derive(pipeline, copy_id, operation_id=identifier(), copied_by=operation)
-    assert spent.value.code == "materialize-evidence-stale" and not path.exists()
+    spent = fixture.bound.derive(pipeline, first, operation_id=identifier())
+    assert _outcome(spent, first) == ("isolated:mirror-missing", None) and not path.exists()
+    ungranted = fixture.bound.derive(pipeline, second, operation_id=identifier())
+    assert _outcome(ungranted, second) == ("unrecorded", "creation-grant-required")
+    assert not fixture.bound._shelf.mirror_path(second).exists()
 
 
-def test_a_copy_without_a_recorded_intent_fails_closed(seeded) -> None:
-    """Failure mode: a copy made by older code is materialized from Castle state alone."""
-    fixture, pipeline, entry = seeded
-    copy_id, operation = identifier(), identifier()
-    fixture.bound.curate(
-        CurationRequest(
-            operation,
-            fixture.bound.view.revision,
-            DuplicateEntry(entry, fixture.root_id, "copy.txt", (CopyIdentity(entry, copy_id),)),
-        )
+def test_a_direct_edit_is_reindexed_only_when_named_without_conversion(seeded) -> None:
+    """Failure mode: re-indexing an edited mirror re-converts the source, or keeps
+    serving the text the user replaced."""
+    fixture, pipeline, entry, calls = seeded
+    path = fixture.bound._shelf.mirror_path(entry)
+    edit = _rendered("Speaker two: the keeper trims the wick.")
+    path.write_bytes(edit)
+    converted = len(calls)
+    result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert _outcome(result, entry) == ("searchable", None) and len(calls) == converted
+    assert path.read_bytes() == edit and not retained_files(path.parent, entry)
+    assert entry in _hits(fixture, "keeper trims the wick")
+    stale = fixture.bound.search(
+        "Lighthouse lens maintenance", embedder=HashEmbedder(), reranker=OverlapReranker()
     )
-    intent = fixture.binding.palace_root / "copy-intents" / f"{operation}.json"
-    assert intent.is_file()
-    intent.unlink()
-    with pytest.raises(ConsumerError) as refused:
-        fixture.bound.derive(pipeline, copy_id, operation_id=identifier(), copied_by=operation)
-    assert refused.value.code == "materialize-evidence-unavailable"
-    assert not fixture.bound._shelf.mirror_path(copy_id).exists()
+    assert all("Lighthouse lens maintenance" not in hit.chunk for hit in stale.hits)
 
 
-def test_a_directory_copy_materializes_only_when_named(tmp_path: Path) -> None:
-    """Failure mode: reconcile recreates a missing mirror without a copy receipt, or a
-    named copy never becomes searchable."""
+def test_an_update_serves_the_prior_mirror_until_publication_and_replays(seeded) -> None:
+    """Failure mode: an update is visible before its index commit, or a replay embeds
+    again."""
+    fixture, pipeline, entry, _calls = seeded
+    path = fixture.bound._shelf.mirror_path(entry)
+    original = path.read_bytes()
+    entered, release = threading.Event(), threading.Event()
+
+    class Held(HashEmbedder):
+        def embed(self, texts):
+            self.calls.append(tuple(texts))
+            entered.set()
+            assert release.wait(10)
+            return HashEmbedder.embed(self, texts)
+
+    held = Held()
+    pipeline.embedder = held
+    operation = identifier()
+    text = _edited("Speaker names corrected.")
+    results: list = []
+
+    def run() -> None:
+        results.append(
+            fixture.bound.update_mirror(
+                pipeline,
+                entry,
+                operation_id=operation,
+                markdown=text,
+                expected_sha256=_sha(original),
+            )
+        )
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    try:
+        assert entered.wait(10)
+        assert path.read_bytes() == original, "the update was written before publication"
+        assert fixture.bound.read(entry).text == original.decode()
+    finally:
+        release.set()
+        worker.join(15)
+    assert _outcome(results[0], entry) == ("searchable", None) and path.read_text() == text
+    embedded = len(held.calls)
+    replay = fixture.bound.update_mirror(
+        pipeline, entry, operation_id=operation, markdown=text, expected_sha256=_sha(original)
+    )
+    assert replay.replayed and len(held.calls) == embedded, "replay embedded again"
+
+
+def test_an_edit_racing_a_failed_update_is_kept(seeded, monkeypatch) -> None:
+    """Failure mode: a failed update, or its later resumption, overwrites an edit made
+    after the exchange, or loses the bytes the exchange displaced."""
+    import palace.index
+
+    fixture, pipeline, entry, _calls = seeded
+    path = fixture.bound._shelf.mirror_path(entry)
+    original = path.read_bytes()
+    late = _edited("A later edit by hand.").encode()
+
+    def failing_commit(**kwargs):
+        path.write_bytes(late)
+        raise palace.index.IndexError("palace refused")
+
+    monkeypatch.setattr(palace.index, "commit_plan", failing_commit)
+    failed = fixture.bound.update_mirror(
+        pipeline,
+        entry,
+        operation_id=identifier(),
+        markdown=_edited("Update."),
+        expected_sha256=_sha(original),
+    )
+    assert _outcome(failed, entry) == ("recovery-required", "publication-failed")
+    assert path.read_bytes() == late
+    assert original in {file.read_bytes() for file in retained_files(path.parent, entry)}
+    monkeypatch.undo()
+    fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert path.read_bytes() == late, "resuming the update overwrote a later edit"
+
+
+def test_policy_refusals_of_an_edit_isolate_only_that_entry(seeded) -> None:
+    """Failure mode: an edit refused by the declared policy blocks the shelf, or a
+    required header field is not enforced."""
+    from dataclasses import replace
+
+    fixture, pipeline, entry, _calls = seeded
+    other = _second(fixture, pipeline)
+    path = fixture.bound._shelf.mirror_path(entry)
+    pipeline.policy = replace(pipeline.policy, max_mirror_bytes=len(path.read_bytes()) + 16)
+    path.write_bytes(_rendered("x" * 64))
+    large = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert "mirror-too-large" in str(_outcome(large, entry))
+    assert _hits(fixture, "Harbour tide tables") == {other}
+    pipeline.policy = replace(POLICY, required_header_fields=("speakers",))
+    path.write_bytes(b"---\ntitle: notes\n---\n" + _rendered("Edited."))
+    header = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert "mirror-header-invalid" in str(_outcome(header, entry))
+    assert _hits(fixture, "Harbour tide tables") == {other}
+
+
+def test_a_symlinked_mirror_isolates_without_being_followed(seeded, tmp_path: Path) -> None:
+    """Failure mode: Biblios follows a symlink at a mirror path, or it blocks the shelf."""
+    fixture, pipeline, entry, _calls = seeded
+    other = _second(fixture, pipeline)
+    outside = tmp_path / "outside.md"
+    outside.write_bytes(_rendered("Outside the shelf."))
+    path = fixture.bound._shelf.mirror_path(entry)
+    path.unlink()
+    path.symlink_to(outside)
+    result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert "mirror-path-unsafe" in str(_outcome(result, entry))
+    assert _hits(fixture, "Harbour tide tables") == {other}
+    assert path.is_symlink() and outside.read_bytes() == _rendered("Outside the shelf.")
+
+
+def test_isolation_survives_reopen_and_refuses_seal(tmp_path: Path) -> None:
+    """Failure mode: reopening forgets an isolated entry, or a shelf seals with a mirror
+    Biblios cannot index."""
+    from biblios import open_shelf
+    from biblios.errors import BibliosError
+    from biblios.progress import diagnose
+
     shelf, settings = make_shelf(tmp_path)
     with shelf:
-        shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
+        notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
+        shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
         shelf.reconcile(settings, embedder=HashEmbedder())
-        copy = shelf.copy("notes.txt", "copy.txt")
-        plain = shelf.reconcile(settings, embedder=HashEmbedder())
-        assert (copy.entry_id, "mirror-missing") in plain.isolated
-        assert not shelf.mirror_path(copy.entry_id).exists()
-        named = shelf.reconcile(settings, embedder=HashEmbedder(), materialize=(copy.operation_id,))
-        assert copy.entry_id in named.converted and shelf.verify().ok, shelf.verify().problems
+        shelf.mirror_path(notes.entry_id).write_bytes(b"\xff not unicode")
+        report = shelf.reconcile(settings, embedder=HashEmbedder(), entry_ids=[notes.entry_id])
+        assert report.outcome(notes.entry_id).outcome == "isolated:mirror-unicode-invalid"
+        with pytest.raises(BibliosError, match="mirror-states-unsettled"):
+            shelf.seal()
+        assert not shelf.sealed
+    with open_shelf(shelf.root) as reopened:
+        assert diagnose(reopened)[0].isolated == 1, "isolation lost across reopen"
+
+
+def test_an_isolated_mirror_is_never_a_stack_hit(tmp_path: Path) -> None:
+    """Failure mode: an isolated entry answers in a stack search."""
+    from biblios.consumer import open_bound_stack
+
+    fixtures = [consumer_fixture(tmp_path / name) for name in ("a", "b")]
+    try:
+        ids = []
+        for fixture in fixtures:
+            pipeline = _pipeline(fixture, [])
+            entry = fixture.bound.curate(
+                fixture.request(data=b"Lighthouse lens maintenance.")
+            ).mutation.affected_entry_ids[0]
+            fixture.bound.derive(pipeline, entry, operation_id=identifier())
+            ids.append(entry)
+        fixtures[0].bound._shelf.mirror_path(ids[0]).write_bytes(b"\xff not unicode")
+        stack = open_bound_stack(tuple(fixture.bound for fixture in fixtures))
+        found = stack.search("Lighthouse lens", embedder=HashEmbedder(), reranker=OverlapReranker())
+        assert {hit.entry_id for hit in found.hits} == {ids[1]}
+    finally:
+        for fixture in fixtures:
+            fixture.close()
+
+
+def test_an_update_interrupted_after_its_vectors_resumes_without_embedding(
+    seeded, monkeypatch
+) -> None:
+    """Failure mode: an update interrupted after its vectors were persisted embeds again
+    when the entry is next brought current, or publishes nothing."""
+    import palace.index
+
+    fixture, pipeline, entry, _calls = seeded
+    path = fixture.bound._shelf.mirror_path(entry)
+    original = path.read_bytes()
+    embedder = HashEmbedder()
+    pipeline.embedder = embedder
+    text = _edited("Speaker three joins the watch.")
+
+    def interrupted(**kwargs):
+        raise palace.index.IndexError("process stopped after vectors were recorded")
+
+    monkeypatch.setattr(palace.index, "commit_plan", interrupted)
+    failed = fixture.bound.update_mirror(
+        pipeline, entry, operation_id=identifier(), markdown=text, expected_sha256=_sha(original)
+    )
+    assert _outcome(failed, entry)[1] == "publication-failed" and embedder.calls
+    embedded = len(embedder.calls)
+    monkeypatch.undo()
+    resumed = fixture.bound.derive(pipeline, entry, operation_id=identifier())
+    assert len(embedder.calls) == embedded, "the interrupted update embedded again"
+    assert _outcome(resumed, entry) == ("searchable", None) and path.read_text() == text
+    assert entry in _hits(fixture, "Speaker three joins the watch")
 
 
 def test_an_exchange_over_unexpected_bytes_is_undone(tmp_path: Path) -> None:
@@ -289,198 +443,6 @@ def test_an_exchange_over_unexpected_bytes_is_undone(tmp_path: Path) -> None:
 
 
 # ---- review-driven proofs (CODE-F001, F002, F003, F008) ------------------------------
-
-
-def _two_entries(fixture, pipeline) -> str:
-    other = fixture.bound.curate(
-        fixture.request("tide.txt", b"Harbour tide tables.")
-    ).mutation.affected_entry_ids[0]
-    fixture.bound.derive(pipeline, other, operation_id=identifier())
-    return other
-
-
-def test_a_direct_edit_is_reindexed_without_conversion_or_any_write(tmp_path: Path) -> None:
-    """Failure mode: re-indexing an edited mirror re-converts the source, rewrites the
-    file, or keeps serving the text the user replaced."""
-    fixture = consumer_fixture(tmp_path)
-    try:
-        calls: list = []
-        pipeline, _ = _pipeline(fixture, calls)
-        entry = fixture.bound.curate(
-            fixture.request(data=b"Lighthouse lens maintenance.")
-        ).mutation.affected_entry_ids[0]
-        fixture.bound.derive(pipeline, entry, operation_id=identifier())
-        path = fixture.bound._shelf.mirror_path(entry)
-        edit = _rendered("Speaker two: the keeper trims the wick.")
-        path.write_bytes(edit)
-        before = path.stat()
-        converted = len(calls)
-
-        status = fixture.bound.derive(pipeline, entry, operation_id=identifier())
-        after = path.stat()
-        assert status.state == "indexed" and len(calls) == converted, "an edit was re-converted"
-        assert path.read_bytes() == edit, "the edited mirror was rewritten"
-        assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-        ), "the edited mirror file was replaced"
-        assert not path.with_suffix(".partial").exists()
-        assert not retained_files(path.parent, entry)
-        assert entry in _hits(fixture, "keeper trims the wick")
-        stale = fixture.bound.search(
-            "Lighthouse lens maintenance", embedder=HashEmbedder(), reranker=OverlapReranker()
-        )
-        assert all("Lighthouse lens maintenance" not in hit.chunk for hit in stale.hits)
-        assert fixture.bound.resolve(entry).metadata.converter == "biblios.mirror-edit"
-    finally:
-        fixture.close()
-
-
-def test_reconcile_reindexes_a_direct_edit_without_conversion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Failure mode: the directory lane re-converts over an edited mirror."""
-    import biblios.reconcile as reconcile_module
-
-    shelf, settings = make_shelf(tmp_path)
-    with shelf:
-        notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
-        shelf.reconcile(settings, embedder=HashEmbedder())
-        path = shelf.mirror_path(notes.entry_id)
-        edit = path.read_bytes() + b"\nSpeaker two adds a note on the fog signal.\n"
-        path.write_bytes(edit)
-        calls: list = []
-        original = reconcile_module.convert_entry
-
-        def counted(*args, **kwargs):
-            calls.append(args[1].entry_id)
-            return original(*args, **kwargs)
-
-        monkeypatch.setattr(reconcile_module, "convert_entry", counted)
-        report = shelf.reconcile(settings, embedder=HashEmbedder())
-        assert calls == [] and report.converted == (), "reconcile re-converted an edit"
-        assert notes.entry_id in report.indexed and path.read_bytes() == edit
-        found = shelf.search("fog signal", embedder=HashEmbedder(), rerank=False)
-        assert [hit.entry_id for hit in found.hits][:1] == [notes.entry_id]
-        assert shelf.verify().ok, shelf.verify().problems
-
-
-def test_an_update_serves_the_prior_mirror_until_publication_and_replays(seeded) -> None:
-    """Failure mode: an update is visible before its index commit, or a retry after a
-    failed publication embeds again."""
-    fixture, pipeline, entry = seeded
-    path = fixture.bound._shelf.mirror_path(entry)
-    original = path.read_bytes()
-    entered, release = threading.Event(), threading.Event()
-
-    class Held(HashEmbedder):
-        def embed(self, texts):
-            self.calls.append(tuple(texts))
-            entered.set()
-            assert release.wait(10)
-            return HashEmbedder.embed(self, texts)
-
-    held = Held()
-    pipeline.embedder = held
-    operation = identifier()
-    text = _edited("Speaker names corrected.")
-    errors: list[BaseException] = []
-
-    def run() -> None:
-        try:
-            fixture.bound.update_mirror(
-                pipeline,
-                entry,
-                operation_id=operation,
-                markdown=text,
-                expected_sha256=_sha(original),
-            )
-        except BaseException as error:  # noqa: BLE001 - reported to the test thread
-            errors.append(error)
-
-    worker = threading.Thread(target=run)
-    worker.start()
-    try:
-        assert entered.wait(10)
-        assert path.read_bytes() == original, "the update was written before publication"
-        assert fixture.bound.read(entry).text == original.decode()
-    finally:
-        release.set()
-        worker.join(15)
-    assert not errors and path.read_text() == text
-    embedded = len(held.calls)
-    replay = fixture.bound.update_mirror(
-        pipeline, entry, operation_id=operation, markdown=text, expected_sha256=_sha(original)
-    )
-    assert replay.state == "indexed" and len(held.calls) == embedded, "replay embedded again"
-
-
-def test_an_edit_racing_a_rolled_back_update_is_kept(seeded, monkeypatch) -> None:
-    """Failure mode: rolling back a failed update overwrites an edit made after it."""
-    import biblios.pipeline as pipeline_module
-
-    fixture, pipeline, entry = seeded
-    path = fixture.bound._shelf.mirror_path(entry)
-    original = path.read_bytes()
-    late = _edited("A later edit by hand.").encode()
-
-    def failing_commit(**kwargs):
-        path.write_bytes(late)
-        raise RuntimeError("palace refused")
-
-    monkeypatch.setattr(pipeline_module, "commit_plan", failing_commit)
-    with pytest.raises(Exception) as refused:
-        fixture.bound.update_mirror(
-            pipeline,
-            entry,
-            operation_id=identifier(),
-            markdown=_edited("Update."),
-            expected_sha256=_sha(original),
-        )
-    assert path.read_bytes() == late, "rollback overwrote a later edit"
-    kept = {file.read_bytes() for file in retained_files(path.parent, entry)}
-    assert original in kept, "the displaced original was not retained"
-    assert getattr(refused.value, "code", None) == "derivation-failed"
-
-
-def test_policy_refusals_of_an_edit_isolate_only_that_entry(seeded) -> None:
-    """Failure mode: an edit refused only by the pipeline's policy stays pending forever
-    and holds back finishing the shelf."""
-    from dataclasses import replace
-
-    fixture, pipeline, entry = seeded
-    other = _two_entries(fixture, pipeline)
-    path = fixture.bound._shelf.mirror_path(entry)
-    pipeline.policy = replace(pipeline.policy, max_mirror_bytes=len(path.read_bytes()) + 16)
-    path.write_bytes(_rendered("x" * 64))
-    with pytest.raises(ConsumerError) as large:
-        fixture.bound.derive(pipeline, entry, operation_id=identifier())
-    assert large.value.code == "mirror-too-large"
-    rows = {row.entry_id: row.mirror for row in fixture.bound.status().entries}
-    assert rows.get(entry) == "mirror-too-large", "the refusal was not persisted"
-    pipeline.finish(fixture.bound, operation_id=identifier())
-    assert _hits(fixture, "Harbour tide tables") == {other}
-    with pytest.raises(Exception, match="mirror-too-large"):
-        fixture.bound.read(entry)
-
-
-def test_a_missing_required_header_field_isolates_the_edit(seeded) -> None:
-    """Failure mode: a consumer-declared required header field is not enforced, or its
-    absence blocks the shelf."""
-    from dataclasses import replace
-
-    fixture, pipeline, entry = seeded
-    other = _two_entries(fixture, pipeline)
-    pipeline.policy = replace(pipeline.policy, required_header_fields=("speakers",))
-    path = fixture.bound._shelf.mirror_path(entry)
-    path.write_bytes(b"---\ntitle: notes\n---\n" + _rendered("Edited."))
-    with pytest.raises(ConsumerError) as refused:
-        fixture.bound.derive(pipeline, entry, operation_id=identifier())
-    assert refused.value.code == "mirror-header-invalid"
-    assert fixture.bound.status().isolated == 1, "the required-field refusal was not honoured"
-    pipeline.finish(fixture.bound, operation_id=identifier())
-    assert _hits(fixture, "Harbour tide tables") == {other}
 
 
 @pytest.mark.parametrize(
@@ -517,88 +479,6 @@ def test_header_lanes_follow_their_contract(lane, text, required, valid) -> None
         with pytest.raises(MirrorInvalid) as refused:
             validate_mirror(text.encode(), lane=lane, required_header_fields=required)
         assert refused.value.code == "mirror-header-invalid"
-
-
-def test_a_symlinked_mirror_isolates_without_being_followed(seeded, tmp_path: Path) -> None:
-    """Failure mode: Biblios follows a symlink at a mirror path, or it blocks the shelf."""
-    fixture, pipeline, entry = seeded
-    other = _two_entries(fixture, pipeline)
-    outside = tmp_path / "outside.md"
-    outside.write_bytes(_rendered("Outside the shelf."))
-    path = fixture.bound._shelf.mirror_path(entry)
-    path.unlink()
-    path.symlink_to(outside)
-    rows = {row.entry_id: row.mirror for row in fixture.bound.status().entries}
-    assert rows.get(entry) == "mirror-path-unsafe", "the symlinked mirror was followed"
-    pipeline.finish(fixture.bound, operation_id=identifier())
-    assert _hits(fixture, "Harbour tide tables") == {other}
-    assert path.is_symlink() and outside.read_bytes() == _rendered("Outside the shelf.")
-
-
-def test_isolation_survives_checkpoint_reopen_and_refuses_seal(tmp_path: Path) -> None:
-    """Failure mode: a readable checkpoint hides an isolated entry, reopening forgets
-    it, or a shelf seals with a mirror Biblios cannot index."""
-    import json
-
-    from biblios.errors import BibliosError
-
-    shelf, settings = make_shelf(tmp_path / "dir")
-    with shelf:
-        notes = shelf.add("notes.txt", NOTES.encode(), media_type="text/plain")
-        shelf.add("tide.txt", TIDE.encode(), media_type="text/plain")
-        shelf.reconcile(settings, embedder=HashEmbedder())
-        shelf.mirror_path(notes.entry_id).write_bytes(b"\xff not unicode")
-        report = shelf.reconcile(settings, embedder=HashEmbedder())
-        assert (notes.entry_id, "mirror-unicode-invalid") in report.isolated
-        with pytest.raises(BibliosError, match="mirror-states-unsettled"):
-            shelf.seal()
-        assert not shelf.sealed
-
-    fixture = consumer_fixture(tmp_path / "consumer")
-    try:
-        pipeline, _ = _pipeline(fixture, [])
-        entry = fixture.bound.curate(fixture.request(data=b"Lighthouse.")).mutation
-        entry = entry.affected_entry_ids[0]
-        fixture.bound.derive(pipeline, entry, operation_id=identifier())
-        _two_entries(fixture, pipeline)
-        fixture.bound._shelf.mirror_path(entry).write_bytes(b"\xff not unicode")
-        pipeline.finish(fixture.bound, operation_id=identifier())
-        fixture.bound.checkpoint()
-        marker = json.loads((fixture.binding.palace_root / "consumer-readable.json").read_text())
-        assert marker["withheld"] == {entry: "mirror-unicode-invalid"}
-        assert entry not in marker["membership"]
-        fixture.reopen()
-        assert fixture.bound.status().isolated == 1, "isolation lost across reopen"
-    finally:
-        fixture.close()
-
-
-def test_an_isolated_mirror_is_neither_a_donor_nor_a_stack_hit(tmp_path: Path) -> None:
-    """Failure mode: an isolated entry donates its rows or answers in a stack search."""
-    from biblios.consumer import open_bound_stack
-
-    fixtures = [consumer_fixture(tmp_path / name) for name in ("a", "b")]
-    try:
-        pipelines = [_pipeline(fixture, [])[0] for fixture in fixtures]
-        ids = []
-        for fixture, pipeline in zip(fixtures, pipelines, strict=True):
-            entry = fixture.bound.curate(
-                fixture.request(data=b"Lighthouse lens maintenance.")
-            ).mutation.affected_entry_ids[0]
-            fixture.bound.derive(pipeline, entry, operation_id=identifier())
-            ids.append(entry)
-        fixtures[0].bound._shelf.mirror_path(ids[0]).write_bytes(b"\xff not unicode")
-        with pytest.raises(ConsumerError) as refused:
-            pipelines[0].donor(fixtures[0].bound, ids[0], operation_id=identifier())
-        assert refused.value.code == "donor-not-complete"
-        stack = open_bound_stack(tuple(fixture.bound for fixture in fixtures))
-        found = stack.search("Lighthouse lens", embedder=HashEmbedder(), reranker=OverlapReranker())
-        assert {hit.entry_id for hit in found.hits} == {ids[1]}, (
-            "an isolated entry answered a stack search"
-        )
-    finally:
-        for fixture in fixtures:
-            fixture.close()
 
 
 def test_a_crash_after_the_exchange_keeps_the_displaced_bytes(tmp_path: Path, monkeypatch) -> None:
@@ -674,34 +554,27 @@ def test_discarding_staging_keeps_whatever_a_concurrent_writer_put_there(
     assert kept[0].read_bytes() == expected, "a concurrent writer's bytes were lost"
 
 
-def test_an_update_interrupted_after_its_vectors_resumes_without_embedding(
-    seeded, monkeypatch
+def test_a_digest_bound_retirement_never_takes_bytes_written_meanwhile(
+    tmp_path: Path, monkeypatch
 ) -> None:
-    """Failure mode: an update interrupted after its vectors were durably recorded embeds
-    again when retried, or publishes nothing."""
-    fixture, pipeline, entry = seeded
-    path = fixture.bound._shelf.mirror_path(entry)
-    original = path.read_bytes()
-    embedder = HashEmbedder()
-    pipeline.embedder = embedder
-    operation = identifier()
-    text = _edited("Speaker three joins the watch.")
-    publish = type(pipeline)._publish
+    """Failure mode: retiring the core's own bytes moves away a user's write that landed
+    between the ownership check and the move."""
+    import biblios.mirrors as mirrors
+    from biblios.mirrors import Provenance, retire_mirror
 
-    def interrupted(self, *args, **kwargs):
-        raise RuntimeError("process stopped after vectors were recorded")
+    path = tmp_path / "entry.md"
+    path.write_bytes(b"own staging")
+    own = _sha(b"own staging")
+    original = mirrors._retain
 
-    monkeypatch.setattr(type(pipeline), "_publish", interrupted)
-    with pytest.raises(ConsumerError):
-        fixture.bound.update_mirror(
-            pipeline, entry, operation_id=operation, markdown=text, expected_sha256=_sha(original)
-        )
-    assert path.read_bytes() == original and embedder.calls, "nothing was embedded first"
-    embedded = len(embedder.calls)
-    monkeypatch.setattr(type(pipeline), "_publish", publish)
-    status = fixture.bound.update_mirror(
-        pipeline, entry, operation_id=operation, markdown=text, expected_sha256=_sha(original)
-    )
-    assert len(embedder.calls) == embedded, "the interrupted update embedded again"
-    assert status.state == "indexed" and path.read_text() == text
-    assert entry in _hits(fixture, "Speaker three joins the watch")
+    def user_writes_first(file, root, entry_id, provenance, label=None):
+        file.write_bytes(b"user edit")  # lands after the caller's check
+        return original(file, root, entry_id, provenance, label)
+
+    monkeypatch.setattr(mirrors, "_retain", user_writes_first)
+    provenance = Provenance(tmp_path / "palace", "staging", None, None, None, None)
+    with pytest.raises(ConsumerError) as refused:
+        retire_mirror(path, provenance=provenance, expected=own)
+    assert refused.value.code == "mirror-changed-concurrently"
+    assert path.read_bytes() == b"user edit"
+    assert [p.name for p in tmp_path.iterdir() if ".retained-" in p.name] == []

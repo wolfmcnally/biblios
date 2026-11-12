@@ -1,10 +1,11 @@
 """The index as visibly derived state: watermark, per-shelf status and per-entry progress.
 
-The namespace revision is the shelf's authority. The derived side is the mirror set,
-Palace's per-file hashes and one shelf-wide watermark, the revision the index last matched
-in full. A reader compares the two and says how far the index is behind; a running
-reconcile step reports the entry it is converting or indexing through the same record.
-Nothing here is cached and nothing about index state is written into entry metadata.
+The namespace revision is the shelf's authority. Biblios's accepted state lives in its
+derived store (:mod:`biblios.derived`), whose counters are maintained in the same
+transaction that changes an entry's served identity, so ordinary status costs O(1). The
+whole-shelf recount is :func:`diagnose`, the explicit diagnosis that seal, the readable
+checkpoint and verification use. The watermark is the revision at which a diagnosis last
+found every live entry accepted and current; ordinary status never evaluates it anew.
 """
 
 from __future__ import annotations
@@ -20,7 +21,6 @@ from typing import TYPE_CHECKING
 
 from palace.index.schema import read_identity
 
-from biblios.entries import UNCONVERTED_PREFIX
 from biblios.errors import BibliosError
 
 if TYPE_CHECKING:
@@ -61,16 +61,17 @@ class IndexStatus:
     searchable_revision: int
     lagging: bool
     built: bool
-    files: int
+    files: int | None
     searchable: int
-    pending: int
+    pending: int | None
     unconverted: int
     entries: tuple[EntryProgress, ...]
-    """Every live file entry that is not yet searchable."""
+    """Every live file entry that is not yet searchable (diagnosis only; empty in the
+    maintained status)."""
     isolated: int = 0
     """Entries withheld for their own mirror state; they never block the others."""
-    # ``lagging`` is true while the watermark is behind the namespace revision or any entry
-    # is pending: a store rebuilt from scratch with an old watermark is behind too.
+    # ``files`` and ``pending`` are None when unknown. ``lagging`` is true while the
+    # watermark is behind the namespace revision, or a diagnosis found an entry pending.
 
 
 def watermark_path(shelf: Shelf) -> Path:
@@ -151,27 +152,61 @@ def indexed_files(shelf: Shelf) -> dict[str, str]:
     return {Path(path).stem: file_hash for path, _, file_hash in _file_rows(shelf)}
 
 
-def prepare_readable(shelf: Shelf) -> IndexStatus:
-    """Writer-only dynamic checkpoint, without sealing or admitting a stale mirror set.
+def _accepted(shelf: Shelf) -> dict[str, tuple[str, str]]:
+    """Every accepted record's ``(mirror digest, stage digest)``; diagnosis only."""
+    from biblios.derived import DERIVED_NAME, DerivedStore
 
-    Readers never change journal modes or repair this checkpoint. The caller
-    holds Palace writer admission before the namespace coordinator, through
-    connection close and checkpoint publication.
+    if not (shelf.palace_store / DERIVED_NAME).is_file():
+        return {}
+    store = DerivedStore(shelf.palace_store, read_only=True)
+    try:
+        return {
+            entry_id: (mirror, stage or "")
+            for entry_id, mirror, stage in store.conn.execute(
+                "SELECT entry_id, mirror_sha256, accepted_stage_sha256 FROM entries "
+                "WHERE state='accepted' AND conversion='converted'"
+            )
+        }
+    finally:
+        store.close()
+
+
+def _imported(shelf: Shelf) -> bool:
+    """Whether the preservation import has run on this shelf (its derived counter)."""
+    from biblios.derived import DERIVED_NAME, DerivedStore
+
+    if not (shelf.palace_store / DERIVED_NAME).is_file():
+        return False
+    store = DerivedStore(shelf.palace_store, read_only=True)
+    try:
+        return store.counter("legacy-import") > 0
+    finally:
+        store.close()
+
+
+def prepare_readable(shelf: Shelf) -> IndexStatus:
+    """Writer-only dynamic checkpoint of both accepted stores, without sealing.
+
+    Readers never change journal modes or repair this checkpoint. The caller holds
+    Palace writer admission, and no other connection to the accepted store is open.
+    An unresolved stage never blocks it: each entry's accepted predecessor is served.
     """
     import hashlib
 
     from biblios.control import ConsumerError
-    from biblios.mirrors import classify_shelf
+    from biblios.derived import DERIVED_NAME
 
     shelf._refuse_if_sealed()
-    states = classify_shelf(shelf)
-    expected, _ = membership(shelf, states)
-    # The checkpoint names exactly what a reader may answer; every other state is listed.
-    withheld = {entry_id: state.state for entry_id, state in states.items() if not state.searchable}
+    status, expected, withheld = diagnose(shelf)
     if {k: v for k, v in indexed_files(shelf).items() if k not in withheld} != expected:
         raise ConsumerError("index-membership-mismatch", stage="index")
-    if shelf.chunks_db.is_file():
-        connection = sqlite3.connect(shelf.chunks_db)
+    derived = shelf.palace_store / DERIVED_NAME
+    digests: dict[str, str | None] = {}
+    for name, db in (("database_sha256", shelf.chunks_db), ("derived_sha256", derived)):
+        if not db.is_file():
+            digests[name] = None
+            continue
+        connection = sqlite3.connect(db)
         try:
             checked = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checked[0] != 0:
@@ -180,15 +215,14 @@ def prepare_readable(shelf: Shelf) -> IndexStatus:
                 raise ConsumerError("checkpoint-failed", stage="index")
         finally:
             connection.close()
-    status = index_status(shelf)
+        digests[name] = hashlib.sha256(db.read_bytes()).hexdigest()
     marker = shelf.palace_store / "consumer-readable.json"
     document = {
         "revision": status.revision,
         "membership": expected,
         "withheld": withheld,
-        "database_sha256": hashlib.sha256(shelf.chunks_db.read_bytes()).hexdigest()
-        if shelf.chunks_db.is_file()
-        else None,
+        "imported": _imported(shelf),
+        **digests,
     }
     partial = marker.with_suffix(".partial")
     with partial.open("w") as stream:
@@ -205,67 +239,129 @@ def recorded_root(shelf: Shelf) -> str | None:
     return rows[0][1] if rows else None
 
 
-def membership(shelf: Shelf, states: dict) -> tuple[dict[str, str], dict[str, str]]:
-    """Expected index membership and the withheld entries' states.
+def index_status(shelf: Shelf) -> IndexStatus:
+    """The maintained counters: O(1), no namespace or mirror enumeration.
 
-    Expected is every entry whose mirror is searchable, at its recorded digest. Isolated
-    entries are withheld: their rows are excluded on both sides of every membership
-    comparison, so they never block the rest of the shelf.
+    How many live entries were never recorded needs Castle's live-file count, which is
+    not yet adopted, so ``files`` and ``pending`` are None (unknown), never zero.
     """
-    expected: dict[str, str] = {}
-    withheld: dict[str, str] = {}
-    for entry in shelf.files():
-        state = states.get(entry.entry_id)
-        if state is None or entry.metadata is None:
-            continue
-        if state.searchable:
-            expected[entry.entry_id] = entry.metadata.mirror_sha256
-        elif state.isolated:
-            withheld[entry.entry_id] = state.state
-    return expected, withheld
-
-
-def index_status(shelf: Shelf, states: dict | None = None) -> IndexStatus:
-    """How far the index is behind the namespace, computed from the three layers now."""
-    from biblios.mirrors import classify_shelf
+    from biblios.derived import DERIVED_NAME, DerivedStore
 
     revision = shelf.revision
+    counts = {"accepted": 0, "unconverted": 0, "isolated": 0}
+    # The revision through which the core last observed and settled every change; until
+    # anything ran it is the watermark the shelf was created with.
     searchable_revision = read_watermark(shelf)
+    unsettled = 0
+    # A seal writes the watermark at the sealed revision after a full diagnosis; that
+    # stays the floor whatever the core's own counter observed before the seal's snapshot.
+    if (shelf.palace_store / DERIVED_NAME).is_file():
+        store = DerivedStore(shelf.palace_store, read_only=True)
+        try:
+            counts = {key: store.counter("state:" + key) for key in counts}
+            counts["isolated"] = store.counter("state:served-rows-damaged")
+            observed = store.conn.execute(
+                "SELECT value FROM counters WHERE key='observed_revision'"
+            ).fetchone()
+            if observed is not None:
+                searchable_revision = max(searchable_revision, int(observed[0]))
+            unsettled = store.counter("unsettled")
+        finally:
+            store.close()
     built = store_built(shelf)
-    index = indexed_files(shelf) if built else {}
-    entries = list(shelf.files())
-    states = classify_shelf(shelf, entries) if states is None else states
-    files = searchable = pending = unconverted = isolated = 0
-    rows: list[EntryProgress] = []
-    for entry in entries:
-        files += 1
-        metadata = entry.metadata
-        current = metadata is not None and metadata.current_for(entry.cas_id)
-        state = states.get(entry.entry_id)
-        mirror = state.state if state is not None else None
-        retained = state.retained if state is not None else 0
-        if current and metadata.conversion.startswith(UNCONVERTED_PREFIX):
-            unconverted += 1
-            stage = "unconverted"
-        elif (
-            state is not None
-            and state.searchable
-            and index.get(entry.entry_id) == metadata.mirror_sha256
-        ):
-            searchable += 1
-            continue
-        elif state is not None and state.isolated:
-            isolated += 1
-            stage = "withheld"
-        else:
-            pending += 1
-            stage = "stored"
-        rows.append(
-            EntryProgress(
-                shelf.shelf_id, entry.entry_id, entry.path, stage, mirror=mirror, retained=retained
-            )
-        )
+    # Accepted state without a built index serves nothing: it lags until a sweep
+    # re-presents the accepted mirrors.
+    lost = not built and counts["accepted"] > 0
     return IndexStatus(
+        shelf_id=shelf.shelf_id,
+        revision=revision,
+        searchable_revision=searchable_revision,
+        lagging=searchable_revision < revision or unsettled > 0 or lost,
+        built=built,
+        files=None,
+        searchable=0 if lost else counts["accepted"],
+        pending=None,
+        unconverted=counts["unconverted"],
+        entries=(),
+        isolated=counts["isolated"],
+    )
+
+
+def diagnose(shelf: Shelf) -> tuple[IndexStatus, dict[str, str], dict[str, str]]:
+    """The explicit whole-shelf recount: O(N) stats, used by seal, checkpoint and verify.
+
+    Returns the exact status, the expected index membership (each searchable entry at
+    its accepted mirror digest) and the withheld entries with their states.
+    """
+    from biblios.derived import DERIVED_NAME, GRANULARITY_NS, DerivedStore
+    from biblios.mirrors import classify, lane_for, retained_index
+
+    revision = shelf.revision
+    try:
+        built = store_built(shelf)
+        index = indexed_files(shelf) if built else {}
+    except (sqlite3.Error, BibliosError):
+        built = False
+        # An unusable index serves nothing: every entry reads as pending here, and the
+        # caller that needs the reason (verify) reports it from its own read.
+        index = {}
+    lane = lane_for(shelf.palace_store)
+    retained = retained_index(shelf.mirror_root)
+    expected: dict[str, str] = {}
+    withheld: dict[str, str] = {}
+    rows: list[EntryProgress] = []
+    files = searchable = pending = unconverted = isolated = 0
+    store = (
+        DerivedStore(shelf.palace_store, read_only=True)
+        if (shelf.palace_store / DERIVED_NAME).is_file()
+        else None
+    )
+    try:
+        for entry in shelf.files():
+            files += 1
+            record = store.record(entry.entry_id) if store is not None else None
+            state = classify(
+                entry,
+                record,
+                mirror_path=shelf.mirror_path(entry.entry_id),
+                mirror_root=shelf.mirror_root,
+                lane=lane,
+                granularity_ns=GRANULARITY_NS,
+                retained=tuple(retained.get(entry.entry_id, ())),
+                store=shelf.palace_store,
+            )
+            mirror = state.state if state is not None else None
+            kept = state.retained if state is not None else 0
+            current = record is not None and record.source_cas_id == entry.cas_id
+            if current and not record.converted:
+                unconverted += 1
+                stage = "unconverted"
+            elif current and state is not None and state.searchable and record.state == "accepted":
+                # Expected membership comes from the accepted record, never from the index
+                # itself, so a vanished or altered row is reported rather than absorbed.
+                expected[entry.entry_id] = record.index_digest
+                if index.get(entry.entry_id) == record.index_digest:
+                    searchable += 1
+                    continue
+                pending += 1
+                stage = "stored"
+            elif state is not None and state.isolated:
+                isolated += 1
+                withheld[entry.entry_id] = state.state
+                stage = "withheld"
+            else:
+                pending += 1
+                stage = "stored"
+            rows.append(
+                EntryProgress(
+                    shelf.shelf_id, entry.entry_id, entry.path, stage, mirror=mirror, retained=kept
+                )
+            )
+    finally:
+        if store is not None:
+            store.close()
+    searchable_revision = read_watermark(shelf)
+    status = IndexStatus(
         shelf_id=shelf.shelf_id,
         revision=revision,
         searchable_revision=searchable_revision,
@@ -278,3 +374,71 @@ def index_status(shelf: Shelf, states: dict | None = None) -> IndexStatus:
         entries=tuple(rows),
         isolated=isolated,
     )
+    return status, expected, withheld
+
+
+@dataclass(frozen=True, slots=True)
+class SettleResult:
+    """The outcome of one settle call.
+
+    ``settled``: every store is in rollback-journal mode with no sidecars, durable.
+    ``busy``: a reader blocked one store; ``unavailable``: one store could not be opened or
+    settled. Either may be partial: ``settled_stores`` names the stores already switched
+    before ``store`` stopped the call, and those stay switched. Settling is idempotent, so
+    the caller retries the whole call. ``cause`` is the SQLite error that stopped it, when
+    one did. ``revision`` is informational and never admission authority.
+    """
+
+    state: str
+    revision: int
+    settled_stores: tuple[str, ...] = ()
+    store: str | None = None
+    cause: sqlite3.Error | None = None
+
+
+def _settle_one(db: Path) -> tuple[str, sqlite3.Error | None]:
+    try:
+        connection = sqlite3.connect(db, timeout=0)
+    except sqlite3.Error as error:
+        return "unavailable", error
+    try:
+        checked = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checked[0] != 0:
+            return "busy", None
+        if connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
+            return "busy", None
+    except sqlite3.OperationalError as error:
+        return "busy", error
+    except sqlite3.Error as error:
+        return "unavailable", error
+    finally:
+        connection.close()
+    if any(db.with_name(db.name + suffix).exists() for suffix in ("-wal", "-shm")):
+        return "busy", None
+    descriptor = os.open(db.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return "settled", None
+
+
+def settle_for_readers(shelf: Shelf) -> SettleResult:
+    """Prepare both accepted stores for no-sidecar read-only opening; the writer only.
+
+    Cost is the write-ahead pages since the last settle, with no membership recount and
+    no file hash. The next write-mode open returns each store to write-ahead logging.
+    Nothing here is admission authority: a reader's caller-signed evidence decides that.
+    """
+    from biblios.derived import DERIVED_NAME
+
+    revision = shelf.revision
+    done: list[str] = []
+    for db in (shelf.chunks_db, shelf.palace_store / DERIVED_NAME):
+        if not db.is_file():
+            continue
+        state, cause = _settle_one(db)
+        if state != "settled":
+            return SettleResult(state, revision, tuple(done), db.name, cause)
+        done.append(db.name)
+    return SettleResult("settled", revision, tuple(done))

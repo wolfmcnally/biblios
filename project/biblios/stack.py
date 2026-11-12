@@ -13,12 +13,11 @@ full coverage. Biblios does no fusion or reranking of its own.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from palace import multistore
-from palace import search as palace_search
-from palace.index import _errors as palace_errors
 from palace.index.config import EmbeddingIdentity
 from palace.index.embedder import Embedder
 from palace.index.embedder_config import embedder_config_path, identity_for, load_embedder_config
@@ -26,9 +25,12 @@ from palace.rerank import Reranker, RerankStatus
 
 from biblios.entries import Entry
 from biblios.errors import BibliosError, MixedIdentityError, UndeclaredEmbedderError
-from biblios.progress import IndexStatus, index_status, indexed_files
-from biblios.search import Hit, Page, current_hit
+from biblios.progress import IndexStatus, index_status
+from biblios.search import Hit, Page, ServedStage, Withheld
 from biblios.shelf import Shelf
+
+if TYPE_CHECKING:
+    from biblios.core import ReadObservation
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +39,17 @@ class StackResult:
 
     hits: tuple[Hit, ...]
     rerank_status: RerankStatus
-    refused: tuple[tuple[str, str], ...]
-    """``(shelf id, entry id)`` pairs whose chunk named no live, current, indexed entry."""
+    withheld: tuple[Withheld, ...]
+    """Entries whose retrieved chunks were not served, per shelf, with the category."""
+    stages: tuple[ServedStage, ...]
+    """One per answered entry: the accepted stage its hits came from."""
     indexing: tuple[str, ...]
     """Shelf ids whose index has not matched their namespace in full: the answer is what
     their indexes hold now, and an unbuilt member contributed nothing."""
     status: dict[str, IndexStatus]
+    observations: dict[str, tuple[ReadObservation, ...]] = field(default_factory=dict)
+    """Per shelf id, the observations of :attr:`SearchResult.observations` (only shelves
+    with any). A stack search persists nothing; a writable member binding's marks."""
 
 
 class Stack:
@@ -94,7 +101,7 @@ class Stack:
         )
         built = [shelf for shelf in self._shelves if status[shelf.shelf_id].built]
         if not built:
-            return StackResult((), "disabled", (), indexing, status)
+            return StackResult((), "disabled", (), (), indexing, status)
         found = multistore.search_stores(
             query=query,
             stores=[shelf.palace_store for shelf in built],
@@ -104,56 +111,41 @@ class Stack:
             strict=strict,
             embedders={self._identity: embedder} if embedder is not None else None,
             reranker=reranker,
+            evidence=True,
         )
-        from biblios.mirrors import classify_shelf
+        from biblios.search import _ServingCheck
 
-        live: dict[str, dict[str, Entry]] = {}
-        indexed: dict[str, dict[str, str]] = {}
-        states: dict[str, dict] = {}
-        for shelf in built:
-            states[shelf.shelf_id] = classify_shelf(shelf)
-            live[shelf.shelf_id] = {
-                entry.entry_id: entry for entry in shelf.files() if entry.metadata is not None
-            }
-            indexed[shelf.shelf_id] = indexed_files(shelf)
+        checks = {shelf.shelf_id: _ServingCheck(shelf) for shelf in built}
         hits: list[Hit] = []
-        refused: list[tuple[str, str]] = []
-        for store_hit in found.hits:
-            shelf = self._by_store[Path(store_hit.store).resolve()]
-            hit = store_hit.hit
-            entry_id = Path(hit.path).stem
-            entry = live[shelf.shelf_id].get(entry_id)
-            if not current_hit(entry, indexed[shelf.shelf_id], states[shelf.shelf_id]):
-                refused.append((shelf.shelf_id, entry_id))
-                continue
-            assert entry is not None
-            try:
-                body = palace_search.expand(chunk_id=hit.chunk_id, store=shelf.palace_store).body
-            except palace_errors.IndexError:
-                if strict:
-                    raise
-                refused.append((shelf.shelf_id, entry_id))
-                continue
-            hits.append(
-                Hit(
-                    shelf_id=shelf.shelf_id,
-                    entry_id=entry_id,
-                    path=entry.path,
-                    heading=hit.heading,
-                    chunk=body,
-                    rrf_score=hit.rrf_score,
-                    bm25_score=hit.bm25_score,
-                    vec_distance=hit.vec_distance,
-                    rerank_score=hit.rerank_score,
-                    rerank_status=found.status,
+        try:
+            evidence = found.evidence or ()
+            for index, store_hit in enumerate(found.hits):
+                shelf = self._by_store[Path(store_hit.store).resolve()]
+                served = checks[shelf.shelf_id].hit(
+                    store_hit.hit,
+                    found.status,
+                    evidence[index] if index < len(evidence) else None,
                 )
-            )
+                if served is not None:
+                    hits.append(served)
+            withheld = tuple(item for check in checks.values() for item in check.withheld())
+            observed = {
+                shelf_id: check.observations()
+                for shelf_id, check in checks.items()
+                if check.observations()
+            }
+            stages = tuple(item for check in checks.values() for item in check.stages())
+        finally:
+            for check in checks.values():
+                check.close()
         return StackResult(
             hits=tuple(hits),
             rerank_status=found.status,
-            refused=tuple(refused),
+            withheld=withheld,
+            stages=stages,
             indexing=indexing,
             status=status,
+            observations=observed,
         )
 
     def resolve(self, shelf_id: str, entry_id: str) -> Entry:

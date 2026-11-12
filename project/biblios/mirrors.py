@@ -24,10 +24,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from biblios.control import ConsumerError
+from biblios.derived import StatIdentity
 
 if TYPE_CHECKING:
-    from biblios.entries import Entry, EntryMetadata
-    from biblios.shelf import Shelf
+    from biblios.derived import DerivedRecord
+    from biblios.entries import Entry
 
 EDIT_CONVERTER = "biblios.mirror-edit"
 """The converter label recorded when the mirror's bytes came from a user, not a converter."""
@@ -42,20 +43,20 @@ ISOLATED = (
     "mirror-too-large",
     "mirror-name-section-invalid",
     "mirror-path-unsafe",
+    "mirror-unreadable",
 )
 POLICY_CLASSES = frozenset(
     {"mirror-too-large", "mirror-name-section-invalid", "mirror-header-invalid"}
 )
 """Classes found only against the pipeline's policy (byte bound, name section, declared
-required header fields) when a mirror is planned for indexing; persisted per entry and
-digest so status reports them without the policy."""
+required header fields) when a mirror is planned for indexing; recorded on the entry's
+derived record against the mirror digest so status reports them without the policy."""
 
 Lane = Literal["envelope", "consumer"]
 
 # Drawbridge's exact front-matter recognition, applied after CR/CRLF normalisation.
 _FRONT_MATTER = re.compile(r"^---\n(.*?)\n---\n?(.*)$", re.DOTALL)
 _RETAINED = ".retained-"
-_REFUSALS = "mirror-refusals"
 _RETENTIONS = "mirror-retained"
 
 
@@ -147,8 +148,8 @@ def validate_mirror(
 
         try:
             parse_mirror_header(text)
-        except Exception:
-            raise MirrorInvalid("mirror-header-invalid") from None
+        except Exception as error:
+            raise MirrorInvalid("mirror-header-invalid") from error
         return text
     match = _FRONT_MATTER.match(_normalised(text))
     if match is None:
@@ -159,8 +160,8 @@ def validate_mirror(
 
     try:
         header = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
-        raise MirrorInvalid("mirror-header-invalid") from None
+    except yaml.YAMLError as error:
+        raise MirrorInvalid("mirror-header-invalid") from error
     if header is None:
         header = {}
     if not isinstance(header, dict) or any(key not in header for key in required_header_fields):
@@ -178,13 +179,50 @@ def read_mirror(path: Path, root: Path) -> bytes | None:
     Raises :class:`MirrorInvalid` with ``mirror-path-unsafe`` for a symlink or a path
     resolving outside ``root``; such a file is never followed.
     """
+    read = read_mirror_stat(path, root)
+    return None if read is None else read[0]
+
+
+def read_mirror_stat(path: Path, root: Path) -> tuple[bytes, StatIdentity | None] | None:
+    """The file's bytes and the stat identity of the descriptor they were read from.
+
+    The identity is taken from that descriptor before the read and must equal it after,
+    so it describes exactly these bytes; a file written during the read gets None, which
+    forces the next pass to hash it. None when the file is absent. An operating-system
+    refusal to read it (permissions, I/O) is ``mirror-unreadable`` with that error as the
+    cause, so one unreadable mirror isolates only its entry.
+    """
+    try:
+        return _read_mirror_stat(path, root)
+    except MirrorInvalid:
+        raise
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise MirrorInvalid("mirror-unreadable") from error
+
+
+def _read_mirror_stat(path: Path, root: Path) -> tuple[bytes, StatIdentity | None] | None:
     if path.is_symlink():
         raise MirrorInvalid("mirror-path-unsafe")
     if not path.exists():
         return None
     if not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
         raise MirrorInvalid("mirror-path-unsafe")
-    return path.read_bytes()
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            # Replaced by a symlink between the check and the open: never followed.
+            raise MirrorInvalid("mirror-path-unsafe") from error
+        raise
+    with os.fdopen(descriptor, "rb") as handle:
+        before = StatIdentity.from_result(os.fstat(handle.fileno()))
+        data = handle.read()
+        after = StatIdentity.from_result(os.fstat(handle.fileno()))
+    return data, before if before == after else None
 
 
 def retained_files(root: Path, entry_id: str) -> list[Path]:
@@ -254,153 +292,68 @@ def _record_retention(target: Path, entry_id: str, provenance: Provenance) -> No
     os.replace(partial, path)
 
 
-def _refusal_path(store: Path, entry_id: str) -> Path:
-    return store / _REFUSALS / f"{entry_id}.json"
-
-
-def record_refusal(store: Path, entry_id: str, file_digest: str, code: str) -> None:
-    """Persist a policy-dependent refusal for exactly these bytes (writer only)."""
-    path = _refusal_path(store, entry_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_suffix(".tmp")
-    partial.write_text(json.dumps({"digest": file_digest, "class": code}, sort_keys=True))
-    os.replace(partial, path)
-
-
-def clear_refusal(store: Path, entry_id: str) -> None:
-    _refusal_path(store, entry_id).unlink(missing_ok=True)
-
-
-def refusal_for(store: Path, entry_id: str, file_digest: str) -> str | None:
-    path = _refusal_path(store, entry_id)
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if (
-        isinstance(document, dict)
-        and document.get("digest") == file_digest
-        and document.get("class") in POLICY_CLASSES
-    ):
-        return document["class"]
-    return None
-
-
-_INTENTS = "copy-intents"
-
-
-def record_copy_intent(store: Path, operation_id: str) -> None:
-    """Record, before a copy commits, that this code created the copy operation.
-
-    Materializing a copy's first mirror needs this record: a copy made by earlier code,
-    which could materialize without recording it, never qualifies (fail closed).
-    """
-    path = store / _INTENTS / f"{operation_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_suffix(".tmp")
-    partial.write_text(json.dumps({"operation_id": operation_id}))
-    with partial.open("rb") as stream:
-        os.fsync(stream.fileno())
-    os.replace(partial, path)
-
-
-def has_copy_intent(store: Path, operation_id: str) -> bool:
-    path = store / _INTENTS / f"{operation_id}.json"
-    try:
-        return json.loads(path.read_text(encoding="utf-8")) == {"operation_id": operation_id}
-    except (OSError, ValueError):
-        return False
-
-
-def copy_evidence(shelf: Shelf, copied_by: str) -> frozenset[str]:
-    """Entries a copy operation authorizes for one first materialization.
-
-    The copy must have been created by this code (its intent was recorded before it
-    committed), Castle must still hold its committed duplicate result, and each entry
-    named there must be unchanged since that commit. Materialization always records the
-    conversion, which advances the entry, so one copy authorizes one materialization.
-    Older or retired evidence authorizes nothing.
-    """
-    from castle.namespace import namespace_operation
-
-    if not has_copy_intent(shelf.palace_store, copied_by):
-        raise ConsumerError("materialize-evidence-unavailable", stage="index")
-    try:
-        status = namespace_operation(shelf._handle, copied_by)
-    except Exception:
-        raise ConsumerError("materialize-evidence-unavailable", stage="index") from None
-    result = status.result
-    if status.state != "committed" or result is None or result.kind != "duplicate":
-        raise ConsumerError("materialize-evidence-unavailable", stage="index")
-    live = shelf._live()
-    return frozenset(
-        entry_id
-        for entry_id in result.affected_entry_ids
-        if entry_id in live and live[entry_id].changed_revision == result.revision_after
-    )
-
-
 def classify(
-    shelf: Shelf, entry: Entry, *, lane: Lane, retained: dict[str, list[Path]] | None = None
+    entry: Entry,
+    record: DerivedRecord | None,
+    *,
+    mirror_path: Path,
+    mirror_root: Path,
+    lane: Lane,
+    granularity_ns: int,
+    retained: tuple[Path, ...] = (),
+    store: Path | None = None,
 ) -> MirrorState | None:
-    """The state of one entry's mirror; None for an entry with no recorded conversion.
+    """The state of one entry's mirror from its derived record and the file's stat.
 
-    ``retained`` is a :func:`retained_index` the caller already listed, if any.
+    None for an entry with no recorded conversion. An unchanged, non-racy stat identity
+    decides without reading the bytes; otherwise the mirror is read once and hashed.
+    ``retained`` is the entry's retained files, from one listing the caller made.
     """
-    metadata = entry.metadata
-    if metadata is None or not metadata.converted:
+    if record is None or not record.converted:
         return None
-    root = shelf.mirror_root
-    files = (
-        retained.get(entry.entry_id, [])
-        if retained is not None
-        else retained_files(root, entry.entry_id)
-    )
-    retained = len(files)
-    unattributed = _unattributed(shelf.palace_store, files)
-    state = _classify(shelf, entry, lane, metadata, retained)
-    return MirrorState(state.entry_id, state.state, state.digest, retained, unattributed)
+    unattributed = 0 if store is None else _unattributed(store, list(retained))
+    state = _classify(entry, record, mirror_path, mirror_root, lane, granularity_ns)
+    return MirrorState(entry.entry_id, state[0], state[1], len(retained), unattributed)
 
 
 def _classify(
-    shelf: Shelf, entry: Entry, lane: Lane, metadata: EntryMetadata, retained: int
-) -> MirrorState:
-    root = shelf.mirror_root
+    entry: Entry,
+    record: DerivedRecord,
+    path: Path,
+    root: Path,
+    lane: Lane,
+    granularity_ns: int,
+) -> tuple[str, str | None]:
+    current = record.source_cas_id == entry.cas_id
+    if (
+        current
+        and record.stat is not None
+        and record.stat.unchanged(
+            StatIdentity.of(path), recorded_ns=record.recorded_ns, granularity_ns=granularity_ns
+        )
+        and not path.is_symlink()
+    ):
+        return SEARCHABLE, record.mirror_sha256
     try:
-        data = read_mirror(shelf.mirror_path(entry.entry_id), root)
+        data = read_mirror(path, root)
     except MirrorInvalid as error:
-        return MirrorState(entry.entry_id, error.code, None, retained)
-    current = metadata.current_for(entry.cas_id)
+        return error.code, None
     if data is None:
         # No mirror for replaced source data is ordinary conversion work. A current
-        # conversion with no mirror is missing.
-        state = "mirror-missing" if current else PENDING_CONVERSION
-        return MirrorState(entry.entry_id, state, None, retained)
+        # conversion with no mirror is missing, and is never reconverted.
+        return ("mirror-missing" if current else PENDING_CONVERSION), None
     found = digest(data)
     if not current:
         # Replacing a file is a new ingestion: the previous mirror is kept under a
         # retained name when the new data is converted (``digest`` names those bytes).
-        return MirrorState(entry.entry_id, PENDING_CONVERSION, found, retained)
-    if found == metadata.mirror_sha256:
-        return MirrorState(entry.entry_id, SEARCHABLE, found, retained)
+        return PENDING_CONVERSION, found
+    if found == record.mirror_sha256:
+        return SEARCHABLE, found
     try:
         validate_mirror(data, lane=lane)
     except MirrorInvalid as error:
-        return MirrorState(entry.entry_id, error.code, found, retained)
-    refused = refusal_for(shelf.palace_store, entry.entry_id, found)
-    return MirrorState(entry.entry_id, refused or PENDING_REINDEX, found, retained)
-
-
-def classify_shelf(shelf: Shelf, entries: list[Entry] | None = None) -> dict[str, MirrorState]:
-    """Every converted entry's state, each mirror read at most once."""
-    lane = lane_for(shelf.palace_store)
-    retained = retained_index(shelf.mirror_root)
-    states: dict[str, MirrorState] = {}
-    for entry in shelf.files() if entries is None else entries:
-        state = classify(shelf, entry, lane=lane, retained=retained)
-        if state is not None:
-            states[entry.entry_id] = state
-    return states
+        return error.code, found
+    return record.refused_for(found) or PENDING_REINDEX, found
 
 
 # ---- the non-destructive writer -------------------------------------------------------
@@ -455,10 +408,40 @@ def _rename(source: Path, target: Path, flag: str) -> None:
         raise OSError(code, os.strerror(code), str(source))
 
 
-def _retain(file: Path, entry_root: Path, entry_id: str, provenance: Provenance) -> Path:
+def retained_path(entry_root: Path, entry_id: str, label: str, data_digest: str) -> Path:
+    """The fixed retained name an operation chose in advance (``label`` unique to it), so
+    an interruption after the rename is found by one keyed lookup, never a scan."""
+    return entry_root / f"{entry_id}.md{_RETAINED}{label}-{data_digest}"
+
+
+def record_retention_once(target: Path, entry_id: str, provenance: Provenance) -> None:
+    """Write ``target``'s provenance record if the retaining operation was interrupted
+    between its rename and the record; an existing record is never rewritten."""
+    if retention_record(provenance.store, target) is None:
+        _record_retention(target, entry_id, provenance)
+
+
+def _retain(
+    file: Path,
+    entry_root: Path,
+    entry_id: str,
+    provenance: Provenance,
+    label: str | None = None,
+) -> Path:
     """Move ``file`` to a new unique retained name with a no-replace rename, then record
-    its provenance."""
+    its provenance. With ``label`` the name is the fixed :func:`retained_path`, and one
+    already present refuses ``mirror-retention-failed`` (nothing is replaced)."""
     data_digest = digest(file.read_bytes())
+    if label is not None:
+        target = retained_path(entry_root, entry_id, label, data_digest)
+        try:
+            _rename(file, target, "noreplace")
+        except FileExistsError:
+            raise ConsumerError(
+                "mirror-retention-failed", stage="index", effect="recovery-required"
+            ) from None
+        _record_retention(target, entry_id, provenance)
+        return target
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     for counter in range(1000):
         name = f"{entry_id}.md{_RETAINED}{stamp}-{counter}-{data_digest}"
@@ -588,10 +571,29 @@ def write_mirror(
     raise ConsumerError("mirror-changed-concurrently", stage="index")
 
 
-def retire_mirror(path: Path, *, provenance: Provenance) -> Path | None:
-    """Move a mirror out of the indexed name with a no-replace rename; never delete it."""
+def retire_mirror(
+    path: Path,
+    *,
+    provenance: Provenance,
+    expected: str | None = None,
+    label: str | None = None,
+) -> Path | None:
+    """Move a mirror out of the indexed name with a no-replace rename; never delete it.
+
+    With ``expected``, only exactly those bytes are retired: the moved bytes are checked
+    after the rename, and bytes written meanwhile are put back at the path (or, when the
+    path was taken again, kept retained) and refuse ``mirror-changed-concurrently``."""
     if path.is_symlink():
         raise ConsumerError("artifact-outside-domain", stage="index")
     if not path.exists():
         return None
-    return _retain(path, path.parent, path.stem, provenance)
+    target = _retain(path, path.parent, path.stem, provenance, label)
+    if expected is None or digest(target.read_bytes()) == expected:
+        return target
+    try:
+        _rename(target, path, "noreplace")
+    except FileExistsError:
+        raise ConsumerError(
+            "mirror-changed-concurrently", stage="index", effect="recovery-required"
+        ) from None
+    raise ConsumerError("mirror-changed-concurrently", stage="index")

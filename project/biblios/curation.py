@@ -356,6 +356,40 @@ def compile_request(
     return mutation, sources, additions
 
 
+def creation_intents(kind: str, args: dict, live: dict) -> list[tuple[str, str, str, str | None]]:
+    """Per entry ``(entry_id, role, cas_id, source_id)`` this call creates, replaces,
+    copies or removes: the positive authority indexing later requires."""
+    if kind == "create-file":
+        return [(args["entry_id"], "created", args["content"]["cas_id"], None)]
+    if kind == "replace-content":
+        return [(args["entry_id"], "replaced", args["content"]["cas_id"], None)]
+    if kind == "import-folder":
+        return [
+            (row["entry_id"], "created", row["cas_id"], None)
+            for row in args["entries"]
+            if row["kind"] == "file"
+        ]
+    if kind == "duplicate":
+        return [
+            (pair["new_id"], "copied", live[pair["source_id"]].cas_id, pair["source_id"])
+            for pair in args["identities"]
+            if pair["source_id"] in live and live[pair["source_id"]].kind == "file"
+        ]
+    if kind in ("delete-entry", "delete-subtree"):
+        root = args["entry_id"]
+        found, frontier = [], [root]
+        while frontier:
+            current = frontier.pop()
+            found.append(current)
+            frontier.extend(e.entry_id for e in live.values() if e.parent_id == current)
+        return [
+            (entry_id, "removed", live[entry_id].cas_id, None)
+            for entry_id in found
+            if entry_id in live and live[entry_id].kind == "file"
+        ]
+    return []
+
+
 def execute(
     bound: BoundShelf,
     request: CurationRequest,
@@ -400,29 +434,43 @@ def execute(
                         or any((entry.size or 0) > limits.file_bytes for entry in files)
                     ):
                         raise ConsumerError("inventory-limit", stage="curation")
-                    from biblios.mirrors import record_copy_intent
+            volatile = None
+            if not replayed:
+                intents = creation_intents(compiled.kind, compiled.args, bound._shelf._live())
+                if intents:
+                    from biblios.derived import VolatileStore
 
-                    record_copy_intent(bound.binding.palace_root, request.operation_id)
+                    # Written inside this mutex hold, before Castle is called.
+                    volatile = VolatileStore(bound.binding.palace_root)
+                    volatile.record_intents(
+                        compiled.operation_id, request.expected_revision, intents
+                    )
             dispatched = True
-            result = execute_namespace(handle, compiled, sources)
+            try:
+                result = execute_namespace(handle, compiled, sources)
+                if volatile is not None:
+                    volatile.grant(compiled.operation_id, result)
+            finally:
+                if volatile is not None:
+                    volatile.close()
         except ConsumerError:
             raise
         except NamespaceError as error:
-            raise ConsumerError(error.code, stage="curation", effect=error.effect) from None
-        except Exception:
+            raise ConsumerError(error.code, stage="curation", effect=error.effect) from error
+        except Exception as error:
             raise ConsumerError(
                 "mutation-outcome-unknown" if dispatched else "request-invalid",
                 stage="curation",
                 effect="uncertain" if dispatched else "none",
-            ) from None
+            ) from error
         try:
             view = bound._admit()
-        except Exception:
+        except Exception as error:
             # The durable result already returned. Failed completion admission must
             # never invite the caller to submit a replacement operation identity.
             raise ConsumerError(
                 "completion-unavailable", stage="curation", effect="namespace-committed"
-            ) from None
+            ) from error
         observation = Observation(
             request.operation_id,
             "curation",

@@ -47,3 +47,39 @@ def test_manifest_refuses_another_schema_and_bad_fields(tmp_path: Path) -> None:
         ShelfManifest(shelf_id="", name="", description="")
     with pytest.raises(ValueError, match="shelf mode"):
         ShelfManifest(shelf_id="s", name="", description="", mode="frozen")
+
+
+def test_an_older_castle_namespace_is_refused_typed_naming_the_migration_and_never_migrated(
+    tmp_path: Path,
+):
+    """A shelf whose namespace carries Castle's v1 format marker (as Castle 0.3 wrote it)
+    is refused at open with the typed error naming Castle's explicit migration, and the
+    store is left exactly as it was: Biblios never migrates."""
+    import sqlite3
+    from contextlib import closing
+
+    from castle import namespace_migrate_v1
+
+    from biblios.errors import NamespaceFormatError
+
+    shelf, _settings = make_shelf(tmp_path)
+    root = shelf.root
+    shelf.close()
+    with closing(sqlite3.connect(root / "namespace" / "namespace.sqlite")) as db:
+        db.execute("PRAGMA user_version=1")
+
+    def stored() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(root)): path.read_bytes()
+            for path in sorted((root / "namespace").rglob("*"))
+            if path.is_file()
+        }
+
+    before = stored()
+    with pytest.raises(NamespaceFormatError) as raised:
+        open_shelf(root)
+    assert raised.value.__cause__.code == "namespace-format-unsupported"
+    module, name = NamespaceFormatError.MIGRATION.rsplit(".", 1)
+    assert module == namespace_migrate_v1.__name__ and callable(getattr(namespace_migrate_v1, name))
+    assert NamespaceFormatError.MIGRATION in str(raised.value)
+    assert stored() == before
