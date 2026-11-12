@@ -1,10 +1,12 @@
-"""Excision disposes the selected entries' rows in Biblios's own stores, keeps the
-operation and curation replay ledgers, and refuses before any effect while a selected
+"""Excision disposes the selected entries' rows in Biblios's own stores, redacts the
+replay ledgers so no selected identifier survives, and refuses before any effect while a selected
 entry has a persisted stage that no authenticated cancellation has disposed."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -39,10 +41,11 @@ def _excise(fixture, entry_id: str):
     return fixture.bound.excise(fixture.bound.preview_excision(request).request)
 
 
-def test_excision_disposes_selected_rows_and_keeps_the_replay_ledgers(tmp_path: Path) -> None:
+def test_excision_disposes_selected_rows_and_redacts_the_replay_ledgers(tmp_path: Path) -> None:
     """Failure mode: an excised entry's conversion body, rendered mirror or accepted rows
-    survive in Biblios's own stores (or their journals); or the disposal also erases the
-    operation or curation ledgers that refuse a replayed request, or another entry's
+    survive in Biblios's own stores (or their journals); or the disposal erases the
+    operation or curation ledgers that refuse a replayed request instead of redacting the
+    excised entry from recorded results, or another entry's
     records and counts; or the result's read-back inventory cannot see a leftover."""
     fixture = consumer_fixture(tmp_path)
     try:
@@ -56,10 +59,9 @@ def test_excision_disposes_selected_rows_and_keeps_the_replay_ledgers(tmp_path: 
         for entry_id in (selected, kept):
             fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
         palace = fixture.binding.palace_root
-        derived, volatile = palace / DERIVED_NAME, palace / VOLATILE_NAME
+        derived = palace / DERIVED_NAME
         assert any(MARKER in file.read_bytes() for file in _store_files(palace))
         operations = _rows(derived, "operations")
-        curation = _rows(volatile, "curation_requests")
         from biblios.history import _residue
 
         before = dict(_residue(fixture.binding, [selected], []))
@@ -67,13 +69,18 @@ def test_excision_disposes_selected_rows_and_keeps_the_replay_ledgers(tmp_path: 
         assert before["palace.files"] == 1
         result = _excise(fixture, selected)
         # The read-back inventory names every class and finds nothing left of the selection.
-        assert {name for name, _ in result.residue} == set(before)
+        assert {name for name, _ in result.residue} == set(before) | {"biblios.identifier-files"}
         assert all(count == 0 for _, count in result.residue), result.residue
         assert not any(MARKER in file.read_bytes() for file in _store_files(palace))
-        assert (_rows(derived, "operations"), _rows(volatile, "curation_requests")) == (
-            operations,
-            curation,
-        )
+        # The ledgers keep every operation id and request digest, so a replay still
+        # refuses a changed request; recorded results no longer name the excised entry.
+        after = _rows(derived, "operations")
+        assert [row[:2] for row in after] == [row[:2] for row in operations]
+        for before_row, after_row in zip(operations, after, strict=True):
+            if before_row[2] is not None and selected in before_row[2]:
+                assert selected not in after_row[2] and json.loads(after_row[2])["redacted"]
+            else:
+                assert after_row == before_row
         assert [row[0] for row in _rows(derived, "entries")] == [kept]
         counters = dict(_rows(derived, "counters"))
         assert counters.get("state:accepted") == 1
@@ -233,6 +240,11 @@ def test_a_content_selection_disposes_only_retained_files_it_provably_produced(
             assert retained[0].exists() and result.kept_retained == (retained[0].name,)
         else:
             assert not retained[0].exists() and result.kept_retained == ()
+        if edited:
+            # The kept file's retention record forgets the selected source: no
+            # identifier of the selection survives in it.
+            selected = {earlier.encode(), earlier.split(":", 1)[-1].encode()}
+            assert _naming(fixture, selected) == []
     finally:
         fixture.close()
 
@@ -332,9 +344,9 @@ def test_a_replayed_request_after_excision_is_refused_and_recreates_nothing(
         from biblios import pending_stages
 
         assert indexed.replayed and pending_stages(successor).stages == ()
-        # The replay is the original call's record (history): it still names the excised
-        # entry as it was then, which the current shelf contradicts.
-        assert indexed.outcome(entry_id).outcome == "searchable"
+        # The replay is the original call's record with the excised entry redacted out:
+        # it says so, and no longer names the entry.
+        assert indexed.redacted and indexed.outcome(entry_id) is None
         found = successor.search("selected", embedder=HashEmbedder(), reranker=OverlapReranker())
         assert entry_id not in {hit.entry_id for hit in found.hits}
     finally:
@@ -391,3 +403,127 @@ def test_excising_a_replaced_content_not_yet_reconverted_leaves_none_of_it_at_re
             assert not mirror.exists() and result.kept_retained == ()
     finally:
         fixture.close()
+
+
+def _naming(fixture, needles: set[bytes]) -> list[str]:
+    roots = (fixture.binding.palace_root, fixture.binding.mirror_root)
+    return sorted(
+        str(path.relative_to(fixture.binding.root))
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file() and any(needle in path.read_bytes() for needle in needles)
+    )
+
+
+@pytest.mark.parametrize(
+    "route", ["shelf-curation", "cancellation-record", "replaced-content", "replaced-before-derive"]
+)
+def test_no_selected_identifier_survives_in_any_biblios_record(tmp_path: Path, route: str) -> None:
+    """Failure mode: an excision leaves a selected entry id or content id (prefixed or
+    bare sha256) in a Biblios record the targeted disposal does not touch: the curation
+    request ledger written by the Shelf API, a recorded stage cancellation, or an
+    unselected entry's record and accepted stage of a selected earlier source."""
+    from biblios.curation import CurationRequest, ReplaceContent
+
+    fixture = consumer_fixture(tmp_path)
+    try:
+        pipeline = lane_pipeline(fixture, [])
+        if route == "shelf-curation":
+            entry_id = fixture.bound._shelf.add("selected.txt", MARKER).entry_id
+        else:
+            entry_id = fixture.bound.curate(
+                fixture.request("selected.txt", MARKER)
+            ).mutation.affected_entry_ids[0]
+        content = fixture.bound.resolve(entry_id).cas_id
+        if route == "replaced-before-derive":
+            # The creation grant and intent for the first source are never consumed.
+            fixture.bound.curate(
+                CurationRequest(
+                    identifier(), fixture.bound.view.revision, ReplaceContent(entry_id, b"now")
+                )
+            )
+        else:
+            fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
+        if route == "cancellation-record":
+            # A completed stage cancellation's records, made from a real persisted stage:
+            # its receipt and chain keep the stage's canonical bytes and a request naming
+            # the entry; the stage itself is gone, as after the cancellation.
+            other = fixture.bound.curate(
+                fixture.request("held.txt", b"another source")
+            ).mutation.affected_entry_ids[0]
+            fixture.bound.derive(pipeline, other, operation_id=identifier(), authority=_Held())
+            volatile = sqlite3.connect(fixture.binding.palace_root / VOLATILE_NAME)
+            (stage_sha256, canonical) = volatile.execute(
+                "SELECT stage_sha256, canonical FROM stages WHERE entry_id=?", (other,)
+            ).fetchone()
+            with volatile:
+                for table in ("stages", "stage_resume", "stage_rows"):
+                    volatile.execute(f"DELETE FROM {table} WHERE entry_id=?", (other,))
+            volatile.close()
+            staged = json.loads(bytes(canonical))
+            staged["entry"].update(entry_id=entry_id, source_cas_id=content)
+            canonical = json.dumps(staged, sort_keys=True).encode()
+            request = json.dumps({"entry_id": entry_id, "stage_sha256": stage_sha256}).encode()
+            conn = sqlite3.connect(fixture.binding.palace_root / DERIVED_NAME)
+            with conn:
+                conn.execute(
+                    "INSERT INTO cancellations VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (identifier(), "0" * 64, request, stage_sha256, canonical, b"{}", "[]"),
+                )
+                conn.execute(
+                    "INSERT INTO cancellation_chain VALUES (?, ?, ?, ?, ?, ?)",
+                    (stage_sha256, 0, identifier(), "2" * 64, request, b"{}"),
+                )
+            conn.close()
+        if route in ("replaced-content", "replaced-before-derive"):
+            if route == "replaced-content":
+                fixture.bound.curate(
+                    CurationRequest(
+                        identifier(), fixture.bound.view.revision, ReplaceContent(entry_id, b"now")
+                    )
+                )
+            selection = ExcisionSelection(content_ids=(content,))
+            needles = {content.encode(), content.split(":", 1)[-1].encode()}
+        else:
+            selection = ExcisionSelection(content_ids=(content,), entry_ids=(entry_id,))
+            needles = {entry_id.encode(), content.encode(), content.split(":", 1)[-1].encode()}
+        request = ExcisionRequest(
+            identifier(), fixture.bound.view.revision, selection, (), fixture.binding.root / "s"
+        )
+        result = fixture.bound.excise(fixture.bound.preview_excision(request).request)
+        assert _naming(fixture, needles) == [], "a selected identifier survived"
+        if route == "cancellation-record":
+            with closing(sqlite3.connect(fixture.binding.palace_root / DERIVED_NAME)) as conn:
+                left = [
+                    conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    for table in ("cancellations", "cancellation_chain")
+                ]
+            assert left == [0, 0], "the cancellation receipt or its chain survived"
+        assert dict(result.residue)["biblios.identifier-files"] == 0
+    finally:
+        fixture.close()
+
+
+def test_every_store_column_is_classified_for_excision() -> None:
+    """Failure mode: a column added to either store that can hold an entry id or content
+    id is never scrubbed by excision, because nothing forces it to be classified."""
+    from biblios import derived
+    from biblios.history import ID_COLUMNS, NO_ID_COLUMNS
+
+    columns = set()
+    for kind, schema in (
+        ("derived", derived._DERIVED_SCHEMA),
+        ("volatile", derived._VOLATILE_SCHEMA),
+    ):
+        conn = sqlite3.connect(":memory:")
+        with closing(conn):
+            for statement in schema:
+                conn.execute(statement)
+            for (table,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ):
+                columns |= {
+                    (kind, table, row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')
+                }
+    assert set(ID_COLUMNS) | NO_ID_COLUMNS == columns
+    assert not set(ID_COLUMNS) & NO_ID_COLUMNS

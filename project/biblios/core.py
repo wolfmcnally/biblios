@@ -211,6 +211,8 @@ class BringCurrentResult:
     provider_calls: int = 0
     """Provider calls the call this result records made (for a replay: the original's)."""
     swept: bool = False
+    redacted: bool = False
+    """True for a replayed result from which an excision removed the selected entries."""
 
     def outcome(self, entry_id: str) -> EntryOutcome | None:
         return next((item for item in self.entries if item.entry_id == entry_id), None)
@@ -1970,6 +1972,7 @@ def _result_from(document: str) -> BringCurrentResult:
         replayed=True,
         provider_calls=value["provider_calls"],
         swept=value["swept"],
+        redacted=value["redacted"],
     )
 
 

@@ -196,33 +196,95 @@ def test_strict_failures_never_return_degraded_hits(tmp_path: Path, failed_role:
         fixture.close()
 
 
+@pytest.mark.parametrize("when", ("embedding", "reranking"))
 @pytest.mark.parametrize("mutation", ("rename", "replace", "delete"))
-def test_provider_return_after_mutation_refuses_the_old_view(tmp_path: Path, mutation: str) -> None:
+def test_a_hit_changed_during_the_query_is_answered_as_a_search_after_the_change(
+    tmp_path: Path, mutation: str, when: str
+) -> None:
+    """Failure mode: a hit whose entry was renamed, replaced or deleted while the query
+    embedded is served from its old state, or the change refuses the whole answer
+    instead of being judged per hit exactly as a search issued after it would be."""
     fixture = indexed_fixture(tmp_path)
     entry = fixture.bound.files()[0]
     performed = []
 
+    def mutate() -> None:
+        if performed:
+            return
+        action = {
+            "rename": RelocateEntry(entry.entry_id, fixture.root_id, "new.txt"),
+            "replace": ReplaceContent(entry.entry_id, b"different body"),
+            "delete": DeleteEntry(entry.entry_id),
+        }[mutation]
+        result = fixture.bound.curate(
+            CurationRequest(identifier(), fixture.bound.view.revision, action)
+        )
+        performed.append(result.mutation.revision_after)
+
+    class AfterRetrieval(OverlapReranker):
+        # After retrieval, before the per-hit check: the window where the retrieved
+        # rows and the entry's current record can disagree.
+        def score(self, query, texts):
+            if when == "reranking":
+                mutate()
+            return super().score(query, texts)
+
     class Mutating(HashEmbedder):
         def embed(self, texts):
-            action = {
-                "rename": RelocateEntry(entry.entry_id, fixture.root_id, "new.txt"),
-                "replace": ReplaceContent(entry.entry_id, b"different body"),
-                "delete": DeleteEntry(entry.entry_id),
-            }[mutation]
-            result = fixture.bound.curate(
-                CurationRequest(identifier(), fixture.bound.view.revision, action)
-            )
-            performed.append(result.mutation.revision_after)
+            if when == "embedding":
+                mutate()
             return super().embed(texts)
 
     try:
-        with pytest.raises(ConsumerError) as refused:
-            fixture.bound.search("lens", embedder=Mutating(), reranker=OverlapReranker())
-        assert (refused.value.code, len(performed), fixture.bound.active_work) == (
-            "stale-view",
+        found = fixture.bound.search("lens", embedder=Mutating(), reranker=AfterRetrieval())
+        served = {hit.entry_id: hit.path for hit in found.hits}
+        withheld = {item.entry_id: item.category for item in found.withheld}
+        expected = {
+            "rename": ({entry.entry_id: "new.txt"}, {}),
+            "replace": ({}, {entry.entry_id: "not-accepted"}),
+            "delete": ({}, {entry.entry_id: "not-live"}),
+        }[mutation]
+        assert (served, withheld, len(performed), fixture.bound.active_work) == (
+            *expected,
             1,
             0,
-        ), "consumer accepted a provider result across a changed namespace view"
+        ), "a hit changed during the query was not judged as a later search judges it"
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize("through", ("shelf", "stack"))
+def test_an_unrelated_entry_indexed_during_the_query_does_not_refuse_the_answer(
+    tmp_path: Path, through: str
+) -> None:
+    """Failure mode (observed by a consuming service): another document committed and
+    indexed on the same shelf while the query embeds changes the shelf's accumulated
+    view, and the whole answer is refused ``stale-view`` although every returned hit
+    is current."""
+    fixture = indexed_fixture(tmp_path)
+    original = fixture.bound.files()[0]
+    stack = open_bound_stack([fixture.bound]) if through == "stack" else None
+
+    class Indexing(HashEmbedder):
+        fired = False
+
+        def embed(self, texts):
+            if not Indexing.fired:
+                Indexing.fired = True
+                with ThreadPoolExecutor(1) as pool:
+
+                    def ingest() -> None:
+                        fixture.bound.curate(fixture.request("small.txt", b"a small new note"))
+                        fixture.bound._shelf.reconcile(fixture.settings, embedder=HashEmbedder())
+
+                    pool.submit(ingest).result()
+            return super().embed(texts)
+
+    try:
+        target = stack if stack is not None else fixture.bound
+        found = target.search("lens", embedder=Indexing(), reranker=OverlapReranker())
+        assert Indexing.fired and len(fixture.bound.files()) == 2
+        assert original.entry_id in {hit.entry_id for hit in found.hits}
     finally:
         fixture.close()
 

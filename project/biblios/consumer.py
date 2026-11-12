@@ -178,12 +178,9 @@ class BoundShelf:
             store.close()
         return "0" if row is None else row[0]
 
-    def _view(self) -> ShelfView:
-        view = self._admit()
-        # The served view is the incrementally maintained accumulator over each served
-        # entry's (entry id, accepted stage): O(1), and unchanged by unrelated activity.
-        # The observation epoch and gap term is the constant ``none`` until observation
-        # exists.
+    def _store_terms(self) -> list:
+        """The terms that identify the derived store itself rather than its contents:
+        the consumer generation marker and the embedder and vector-backend selectors."""
         marker = self.binding.palace_root / "consumer-generation.json"
         generation = marker.read_text() if marker.is_file() else ""
         selectors = [
@@ -192,6 +189,25 @@ class BoundShelf:
             else None
             for name in ("embedder.toml", "vector-backend.toml")
         ]
+        return [generation, selectors]
+
+    def _search_identity(self) -> tuple:
+        """What a search must find unchanged across its provider calls: the admitted
+        shelf, namespace epoch and lineage, database generation and store terms, but not
+        the revision or the accepted-state accumulator. Entries curated or accepted while
+        the query embeds do not refuse the answer; every returned hit is proven against
+        its own current accepted record by the strict per-hit check instead."""
+        with self._shelf._handle.mutex:
+            view = self._admit()
+            return (replace(view, revision=0, derived_view=""), self._store_terms())
+
+    def _view(self) -> ShelfView:
+        view = self._admit()
+        # The served view is the incrementally maintained accumulator over each served
+        # entry's (entry id, accepted stage): O(1), and unchanged by unrelated activity.
+        # The observation epoch and gap term is the constant ``none`` until observation
+        # exists.
+        generation, selectors = self._store_terms()
         body = json.dumps(
             [self._accumulator(), "none", generation, selectors],
             sort_keys=True,
@@ -405,7 +421,12 @@ class BoundShelf:
         limit: int,
         control: CallControl,
     ) -> SearchResult:
-        before = self.view
+        try:
+            before = self._search_identity()
+        except ConsumerError:
+            raise
+        except Exception as error:
+            raise ConsumerError("view-unreadable", stage="read") from error
         control.check("search")
         try:
             result = self._shelf.search(
@@ -415,7 +436,7 @@ class BoundShelf:
                 reranker=_RerankerFence(reranker, control),
                 strict=True,
             )
-            if self.view != before:
+            if self._search_identity() != before:
                 raise ConsumerError("stale-view", stage="search")
             control.check("search")
             self._observe(result.observations)
@@ -632,7 +653,7 @@ class BoundStack:
     ) -> StackResult:
         try:
             with self._locked():
-                before = tuple(member.view for member in self._members)
+                before = tuple(member._search_identity() for member in self._members)
             control.check("search")
             result = self._stack.search(
                 query,
@@ -642,7 +663,7 @@ class BoundStack:
                 strict=True,
             )
             with self._locked():
-                if tuple(member.view for member in self._members) != before:
+                if tuple(member._search_identity() for member in self._members) != before:
                     raise ConsumerError("stale-view", stage="search")
                 control.check("search")
             for member in self._members:

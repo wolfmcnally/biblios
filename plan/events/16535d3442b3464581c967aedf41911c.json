@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/4d8c80657c0872bf4ecd7441b3ee0c7fc27e8bd22f31a3940114e793f94a6229;sole-owner:1ddfeae0-6bda-40ed-b36f-6d62a2e9f6b5",
+  "from": "not-started",
+  "id": "16535d3442b3464581c967aedf41911c",
+  "owner": "biblios-opus-successor",
+  "phase": "persistent-edit-observation",
+  "previous": "abcde1271946495c975b013fa8d450d5",
+  "reason": "Coordinator-relayed direction to progress the already-planned second child after Tower's 0.3.0 audit found no persistent edit observer; normal methodology, one advisory plan review and one advisory code review",
+  "state": "in-progress",
+  "writer": "biblios-opus-successor"
+}

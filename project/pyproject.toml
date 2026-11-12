@@ -1,6 +1,6 @@
 [project]
 name = "biblios"
-version = "0.3.0"
+version = "0.3.1"
 description = "Standalone, portable knowledge bases (shelves) that can be searched alone or federated in a stack, built from Drawbridge, Castle and Palace."
 requires-python = ">=3.12,<3.14"
 license = "MIT"

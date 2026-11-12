@@ -114,13 +114,13 @@ class ExcisionResult:
     """After disposal, how many records of each class Biblios's own stores and files
     still hold for the selection, read back by keyed lookups (every count is expected to
     be zero). An inventory for the caller's own checks: never authority, and no claim
-    about bytes outside Biblios's stores or about encoded copies elsewhere. The replay
-    ledgers are deliberately not counted and are kept: the operations ledger keeps each
-    recorded indexing result (which can name a selected entry and its stage digest) and
-    the curation ledger keeps each recorded request (names and content references, not
-    bytes), and the cancellation ledger keeps each completed stage cancellation's exact
-    request, stage and signature bytes (which name the entry, its path and digests), so a
-    re-sent request is refused or replayed as history, never re-executed."""
+    about bytes outside Biblios's stores or about encoded copies elsewhere.
+    ``biblios.identifier-files`` counts the files under the palace and mirror roots that
+    still contain a selected entry or content id in any form, expected zero. Recorded
+    call results are redacted (operation id and request digest kept, so a changed request
+    under the id still refuses); curation and cancellation records that name the
+    selection are removed, so re-sending such a request is answered from Castle's own
+    record of the operation, never re-executed."""
     kept_retained: tuple[str, ...] = ()
     """Retained mirror files a content selection did not dispose of: edited after the
     selected content was rendered, or with no provenance record. They stay the user's;
@@ -292,8 +292,8 @@ def _refuse_selected_stages(binding: ShelfBinding, selected, contents, *, effect
 def _dispose_stores(binding: ShelfBinding, selected, contents) -> None:
     """The selected entries' rows in Biblios's own stores (conversion bodies, rendered
     mirrors, accepted stages and chunk digests, grants and marks), then each store is
-    compacted. The operation, curation and cancellation ledgers keep replay protection
-    and are not touched; persisted stages were refused before any disposal."""
+    compacted. The ledgers are redacted afterwards (:func:`_redact_ledgers`,
+    :func:`_scrub_identifiers`); persisted stages were refused before any disposal."""
     from biblios.derived import DERIVED_NAME, VOLATILE_NAME, DerivedStore, account, transaction
 
     marks = ",".join("?" * len(selected))
@@ -439,6 +439,331 @@ def _residue(binding: ShelfBinding, selected, contents) -> tuple[tuple[str, int]
         1 for entry_id in selected if _records_directory(binding, entry_id).exists()
     )
     return tuple(sorted(found.items()))
+
+
+def _redact_ledgers(binding: ShelfBinding, selected) -> None:
+    """Remove the selected entries from every recorded call result. Each operation keeps
+    its id and request digest, so a replay of an old id still refuses a changed request;
+    a replayed result is marked ``redacted`` and names no selected entry."""
+    from biblios.derived import DERIVED_NAME, DerivedStore, transaction
+
+    names = set(selected)
+    if not names or not (binding.palace_root / DERIVED_NAME).is_file():
+        return
+    store = DerivedStore(binding.palace_root, read_only=False)
+    with closing(store.conn):
+        rows = store.conn.execute(
+            "SELECT operation_id, result FROM operations WHERE result IS NOT NULL"
+        ).fetchall()
+        with transaction(store.conn):
+            for operation_id, document in rows:
+                value = json.loads(document)
+                entries = [item for item in value["entries"] if item["entry_id"] not in names]
+                accepted = [item for item in value["accepted"] if item["entry_id"] not in names]
+                if len(entries) == len(value["entries"]) and len(accepted) == len(
+                    value["accepted"]
+                ):
+                    continue
+                value.update(entries=entries, accepted=accepted, redacted=True)
+                store.conn.execute(
+                    "UPDATE operations SET result=? WHERE operation_id=?",
+                    (json.dumps(value, sort_keys=True), operation_id),
+                )
+        _compact(store.conn)
+
+
+def _needles(selected, contents) -> list[bytes]:
+    """Every form a selected identifier is written in: entry ids, and content ids both
+    prefixed (``sha256:<hex>``) and bare."""
+    found = {str(item).encode() for item in selected}
+    for content in contents:
+        found.add(str(content).encode())
+        found.add(str(content).split(":", 1)[-1].encode())
+    return sorted(value for value in found if value)
+
+
+ID_COLUMNS = {
+    # Every column of either store that can hold a selected entry id or content id, and
+    # what the excision does with it (``key``: rows are deleted by the selected entry in
+    # ``_dispose_stores``; ``scrub``: handled by ``_scrub_identifiers``; ``ledger``:
+    # redacted by ``_redact_ledgers``).
+    ("derived", "entries", "entry_id"): "key",
+    ("derived", "entries", "source_cas_id"): "scrub",
+    ("derived", "checkpoints", "entry_id"): "key",
+    ("derived", "checkpoints", "source_cas_id"): "key",
+    ("derived", "checkpoints", "document"): "key",
+    ("derived", "accepted_stages", "entry_id"): "key",
+    ("derived", "accepted_stages", "canonical"): "scrub",
+    ("derived", "accepted_chunks", "entry_id"): "key",
+    ("derived", "accepted_nodes", "entry_id"): "key",
+    ("derived", "cancellations", "request_canonical"): "scrub",
+    ("derived", "cancellations", "stage_canonical"): "scrub",
+    ("derived", "cancellation_chain", "request_canonical"): "scrub",
+    ("derived", "operations", "result"): "ledger",
+    ("volatile", "grants", "entry_id"): "key",
+    ("volatile", "grants", "cas_id"): "scrub",
+    ("volatile", "creation_intents", "entry_id"): "key",
+    ("volatile", "creation_intents", "cas_id"): "scrub",
+    ("volatile", "creation_intents", "source_id"): "scrub",
+    ("volatile", "curation_requests", "request"): "scrub",
+    ("volatile", "dirty", "entry_id"): "key",
+    ("volatile", "read_observations", "entry_id"): "key",
+    ("volatile", "refusals", "entry_id"): "key",
+    ("volatile", "stages", "entry_id"): "refused",
+    ("volatile", "stages", "canonical"): "refused",
+    ("volatile", "stage_resume", "entry_id"): "refused",
+    ("volatile", "stage_resume", "document"): "refused",
+    ("volatile", "stage_rows", "entry_id"): "refused",
+}
+"""``refused``: excision refuses before any effect while such a stage persists. Every
+other column holds no entry or content id; a schema proof checks this inventory is
+complete."""
+
+NO_ID_COLUMNS = frozenset(
+    {
+        ("derived", "accepted_chunks", "body_sha256"),
+        ("derived", "accepted_chunks", "chunk_id"),
+        ("derived", "accepted_chunks", "input_sha256"),
+        ("derived", "accepted_chunks", "position"),
+        ("derived", "accepted_chunks", "vector_sha256"),
+        ("derived", "accepted_nodes", "hash"),
+        ("derived", "accepted_nodes", "hi"),
+        ("derived", "accepted_nodes", "lo"),
+        ("derived", "accepted_stages", "stage_sha256"),
+        ("derived", "cancellation_chain", "evidence"),
+        ("derived", "cancellation_chain", "operation_id"),
+        ("derived", "cancellation_chain", "position"),
+        ("derived", "cancellation_chain", "request_sha256"),
+        ("derived", "cancellation_chain", "stage_sha256"),
+        ("derived", "cancellations", "evidence"),
+        ("derived", "cancellations", "operation_id"),
+        ("derived", "cancellations", "request_sha256"),
+        ("derived", "cancellations", "retained"),
+        ("derived", "cancellations", "stage_sha256"),
+        ("derived", "checkpoints", "key"),
+        ("derived", "counters", "key"),
+        ("derived", "counters", "value"),
+        ("derived", "entries", "accepted_stage_sha256"),
+        ("derived", "entries", "conversion"),
+        ("derived", "entries", "converter"),
+        ("derived", "entries", "converter_version"),
+        ("derived", "entries", "indexed_name"),
+        ("derived", "entries", "indexed_sha256"),
+        ("derived", "entries", "mirror_sha256"),
+        ("derived", "entries", "recorded_ns"),
+        ("derived", "entries", "refusal"),
+        ("derived", "entries", "served_seq"),
+        ("derived", "entries", "stat_json"),
+        ("derived", "entries", "state"),
+        ("derived", "meta", "key"),
+        ("derived", "meta", "value"),
+        ("derived", "operations", "operation_id"),
+        ("derived", "operations", "request_sha256"),
+        ("derived", "view", "key"),
+        ("derived", "view", "value"),
+        ("volatile", "coverage", "key"),
+        ("volatile", "coverage", "value"),
+        ("volatile", "creation_intents", "observed_revision"),
+        ("volatile", "creation_intents", "operation_id"),
+        ("volatile", "creation_intents", "role"),
+        ("volatile", "curation_requests", "request_id"),
+        ("volatile", "dirty", "sequence"),
+        ("volatile", "dirty", "source"),
+        ("volatile", "grants", "intended_mirror_sha256"),
+        ("volatile", "grants", "kind"),
+        ("volatile", "grants", "operation_id"),
+        ("volatile", "grants", "request_fingerprint"),
+        ("volatile", "grants", "revision_after"),
+        ("volatile", "grants", "role"),
+        ("volatile", "grants", "state"),
+        ("volatile", "meta", "key"),
+        ("volatile", "meta", "value"),
+        ("volatile", "read_observations", "category"),
+        ("volatile", "read_observations", "observed"),
+        ("volatile", "refusals", "code"),
+        ("volatile", "refusals", "derivation_sha256"),
+        ("volatile", "refusals", "mirror_sha256"),
+        ("volatile", "stage_resume", "data"),
+        ("volatile", "stage_rows", "body"),
+        ("volatile", "stage_rows", "chunk_id"),
+        ("volatile", "stage_rows", "input_sha256"),
+        ("volatile", "stage_rows", "position"),
+        ("volatile", "stage_rows", "vector"),
+        ("volatile", "stages", "evidence"),
+        ("volatile", "stages", "promotion"),
+        ("volatile", "stages", "stage_sha256"),
+        ("volatile", "stages", "state"),
+    }
+)
+"""Every other column of either store: digests of bytes, counters, states, positions
+and bodies of unselected rows only, never an entry id or content id."""
+
+
+def _staged_names(canonical: bytes, entries: set[str], sources: set[str]) -> bool:
+    """Whether a stage document names a selected entry or source. A document that does
+    not parse as a stage is judged by its own bytes, so one damaged row can neither hide
+    an identifier nor make the excision unrecoverable."""
+    data = bytes(canonical)
+    try:
+        entry = json.loads(data)["entry"]
+        return entry.get("entry_id") in entries or entry.get("source_cas_id") in sources
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return any(needle in data for needle in _needles(entries, sources))
+
+
+def _scrub_identifiers(binding: ShelfBinding, selected, contents) -> None:
+    """Remove the selected identifiers that the keyed disposal leaves, column by column:
+    an unselected entry's record forgets a selected source; an accepted stage, a stage
+    cancellation (its receipt and its chain), a grant, a creation intent or a curation
+    request that names the selection is removed; a kept retention record forgets a
+    selected source. Each action matches only its own column, never a digest elsewhere
+    that merely equals a selected one."""
+    from biblios.derived import DERIVED_NAME, VOLATILE_NAME, transaction
+
+    entries, sources = set(selected), set(contents)
+    if not entries and not sources:
+        return
+    derived = binding.palace_root / DERIVED_NAME
+    if derived.is_file():
+        with closing(sqlite3.connect(derived, isolation_level=None)) as conn:
+            marks = ",".join("?" * len(sources))
+            with transaction(conn):
+                if sources:
+                    conn.execute(
+                        f"UPDATE entries SET source_cas_id=NULL WHERE source_cas_id IN ({marks})",
+                        tuple(sources),
+                    )
+                for entry_id, canonical in conn.execute(
+                    "SELECT entry_id, canonical FROM accepted_stages"
+                ).fetchall():
+                    if _staged_names(canonical, entries, sources):
+                        conn.execute("DELETE FROM accepted_stages WHERE entry_id=?", (entry_id,))
+                for operation_id, stage_sha256, request, stage in conn.execute(
+                    "SELECT operation_id, stage_sha256, request_canonical, stage_canonical "
+                    "FROM cancellations"
+                ).fetchall():
+                    named = _staged_names(stage, entries, sources) or any(
+                        entry.encode() in bytes(request) for entry in entries
+                    )
+                    if named:
+                        conn.execute(
+                            "DELETE FROM cancellations WHERE operation_id=?", (operation_id,)
+                        )
+                        conn.execute(
+                            "DELETE FROM cancellation_chain WHERE stage_sha256=?", (stage_sha256,)
+                        )
+                for stage_sha256, position, request in conn.execute(
+                    "SELECT stage_sha256, position, request_canonical FROM cancellation_chain"
+                ).fetchall():
+                    if any(entry.encode() in bytes(request) for entry in entries):
+                        conn.execute(
+                            "DELETE FROM cancellation_chain WHERE stage_sha256=? AND position=?",
+                            (stage_sha256, position),
+                        )
+            _compact(conn)
+    volatile = binding.palace_root / VOLATILE_NAME
+    if volatile.is_file():
+        with closing(sqlite3.connect(volatile, isolation_level=None)) as conn:
+            with transaction(conn):
+                if sources:
+                    marks = ",".join("?" * len(sources))
+                    conn.execute(f"DELETE FROM grants WHERE cas_id IN ({marks})", tuple(sources))
+                    conn.execute(
+                        f"DELETE FROM creation_intents WHERE cas_id IN ({marks})", tuple(sources)
+                    )
+                if entries:
+                    marks = ",".join("?" * len(entries))
+                    conn.execute(
+                        f"DELETE FROM creation_intents WHERE source_id IN ({marks})",
+                        tuple(entries),
+                    )
+                needles = _needles(entries, sources)
+                for request_id, request in conn.execute(
+                    "SELECT request_id, request FROM curation_requests"
+                ).fetchall():
+                    text = request.encode() if isinstance(request, str) else bytes(request)
+                    if any(needle in text for needle in needles):
+                        conn.execute(
+                            "DELETE FROM curation_requests WHERE request_id=?", (request_id,)
+                        )
+            _compact(conn)
+    from biblios.mirrors import _RETENTIONS
+
+    records = binding.palace_root / _RETENTIONS
+    if sources and records.is_dir() and not records.is_symlink():
+        for record_file in sorted(records.rglob("*.json")):
+            if record_file.is_symlink():
+                continue
+            record = json.loads(record_file.read_text())
+            if isinstance(record, dict) and record.get("source_cas_id") in sources:
+                record["source_cas_id"] = None
+                save_checkpoint(record_file, record, stage="history")
+
+
+SCAN_CHUNK = 1 << 20
+
+
+def _identifier_residue(binding: ShelfBinding, selected, contents) -> int:
+    """How many Biblios-managed files under the palace and mirror roots still contain a
+    selected identifier in any form, read in bounded chunks (one pass over the bytes;
+    the marker is excluded until its redacted write)."""
+    needles = _needles(selected, contents)
+    if not needles:
+        return 0
+    overlap = max(len(needle) for needle in needles) - 1
+    count = 0
+    for root in (binding.palace_root, binding.mirror_root):
+        for file in sorted(root.rglob("*")):
+            if not file.is_file() or file.is_symlink() or file.name == "consumer-excision.json":
+                continue
+            tail = b""
+            with file.open("rb") as stream:
+                while chunk := stream.read(SCAN_CHUNK):
+                    window = tail + chunk
+                    if any(needle in window for needle in needles):
+                        count += 1
+                        break
+                    tail = window[-overlap:] if overlap else b""
+    return count
+
+
+def _completed_marker(document: dict, epoch_id: str, residue, kept) -> dict:
+    """The marker a completed excision keeps: no selected entry or content identifier,
+    only what binds a later recovery call to this operation and what it reported."""
+    return {
+        "state": "complete",
+        "operation_id": document["operation_id"],
+        "request_sha256": document["request_sha256"],
+        "successor_root": document["successor_root"],
+        "epoch_id": epoch_id,
+        "selected_entries": len(document["entry_ids"]),
+        "selected_contents": len(document.get("content_ids", [])),
+        "residue": [list(item) for item in residue],
+        "kept_retained": list(kept),
+    }
+
+
+def _finish(binding: ShelfBinding, document: dict, epoch_id: str):
+    """Dispose, record the kept files, redact the ledgers, read back the keyed residue
+    (before the scrub forgets the sources it is keyed on), scrub the remaining
+    identifiers, count any identifier still present, then replace the marker with its
+    redacted completed form. Until that last write the marker names the selection, so
+    an interrupted finish is recovered by repeating these steps."""
+    selected = document["entry_ids"]
+    contents = document.get("content_ids", [])
+    kept = tuple(sorted(set(_disposition(binding, document)) | set(document.get("kept", []))))
+    if kept and list(kept) != document.get("kept"):
+        # Kept files name only unselected entries; recorded now so a recovery after the
+        # scrub (which forgets their selected source) still reports them.
+        save_checkpoint(_marker(binding), dict(document, kept=list(kept)), stage="history")
+    _redact_ledgers(binding, selected)
+    residue = _residue(binding, selected, contents)
+    _scrub_identifiers(binding, selected, contents)
+    residue += (("biblios.identifier-files", _identifier_residue(binding, selected, contents)),)
+    save_checkpoint(
+        _marker(binding), _completed_marker(document, epoch_id, residue, kept), stage="history"
+    )
+    return kept, residue
 
 
 def _compact(conn: sqlite3.Connection) -> None:
@@ -765,10 +1090,7 @@ def excise(
             ) from error
         bound._closed = True
         try:
-            kept = _disposition(bound.binding, document)
-            document.update(state="complete", epoch_id=result.cas_binding.epoch_id)
-            save_checkpoint(_marker(bound.binding), document, stage="history")
-            residue = _residue(bound.binding, document["entry_ids"], document["content_ids"])
+            kept, residue = _finish(bound.binding, document, result.cas_binding.epoch_id)
         except Exception as error:
             raise ConsumerError(
                 "derived-recovery-required", stage="history", effect="recovery-required"
@@ -814,13 +1136,17 @@ def recover_excision(
                     "action": "resume",
                 },
             )
-            kept = _disposition(binding, document)
-            document.update(state="complete", epoch_id=result.cas_binding.epoch_id)
-            save_checkpoint(_marker(binding), document, stage="history")
+            if document["state"] == "complete":
+                # Already finished and redacted: nothing selected is left to dispose,
+                # and the residue it reported is the record's.
+                residue = tuple((name, count) for name, count in document["residue"])
+                kept: tuple[str, ...] = tuple(document["kept_retained"])
+            else:
+                kept, residue = _finish(binding, document, result.cas_binding.epoch_id)
             return ExcisionResult(
                 result,
                 replace(successor, expected_cas=result.cas_binding),
-                residue=_residue(binding, document["entry_ids"], document.get("content_ids", [])),
+                residue=residue,
                 kept_retained=kept,
             )
     except ConsumerError:

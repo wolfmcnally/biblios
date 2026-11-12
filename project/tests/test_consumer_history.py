@@ -173,6 +173,101 @@ def test_excised_words_leave_every_file_while_the_survivor_stays_searchable(
         fixture.close()
 
 
+def test_a_completed_excision_leaves_no_selected_identifier_in_any_biblios_record(
+    tmp_path: Path,
+) -> None:
+    """Failure mode: after a completed excision the disposition marker still lists the
+    selected entry and content ids, or a recorded call result still names the excised
+    entry, so the identifiers (a content digest permits a confirmation test) survive in
+    Biblios's own files; or redaction weakens replay so a changed request under an old
+    operation id is no longer refused."""
+    from biblios.core import BringCurrentRequest, bring_current
+
+    fixture = consumer_fixture(tmp_path)
+    reader = None
+    try:
+        chosen = fixture.bound.curate(fixture.request("selected.txt", b"selected spill text"))
+        survivor = fixture.bound.curate(fixture.request("survivor.txt", b"surviving lighthouse"))
+        recorded = identifier()
+        fixture.bound._shelf.reconcile(
+            fixture.settings, embedder=HashEmbedder(), operation_id=recorded
+        )
+        selected_id = chosen.mutation.affected_entry_ids[0]
+        survivor_id = survivor.mutation.affected_entry_ids[0]
+        content_id = fixture.bound.resolve(selected_id).cas_id
+        request = ExcisionRequest(
+            identifier(),
+            fixture.bound.view.revision,
+            ExcisionSelection(content_ids=(content_id,), entry_ids=(selected_id,)),
+            (),
+            fixture.binding.root / "successor",
+        )
+        proposed = fixture.bound.preview_excision(request)
+        assert proposed.request is not None
+        result = fixture.bound.excise(proposed.request)
+        bare = content_id.split(":", 1)[-1]
+        needles = {selected_id.encode(), content_id.encode(), bare.encode()}
+        roots = (fixture.binding.palace_root, fixture.binding.mirror_root)
+        remnants = sorted(
+            str(path.relative_to(tmp_path))
+            for root in roots
+            for path in root.rglob("*")
+            if path.is_file() and any(needle in path.read_bytes() for needle in needles)
+        )
+        assert remnants == [], "a selected identifier survived in a Biblios record"
+        # Castle's roots, checked separately: no content id in either form anywhere, and
+        # no entry id outside the namespace's own directory.
+        castle = sorted(
+            str(path.relative_to(tmp_path))
+            for root in (
+                result.successor_binding.castle_root,
+                result.successor_binding.namespace_root,
+            )
+            for path in Path(root).rglob("*")
+            if path.is_file()
+            and any(
+                needle in path.read_bytes()
+                for needle in (
+                    {content_id.encode(), bare.encode()}
+                    if Path(root) == Path(result.successor_binding.namespace_root)
+                    else needles
+                )
+            )
+        )
+        assert castle == [], "a selected identifier survived in Castle's successor records"
+        declared = replace(result.successor_binding, ownership="owned")
+        reader = open_bound_shelf(
+            declared,
+            LocalSession(
+                declared.namespace_root, declared.castle_root, declared.root / "namespace.lock"
+            ),
+        )
+        from biblios.pipeline import ConsumerPipeline
+        from biblios.representation import (
+            default_policy,
+            drawbridge_converter,
+            envelope_renderer,
+        )
+
+        pipeline = ConsumerPipeline(
+            converter=drawbridge_converter(fixture.settings),
+            renderer=envelope_renderer,
+            input_view=None,
+            policy=default_policy(),
+            embedder=HashEmbedder(),
+        )
+        replayed = bring_current(reader, BringCurrentRequest(recorded), pipeline=pipeline)
+        assert replayed.replayed and replayed.redacted
+        assert {item.entry_id for item in replayed.entries} == {survivor_id}
+        with pytest.raises(ConsumerError) as refused:
+            bring_current(reader, BringCurrentRequest(recorded, (survivor_id,)), pipeline=pipeline)
+        assert refused.value.code == "operation-conflict"
+    finally:
+        if reader is not None:
+            reader.close()
+        fixture.close()
+
+
 def _crash_cutover(directory: Path, boundary: str) -> None:
     """Disposable child only; interrupt actual persisted stages without fake receipts."""
     import castle.namespace_excision as castle_excision
@@ -362,5 +457,13 @@ def test_real_process_interruption_requires_exact_recovery_and_preserves_indexed
         ) == (b"surviving lighthouse", {payload["survivor"]}, False, False, False, "complete"), (
             "recovery exposed selected data or lost an indexed survivor"
         )
+        selected = payload["selected"].encode()
+        named = sorted(
+            str(path.relative_to(tmp_path))
+            for root in (binding.palace_root, binding.mirror_root)
+            for path in root.rglob("*")
+            if path.is_file() and selected in path.read_bytes()
+        )
+        assert named == [], "recovery left the selected entry id in a Biblios record"
     finally:
         reader.close()
