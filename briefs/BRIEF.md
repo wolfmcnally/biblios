@@ -164,3 +164,5 @@ Recorded from the operator's answers of 2026-11-06, collected through a Fenric w
 ## Catalog
 
 This is the entry-point brief. Research and design briefs that follow are indexed here as they are written.
+
+- [Metadata authority](metadata-authority.md): Castle is the authority for current attributes and filenames, mirrors are content, and header fields Castle does not control are searchable as attributed metadata (operator, 2026-11-13).

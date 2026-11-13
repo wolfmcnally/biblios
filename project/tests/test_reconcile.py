@@ -29,6 +29,7 @@ def test_curate_reconcile_search_follows_the_phase_scenario(tmp_path: Path) -> N
 
         shelf.update("notes.txt", TIDE.encode())
         assert not shelf.verify().ok
+        before = shelf.mirror_path(recipe.entry_id).read_bytes()
         shelf.rename("recipe.txt", "bread.txt")
         embedder.calls.clear()
         second = shelf.reconcile(settings, embedder=embedder)
@@ -39,7 +40,9 @@ def test_curate_reconcile_search_follows_the_phase_scenario(tmp_path: Path) -> N
         renamed = next(item for item in second.entries if item.entry_id == recipe.entry_id)
         assert renamed.embedded == 1
         assert any("bread.txt" in " ".join(call) for call in embedder.calls)
-        assert "recipe.txt" in shelf.mirror_path(recipe.entry_id).read_text()
+        # The mirror is content only: it never carried the old name and still does not.
+        after = shelf.mirror_path(recipe.entry_id).read_bytes()
+        assert after == before and b"recipe" not in after and b"bread" not in after
         assert shelf.verify().ok, shelf.verify().problems
 
         found = shelf.search("neap tides smallest range", embedder=embedder, reranker=reranker)

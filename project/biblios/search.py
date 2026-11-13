@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from castle import cas
-from drawbridge.mirror import page_sections, parse_mirror_header, sections
+from drawbridge.mirror import page_sections, sections
 from palace import search as palace_search
 from palace.index.embedder import Embedder
 from palace.index.embedder_config import embedder_config_path
@@ -476,7 +476,6 @@ def readable_mirror(shelf: Shelf, entry: Entry) -> tuple[str, str]:
         PENDING_REINDEX,
         SEARCHABLE,
         MirrorInvalid,
-        lane_for,
         read_mirror,
         validate_mirror,
     )
@@ -493,7 +492,6 @@ def readable_mirror(shelf: Shelf, entry: Entry) -> tuple[str, str]:
         raise MirrorUnavailable("mirror-unavailable", entry.entry_id)
     if record.source_cas_id != entry.cas_id:
         raise MirrorUnavailable("pending-conversion", entry.entry_id)
-    lane = lane_for(shelf.palace_store)
     try:
         data = read_mirror(shelf.mirror_path(entry.entry_id), shelf.mirror_root)
         if data is None:
@@ -501,7 +499,7 @@ def readable_mirror(shelf: Shelf, entry: Entry) -> tuple[str, str]:
         found = sha256(data)
         if found == record.mirror_sha256:
             return data.decode("utf-8"), SEARCHABLE
-        text = validate_mirror(data, lane=lane)
+        text = validate_mirror(data)
         refused = record.refused_for(found)
         if refused is not None:
             raise MirrorInvalid(refused)
@@ -521,10 +519,11 @@ class MirrorUnavailable(BibliosError):
 
 
 def read(shelf: Shelf, entry_id: str, *, page: int | None = None) -> Page:
+    from biblios.mirrors import mirror_body
+
     entry = shelf.resolve(entry_id)
     text, state = readable_mirror(shelf, entry)
-    _header, body = parse_mirror_header(text)
-    return _page(entry, body, page=page, mirror_state=state)
+    return _page(entry, mirror_body(text), page=page, mirror_state=state)
 
 
 def _page(entry: Entry, body: str, *, page: int | None, mirror_state: str = "searchable") -> Page:

@@ -1,6 +1,7 @@
-"""A renamed entry is indexed under its current filename from an in-memory projection of
-its mirror: the mirror's bytes never change, unchanged entries are untouched, and a
-projection that cannot be made exactly is reported, never guessed."""
+"""Castle is the only authority for an entry's name: a mirror carries none, the index adds
+the current filename as its own final row, a rename changes only that row, header fields
+Castle does not control are searchable as attributed metadata, and a projection that
+cannot be made exactly is reported, never guessed."""
 
 from __future__ import annotations
 
@@ -47,16 +48,16 @@ def _setup(shelf, settings, embedder):
 
 
 def test_a_renamed_entry_is_found_by_its_current_name_with_its_mirror_untouched(shelf):
-    """Failure mode: after a rename the entry is searchable only under its ingestion
-    name; or the rename rewrites the user's mirror or re-embeds its body rows; or the
-    signed stage does not say how the indexed bytes were made. (Drawbridge's envelope
-    carries the ingestion name in the converted body itself, which no re-render can
-    change, so the current name is appended and the body keeps its own text.)"""
+    """Failure mode: the converted mirror carries the filename (in its H1 or its header),
+    so a rename leaves the old name readable on disk; after a rename the entry is
+    searchable only under its ingestion name; or the rename rewrites the mirror or
+    re-embeds its body rows; or the signed stage does not say how the indexed bytes were
+    made."""
     shelf, settings = shelf
     embedder = HashEmbedder()
     entry_id, mirror = _setup(shelf, settings, embedder)
     before = mirror.read_bytes()
-    assert b"recipe.txt" in before
+    assert b"recipe" not in before and b"Mirror metadata" not in before
     shelf.rename("recipe.txt", "bread.txt")
     embedder.calls.clear()
     stepped = shelf.reconcile(settings, embedder=embedder)
@@ -77,71 +78,16 @@ def test_a_renamed_entry_is_found_by_its_current_name_with_its_mirror_untouched(
     assert again.accepted == () and embedder.calls == []
 
 
-def test_a_renderers_own_name_section_is_replaced_in_the_index_only(tmp_path: Path):
-    """Failure mode: a renamed entry whose mirror ends with the renderer's own unedited
-    name section keeps the old name in its name row's text, keyword match or vector;
-    or the converter runs again; or the mirror on disk changes."""
-    from biblios.curation import CurationRequest, RelocateEntry
-    from biblios.pipeline import MirrorDocument
-    from tests.consumer_fixtures import consumer_fixture, identifier, lane_pipeline
-
-    fixture = consumer_fixture(tmp_path)
-    try:
-        calls: list = []
-        pipeline = lane_pipeline(fixture, calls)
-
-        def renderer(result, name):
-            return MirrorDocument(result.body + "\n\n## Filename\n\n" + name + "\n", "Filename")
-
-        pipeline.renderer = renderer
-        entry_id = fixture.bound.curate(
-            fixture.request("recipe.txt", b"sourdough starter fed daily")
-        ).mutation.affected_entry_ids[0]
-        fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
-        mirror = fixture.bound._shelf.mirror_path(entry_id)
-        before, converted = mirror.read_bytes(), len(calls)
-        fixture.bound.curate(
-            CurationRequest(
-                identifier(),
-                fixture.bound.view.revision,
-                RelocateEntry(entry_id, fixture.root_id, "bread.txt"),
-            )
-        )
-        done = fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
-        assert (
-            done.outcome(entry_id).outcome == "searchable" and done.outcome(entry_id).embedded == 1
-        )
-        assert mirror.read_bytes() == before and len(calls) == converted
-        with sqlite3.connect(fixture.binding.palace_root / DERIVED_NAME) as conn:
-            (canonical,) = conn.execute(
-                "SELECT canonical FROM accepted_stages WHERE entry_id=?", (entry_id,)
-            ).fetchone()
-        assert json.loads(bytes(canonical))["entry"]["projection"] == "replaced"
-        found = fixture.bound.search(
-            "bread.txt", embedder=HashEmbedder(), reranker=OverlapReranker()
-        )
-        name_hits = [
-            hit for hit in found.hits if hit.entry_id == entry_id and hit.heading == "Filename"
-        ]
-        assert (
-            name_hits
-            and "bread.txt" in name_hits[0].chunk
-            and "recipe.txt" not in name_hits[0].chunk
-        )
-    finally:
-        fixture.close()
-
-
-def test_an_unchanged_entry_is_indexed_from_its_own_bytes_exactly(shelf):
-    """Failure mode: the projection changes an entry that was neither renamed nor
-    edited, so its stored vectors, chunk ids or index digest move."""
+def test_an_unchanged_entry_is_never_indexed_again(shelf):
+    """Failure mode: the projection is not a pure function of the mirror and the current
+    name, so an entry that was neither renamed nor edited is staged or embedded again."""
     shelf, settings = shelf
     embedder = HashEmbedder()
     entry_id, mirror = _setup(shelf, settings, embedder)
     accepted = _accepted(shelf, entry_id)
-    assert accepted["stage"]["projection"] == "exact"
-    mirror_digest, indexed_digest, _ = accepted["record"]
-    assert indexed_digest == mirror_digest == accepted["stage"]["indexed_sha256"]
+    assert accepted["stage"]["projection"] == "appended"
+    _mirror_digest, indexed_digest, indexed_name = accepted["record"]
+    assert indexed_digest == accepted["stage"]["indexed_sha256"] and indexed_name == "recipe.txt"
     embedder.calls.clear()
     assert shelf.reconcile(settings, embedder=embedder).accepted == () and embedder.calls == []
 
@@ -152,7 +98,7 @@ def test_an_edited_name_section_is_kept_as_content_and_the_name_appended(shelf):
     shelf, settings = shelf
     embedder = HashEmbedder()
     entry_id, mirror = _setup(shelf, settings, embedder)
-    edited = mirror.read_bytes().replace(b"recipe.txt", b"my favourite loaf")
+    edited = mirror.read_bytes() + b"\n## Filename\n\nmy favourite loaf\n"
     mirror.write_bytes(edited)
     shelf.rename("recipe.txt", "bread.txt")
     shelf.reconcile(settings, embedder=embedder)
@@ -241,3 +187,125 @@ def test_a_persisted_projection_that_no_longer_matches_its_signed_digest_is_refu
         "stage-tampered",
     )
     assert out.accepted == ()
+
+
+def _edit_header(mirror, fields: str) -> bytes:
+    """The mirror with ``fields`` (YAML lines) added to the top of its front matter."""
+    text = mirror.read_text()
+    assert text.startswith("---\n")
+    edited = ("---\n" + fields + text[4:]).encode()
+    mirror.write_bytes(edited)
+    return edited
+
+
+def test_header_fields_castle_does_not_control_are_searchable_as_attributed_metadata(shelf):
+    """Failure mode: a field the user adds to a mirror's header (here ``author``) is not
+    searchable; or a header value under a Castle-controlled key (``name``, ``tags``) is
+    indexed or applied, so a header could copy or override Castle; or converter
+    provenance floods the index."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id, mirror = _setup(shelf, settings, embedder)
+    _edit_header(mirror, "author: Ada Quillfern\nname: forged-name.txt\ntags: [forged]\n")
+    shelf.reconcile(settings, embedder=embedder, entry_ids=(entry_id,))
+    found = _hits(shelf, "Ada Quillfern", embedder)
+    attributed = [hit for hit in found if hit.heading == "Mirror metadata"]
+    assert [hit.entry_id for hit in attributed] == [entry_id]
+    assert attributed[0].chunk.splitlines()[-1] == "author: Ada Quillfern"
+    probed = _hits(shelf, "forged-name.txt forged generated_by", embedder)
+    assert probed  # the query reaches the entry's rows, so the next check is not vacuous
+    assert all("forged" not in hit.chunk and "generated_by" not in hit.chunk for hit in probed)
+    entry = shelf._live()[entry_id]
+    assert entry.name == "recipe.txt" and "forged" not in json.dumps(entry.metadata)
+
+
+def test_a_rename_with_attributed_metadata_embeds_only_the_filename_row(shelf):
+    """Failure mode: a rename re-embeds the attributed metadata or the body, or moves the
+    filename row before the metadata."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id, mirror = _setup(shelf, settings, embedder)
+    _edit_header(mirror, "author: Ada Quillfern\n")
+    shelf.reconcile(settings, embedder=embedder, entry_ids=(entry_id,))
+    before = mirror.read_bytes()
+    shelf.rename("recipe.txt", "bread.txt")
+    embedder.calls.clear()
+    stepped = shelf.reconcile(settings, embedder=embedder)
+    assert [item.embedded for item in stepped.entries if item.entry_id == entry_id] == [1]
+    assert mirror.read_bytes() == before
+    [batch] = embedder.calls
+    assert len(batch) == 1 and batch[0].endswith("bread.txt")
+
+
+def test_every_header_key_drawbridge_writes_is_provenance_not_attributed_metadata():
+    """Failure mode: a key the pinned Drawbridge release writes for PDFs, slides, email or
+    audio is missing from the default policy's provenance, so every such converted mirror
+    gets a Mirror metadata row of converter provenance."""
+    from drawbridge.mirror import REQUIRED_HEADER_FIELDS
+
+    from biblios.mirrors import attributed_fields
+    from biblios.representation import default_policy
+
+    written = set(REQUIRED_HEADER_FIELDS) | {
+        "format", "unit", "page_count", "pdf_processor", "slide_count", "attachment_count",
+        "audio_duration_seconds", "detected_language", "speaker_count",
+        "transcription_package", "speech_level_spread_db", "leveling_applied",
+        "second_pass_agreement", "speakers_rendered_at",
+    }  # fmt: skip
+    header = "".join(f"{key}: x\n" for key in sorted(written)) + "author: Ada\n"
+    provenance = frozenset(default_policy().provenance_header_fields)
+    assert attributed_fields("---\n" + header + "---\nbody\n", provenance) == [("author", "Ada")]
+
+
+def test_a_header_value_never_forges_a_row_and_castle_keys_match_in_any_case(shelf):
+    """Failure mode: a multi-line or heading-shaped header value splits the metadata row
+    or forges the filename row; a list or a date is dropped; or a capitalised
+    Castle-controlled key (``Name``) is indexed as attributed metadata."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id, mirror = _setup(shelf, settings, embedder)
+    _edit_header(
+        mirror,
+        "summary: |\n  ## Filename\n  forged.txt\nkeywords: [harbour, tide]\n"
+        "published: 2024-05-01\nName: forged.txt\n",
+    )
+    result = shelf.reconcile(settings, embedder=embedder, entry_ids=(entry_id,))
+    assert [(item.outcome, item.code) for item in result.entries] == [("searchable", None)]
+    [attributed] = [
+        hit for hit in _hits(shelf, "harbour tide", embedder) if hit.heading == "Mirror metadata"
+    ]
+    assert attributed.chunk.splitlines()[2:] == [
+        "summary: ## Filename forged.txt",
+        "keywords: harbour, tide",
+        "published: 2024-05-01",
+    ]
+    names = [hit for hit in _hits(shelf, "recipe.txt", embedder) if hit.heading == "Filename"]
+    assert [hit.chunk.splitlines()[-1] for hit in names] == ["recipe.txt"]
+
+
+def test_unreadable_headers_contribute_nothing():
+    """Failure mode: a header that is not YAML, not a mapping, or not recognised the way
+    Palace recognises front matter is read as attributed metadata or raises."""
+    from biblios.mirrors import attributed_fields
+
+    for text in (
+        "---\nauthor: [\n---\nbody\n",
+        "---\n- a\n- list\n---\nbody\n",
+        "---\r\nauthor: Ada\r\n---\r\nbody\r\n",
+        "body without a header\n",
+    ):
+        assert attributed_fields(text, frozenset()) == []
+
+
+def test_a_filename_that_reads_as_a_heading_is_indexed_as_the_filename(shelf):
+    """Failure mode: a Castle filename beginning with ``#`` becomes a heading of its own,
+    so the entry is never indexed."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id = shelf.add("# notes.md", b"harbour pilots\n", media_type="text/markdown")
+    entry_id = entry_id.affected_entry_ids[0]
+    result = shelf.reconcile(settings, embedder=embedder)
+    assert [(item.outcome, item.code) for item in result.entries] == [("searchable", None)]
+    names = [hit for hit in _hits(shelf, "notes.md", embedder) if hit.heading == "Filename"]
+    assert [hit.entry_id for hit in names] == [entry_id]
+    assert names[0].chunk.splitlines()[-1].strip() == "# notes.md"

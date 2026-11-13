@@ -14,7 +14,7 @@ import pytest
 
 from biblios.core import StageRefused
 from biblios.derived import DERIVED_NAME
-from biblios.testing import HashEmbedder
+from biblios.testing import HashEmbedder, OverlapReranker
 from tests.consumer_fixtures import consumer_fixture, identifier, lane_pipeline
 from tests.test_core import _Holding
 
@@ -171,11 +171,11 @@ def test_a_persisted_checkpoint_is_only_verified_and_never_sealed_again(lane):
 
 
 @pytest.mark.parametrize(
-    "tamper", ("conversion-body", "mirror-markdown", "mirror-name", "foreign-seal", "no-seal")
+    "tamper", ("conversion-body", "mirror-markdown", "foreign-seal", "no-seal")
 )
 def test_a_changed_or_unsealed_checkpoint_is_never_reused_converted_or_sealed(lane, tamper):
-    """Failure mode: a checkpoint changed in the store (its conversion, its rendering,
-    the name it was rendered for, or a seal copied from another checkpoint), or one
+    """Failure mode: a checkpoint changed in the store (its conversion, its rendering or
+    a seal copied from another checkpoint), or one
     persisted without a seal, reaches a stage the caller signs, is sealed as if fresh, or
     makes Biblios convert or embed again by itself."""
     fixture, pipeline, calls, embedder, entry_id = lane
@@ -187,8 +187,6 @@ def test_a_changed_or_unsealed_checkpoint_is_never_reused_converted_or_sealed(la
         document["conversion"]["body"] = "Lighthouse lens sabotage."
     elif tamper == "mirror-markdown":
         document["mirror"]["markdown"] = document["mirror"]["markdown"].replace("lens", "lamp")
-    elif tamper == "mirror-name":
-        document["mirror_name"] = "other.txt"
     elif tamper == "foreign-seal":
         # The caller's genuine seal, but over another checkpoint (the converted level).
         document["seal"] = sealer._sign("checkpoint", sealer.sealed[0].sha256).hex()
@@ -259,41 +257,37 @@ def test_a_failed_seal_leaves_the_dispatch_uncertain_until_the_caller_retries(la
     assert _outcome(retried, entry_id) == ("searchable", None) and len(calls) == 2
 
 
-def test_a_projection_uses_the_recorded_rendering_only_once_its_seal_is_verified(lane):
-    """Failure mode: under a stage authority a direct edit's indexed bytes are chosen from
-    a recorded rendering the caller never sealed, so a store write decides which of the
-    user's bytes are dropped from the index."""
+def test_a_direct_edit_is_indexed_from_every_mirror_byte_whatever_the_store_records(lane):
+    """Failure mode: under a stage authority a direct edit's indexed bytes depend on a
+    recorded rendering in the store (which a store write could alter), so a store write
+    decides which of the user's bytes are dropped from the index."""
     fixture, pipeline, calls, embedder, entry_id = lane
     sealer = _Sealer()
     _derive(fixture, pipeline, entry_id, sealer)
     shelf = fixture.bound._shelf
     path = shelf.mirror_path(entry_id)
     path.write_text(path.read_text().replace("Independent body row.", "Edited by the user."))
-    honest = _derive(fixture, pipeline, entry_id, sealer)
-    assert _outcome(honest, entry_id) == ("searchable", None)
-    stage = _accepted_stage(fixture, entry_id)
-    assert stage["entry"]["projection"] == "exact"
-    assert stage["entry"]["checkpoint"]["reused"] is True
-    path.write_text(path.read_text().replace("Edited by the user.", "Edited again."))
     document = _document(fixture, entry_id)
-    document["mirror"]["name_heading"] = "Extra"  # would cut the user's section away
+    document["mirror"]["markdown"] = "# Forged\n"
     _store(fixture, entry_id, document)
-    forged = _derive(fixture, pipeline, entry_id, sealer)
-    assert _outcome(forged, entry_id) == ("searchable", None)
+    edited = _derive(fixture, pipeline, entry_id, sealer)
+    assert _outcome(edited, entry_id) == ("searchable", None)
     stage = _accepted_stage(fixture, entry_id)
     assert stage["entry"]["projection"] == "appended" and stage["entry"]["checkpoint"] is None
+    hits = fixture.bound.search("Edited by the user", embedder=embedder, reranker=OverlapReranker())
+    assert any("Edited by the user." in hit.chunk for hit in hits.hits)
     assert len(calls) == 1
 
 
 def test_an_explicit_reembedding_over_an_unsealed_checkpoint_indexes_every_mirror_byte(lane):
-    """Limitation proof: an entry accepted without a stage authority has an unsealed
-    checkpoint, so a later caller-requested re-embedding under one cannot use its
-    recorded rendering; every mirror byte is indexed (``appended``) and the stage names
-    no checkpoint. Failure mode: the unsealed rendering decides the indexed bytes of a
-    stage the caller signs, or is sealed as if this call produced it."""
+    """Security proof: an entry accepted without a stage authority has an unsealed
+    checkpoint; a later caller-requested re-embedding under one never uses it. Every
+    mirror byte is indexed (``appended``) and the stage names no checkpoint. Failure
+    mode: the unsealed rendering decides the indexed bytes of a stage the caller signs,
+    or is sealed as if this call produced it."""
     fixture, pipeline, calls, embedder, entry_id = lane
     assert _outcome(_derive(fixture, pipeline, entry_id, None), entry_id) == ("searchable", None)
-    assert _accepted_stage(fixture, entry_id)["entry"]["projection"] == "exact"
+    assert _accepted_stage(fixture, entry_id)["entry"]["projection"] == "appended"
     from biblios.core import BringCurrentRequest, bring_current
 
     sealer = _Sealer()
@@ -353,18 +347,16 @@ def test_a_donor_body_is_reused_only_from_the_checkpoint_its_signed_stage_names(
         fixture.close()
 
 
-def test_a_rename_before_acceptance_renders_freshly_from_a_verified_conversion(lane):
-    """Failure mode: after a rename before acceptance, the new rendering is persisted or
-    staged without the caller's seal, the verified conversion is sealed again as though
-    this call converted it, the converter runs again, or the stage claims the content
-    was all produced by this call."""
+def test_a_rename_before_acceptance_neither_renders_nor_seals_again(lane):
+    """Failure mode: a rename before acceptance re-runs the converter or renderer, seals
+    new content as though this call produced it, or leaves the old name in the index."""
     from biblios.curation import CurationRequest, RelocateEntry
 
     fixture, pipeline, calls, embedder, entry_id = lane
     sealer = _Sealer()
     sealer.refuse_stage = True
     _derive(fixture, pipeline, entry_id, sealer)
-    [converted, complete] = sealer.sealed
+    sealed = list(sealer.sealed)
     fixture.bound.curate(
         CurationRequest(
             identifier(),
@@ -375,16 +367,9 @@ def test_a_rename_before_acceptance_renders_freshly_from_a_verified_conversion(l
     sealer.refuse_stage = False
     result = _derive(fixture, pipeline, entry_id, sealer)
     assert _outcome(result, entry_id) == ("searchable", None)
-    assert len(calls) == 1  # the conversion is reused, never re-run
-    # The persisted complete checkpoint is verified, then only the fresh rendering for
-    # the new name is sealed: its identity carries the verified conversion unchanged.
-    assert [item.sha256 for item in sealer.verified] == [complete.sha256]
-    [renamed] = sealer.sealed[2:]
-    fresh = json.loads(renamed.canonical)
-    assert renamed.state == "complete" and fresh["mirror_name"] == "renamed.txt"
-    assert fresh["conversion"] == json.loads(converted.canonical)["conversion"]
-    stage = _accepted_stage(fixture, entry_id)
-    assert stage["entry"]["checkpoint"] == {"sha256": renamed.sha256, "reused": True}
+    assert len(calls) == 1 and sealer.sealed == sealed
+    found = fixture.bound.search("renamed.txt", embedder=embedder, reranker=OverlapReranker())
+    assert entry_id in {hit.entry_id for hit in found.hits}
 
 
 class _Binding(_Sealer):
@@ -425,28 +410,27 @@ def test_a_fresh_rendering_names_the_verified_conversion_it_renders(lane, monkey
     """Failure mode: after a verified conversion, the seal request for a fresh rendering
     carries other conversion content (a substitution between verification and seal) and
     nothing lets the caller tell, so it seals a rendering of a conversion it never
-    sealed; or a genuine re-rendering cannot be bound to its conversion."""
+    sealed; or a genuine re-rendering cannot be bound to its conversion. The rendering
+    is fresh because the first call's renderer failed after its conversion was sealed."""
     from biblios import core
-    from biblios.curation import CurationRequest, RelocateEntry
 
     fixture, pipeline, calls, embedder, entry_id = lane
     caller = _Binding()
-    caller.refuse_stage = True
-    _derive(fixture, pipeline, entry_id, caller)
-    [converted, complete] = caller.sealed
-    assert json.loads(complete.canonical)["conversion_checkpoint_sha256"] == converted.sha256
-    fixture.bound.curate(
-        CurationRequest(
-            identifier(),
-            fixture.bound.view.revision,
-            RelocateEntry(entry_id, fixture.root_id, "renamed.txt"),
-        )
-    )
+    renderer = pipeline.renderer
+
+    def failing(result):
+        raise RuntimeError("renderer unavailable")
+
+    pipeline.renderer = failing
+    first = _derive(fixture, pipeline, entry_id, caller)
+    assert _outcome(first, entry_id)[0] != "searchable"
+    pipeline.renderer = renderer
+    [converted] = caller.sealed
     if substituted:
         real = core._Run._checkpoint_identity
 
         def substituting(self, entry, document, generation):
-            if "mirror" in document and document.get("mirror_name") == "renamed.txt":
+            if "mirror" in document:
                 document = {
                     **document,
                     "conversion": {**document["conversion"], "body": "Substituted body."},
@@ -454,9 +438,8 @@ def test_a_fresh_rendering_names_the_verified_conversion_it_renders(lane, monkey
             return real(self, entry, document, generation)
 
         monkeypatch.setattr(core._Run, "_checkpoint_identity", substituting)
-    caller.refuse_stage = False
-    result = _derive(fixture, pipeline, entry_id, caller)
-    [rendered] = [json.loads(item.canonical) for item in caller.sealed[2:]] or [None]
+    result = _derive(fixture, pipeline, entry_id, caller, retry_uncertain=True)
+    [rendered] = [json.loads(item.canonical) for item in caller.sealed[1:]] or [None]
     if substituted:
         assert _outcome(result, entry_id) == ("pending", "checkpoint-seal-refused")
         assert len(caller.refused) == 1 and rendered is None

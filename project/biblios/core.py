@@ -49,6 +49,7 @@ from biblios.mirrors import (
     SEARCHABLE,
     MirrorInvalid,
     Provenance,
+    attributed_fields,
     digest,
     lane_for,
     read_mirror,
@@ -70,6 +71,13 @@ EMBED_SLICE = 16
 IMPORT_BATCH = 64
 """Legacy entries recorded per import transaction; cancellation is checked between."""
 MAX_EVIDENCE = 16 * 1024
+METADATA_HEADING = "Mirror metadata"
+"""The heading of the section the index adds before the filename for a mirror header's
+attributed metadata: fields Castle does not control, labelled as the mirror's."""
+FILENAME_HEADING = "Filename"
+"""The heading of the section the index adds after the mirror's bytes, naming the entry's
+current Castle filename. Castle is the only authority for names and paths; a mirror
+carries none and its header is ignored for every purpose (operator ruling, 2026-11-13)."""
 
 Outcome = Literal[
     "searchable",
@@ -285,11 +293,11 @@ class StageEntry:
     content_sha256: str | None
     chunk_manifest_sha256: str | None
     row_count: int
-    projection: Literal["exact", "replaced", "appended"] | None = None
-    """How the indexed bytes derive from the mirror bytes (publish only): ``exact`` (the
-    mirror itself), ``replaced`` (the renderer's own recorded name section swapped, in
-    memory, for the current filename's) or ``appended`` (every mirror byte kept, the
-    current filename's section added in memory). The mirror on disk is never changed."""
+    projection: Literal["exact", "appended"] | None = None
+    """How the indexed bytes derive from the mirror bytes (publish only): ``appended``
+    (every mirror byte kept, the current Castle filename's section added in memory) or,
+    for a preserved import only, ``exact`` (the rows already indexed). The mirror on disk
+    is never changed."""
     indexed_sha256: str | None = None
     """The digest of exactly the bytes Palace indexed (publish only)."""
     chunk_root_sha256: str | None = None
@@ -298,8 +306,8 @@ class StageEntry:
     no membership proof and are withheld ``proof-missing``."""
     checkpoint: StageCheckpoint | None = None
     """Under a stage authority, the conversion checkpoint whose content this stage was
-    derived from (converted mirrors, unconverted outcomes and name projections that use
-    the recorded rendering), so the caller can require its own seal. None without an
+    derived from (converted mirrors and unconverted outcomes), so the caller can require
+    its own seal. None without an
     authority, when no checkpoint content was used, and in a ``biblios.stage/1`` stage."""
 
 
@@ -370,7 +378,7 @@ class CheckpointIdentity:
     ``canonical`` is the exact ``biblios.checkpoint/1`` byte string the caller seals and
     verifies (never its own serialization) and ``sha256`` its digest. It covers every
     field here plus the recorded ``ConversionResult`` and, at ``complete``, the rendered
-    ``MirrorDocument`` and the name it was rendered for, and the donor checkpoint a
+    ``MirrorDocument``, and the donor checkpoint a
     reused body came from. At ``complete`` it also names ``conversion_checkpoint_sha256``:
     the ``converted`` checkpoint (sealed in this call, or verified) whose conversion it
     renders, unchanged; a caller that keeps the conversions it sealed or verified can
@@ -535,10 +543,9 @@ class StageAuthority(Protocol):
     def verify_checkpoint(self, checkpoint: CheckpointIdentity, seal: bytes) -> bool:
         """Whether ``seal`` is the caller's own seal over exactly ``checkpoint.canonical``.
         It never seals. Called on the invoking thread before any persisted checkpoint
-        content is reused (the converter's result, its rendering, a donor's body or the
-        recorded name section a projection replaces). ``False`` (or StageRefused) leaves
-        the entry pending ``checkpoint-not-ours`` (a projection falls back to
-        ``appended``); raising anything else leaves it uncertain. A checkpoint persisted
+        content is reused (the converter's result, its rendering or a donor's body).
+        ``False`` (or StageRefused) leaves the entry pending ``checkpoint-not-ours``;
+        raising anything else leaves it uncertain. A checkpoint persisted
         without a seal (by an earlier release, or by a call without an authority) is
         pending ``checkpoint-unsealed``; neither outcome converts or embeds anything.
 
@@ -1902,17 +1909,6 @@ def _resume_document(prepared: _Prepared) -> str:
     )
 
 
-def _name_section(markdown: str, heading: str) -> str | None:
-    """The renderer's name section: from the last heading line naming ``heading`` to the
-    end, or None when the rendering has no such final section."""
-    import re
-
-    found = None
-    for match in re.finditer(r"(?m)^#{1,6}[ \t]+" + re.escape(heading) + r"[ \t]*$", markdown):
-        found = match
-    return None if found is None else markdown[found.start() :]
-
-
 def _drop_stage(conn: sqlite3.Connection, entry_id: str) -> None:
     for table in ("stage_rows", "stage_resume", "stages"):
         conn.execute(f"DELETE FROM {table} WHERE entry_id=?", (entry_id,))
@@ -3063,9 +3059,7 @@ class _Run:
         try:
             return validate_mirror(
                 data,
-                lane=self.lane,
                 max_bytes=policy.max_mirror_bytes,
-                required_header_fields=policy.required_header_fields,
             )
         except MirrorInvalid as error:
             if record is not None and error.code in POLICY_CLASSES:
@@ -3092,9 +3086,7 @@ class _Run:
         try:
             validate_mirror(
                 update.new_mirror,
-                lane=self.lane,
                 max_bytes=policy.max_mirror_bytes,
-                required_header_fields=policy.required_header_fields,
             )
         except MirrorInvalid as error:
             self._report(entry.entry_id, "pending", "mirror-update-invalid:" + error.code)
@@ -3251,7 +3243,7 @@ class _Run:
             # is written here by the no-replace primitive, its intended digest recorded
             # first so a crash adopts exactly these bytes and nothing else.
             self._materialize(prepared, path)
-        return self._planned(prepared, name_heading=mirror.name_heading)
+        return self._planned(prepared)
 
     def _unaccepted_removal(self, entry_id: str, path: Path) -> _Prepared | None:
         """An entry removed before any stage was accepted may leave the first mirror this
@@ -3336,8 +3328,8 @@ class _Run:
 
     def _conversion_key(self, entry: Entry) -> str:
         """The conversion checkpoint of this entry's source under the current policy. The
-        name is not part of it: a rename never re-runs the converter (the renderer, which
-        composes the name, runs again for a mirror not yet accepted)."""
+        name is not part of it, and neither the converter nor the renderer sees a name, so
+        a rename never converts or renders again."""
         from biblios.pipeline import _policy_document
 
         return (
@@ -3358,7 +3350,7 @@ class _Run:
         self, entry: Entry, document: dict, generation: GenerationIdentity
     ) -> CheckpointIdentity:
         """The identity of ``document``'s reusable content, rebuilt from its fields: the
-        converter's result, and at ``complete`` its rendering and the name rendered for."""
+        converter's result, and at ``complete`` its rendering."""
         from biblios.pipeline import _policy_document
 
         complete = "mirror" in document
@@ -3374,7 +3366,6 @@ class _Run:
                 "state": "complete" if complete else "converted",
                 "conversion": document["conversion"],
                 "mirror": document["mirror"] if complete else None,
-                "mirror_name": document["mirror_name"] if complete else None,
                 "donor_checkpoint_sha256": document.get("donor_checkpoint_sha256"),
                 "conversion_checkpoint_sha256": document.get("conversion_checkpoint_sha256")
                 if complete
@@ -3529,7 +3520,6 @@ class _Run:
 
         fresh = False
         checkpoint: str | None = None
-        name = entry.path.rsplit("/", 1)[-1]
         if "conversion" in document:
             verified = self._verified(entry, document)
             if isinstance(verified, str):
@@ -3560,7 +3550,7 @@ class _Run:
             scratch.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=scratch) as temporary:
                 conversion_request = ConversionRequest(
-                    source, entry.metadata.media_type, name, Path(temporary)
+                    source, entry.metadata.media_type, Path(temporary)
                 )
                 try:
                     result = self.pipeline.converter(conversion_request)
@@ -3593,21 +3583,17 @@ class _Run:
         result = ConversionResult(**document["conversion"])
         if result.outcome == "unconverted":
             return result, None, self._stage_checkpoint(checkpoint, fresh)
-        if "mirror" not in document or document.get("mirror_name") != name:
-            # Rendered for this name; a rename before acceptance renders again from the
-            # recorded (verified) conversion, never re-running the converter.
+        if "mirror" not in document:
+            # The rendering carries no name, so a rename never renders again.
             save(state="render-dispatched")
             mirror = controlled(
-                lambda: self.pipeline.renderer(result, name),
+                lambda: self.pipeline.renderer(result),
                 self.control,
                 "conversion",
                 effect="uncertain",
             )
-            if (
-                type(mirror) is not MirrorDocument
-                or not _bounded_text(mirror.markdown, policy.max_mirror_bytes)
-                or not _bounded_text(mirror.name_heading, 255)
-                or not mirror.name_heading
+            if type(mirror) is not MirrorDocument or not _bounded_text(
+                mirror.markdown, policy.max_mirror_bytes
             ):
                 raise ConsumerError("mirror-result-invalid", stage="conversion", effect="uncertain")
             # The rendering is this call's own; the conversion it renders is fresh or was
@@ -3615,7 +3601,6 @@ class _Run:
             checkpoint = sealed(
                 state="complete",
                 mirror=asdict(mirror),
-                mirror_name=name,
                 conversion_checkpoint_sha256=conversion,
             )
             if checkpoint is None:
@@ -3631,7 +3616,7 @@ class _Run:
             return None
         return StageCheckpoint(checkpoint, not fresh)
 
-    def _planned(self, prepared: _Prepared, *, name_heading: str | None = None) -> _Prepared | None:
+    def _planned(self, prepared: _Prepared) -> _Prepared | None:
         """Plan the exact bytes, compute embedding inputs and embed (B0)."""
         from palace.index import plan_one, with_embedding_inputs
 
@@ -3643,7 +3628,7 @@ class _Run:
             self._report(entry.entry_id, "pending", refused)
             return None
         path = self.shelf.mirror_path(entry.entry_id)
-        name_heading = self._project(prepared, name_heading)
+        self._project(prepared)
         with self._index() as conn:
             plan = plan_one(
                 conn=conn,
@@ -3665,12 +3650,11 @@ class _Run:
             if prepared.record is not None:
                 self._record_refusal(prepared.record, digest(prepared.data), "snapshot-too-large")
             raise ConsumerError("isolated:snapshot-too-large", stage="index")
-        if self.representation is None and prepared.projection in ("replaced", "appended"):
-            # A projected name section is checked under every representation: it must
-            # chunk as its own final row, never be absorbed into the user's text.
-            self._check_name(prepared, plan, name_heading)
+        if prepared.projection == "appended":
+            # The filename section is checked under every representation: it must chunk
+            # as its own final row, never be absorbed into the user's text.
+            self._check_name(prepared, plan)
         if self.representation is not None:
-            self._check_name(prepared, plan, name_heading)
             inputs = controlled(
                 lambda: tuple(self.pipeline.input_view(plan)), self.control, "embedding"
             )
@@ -3765,7 +3749,7 @@ class _Run:
         from palace.index import IndexError as PalaceIndexError
         from palace.index import read_file_vectors
 
-        from biblios.pipeline import ConversionResult, MirrorDocument
+        from biblios.pipeline import ConversionResult
 
         donor = (self.request.donors or {}).get(destination.entry_id)
         if donor is None:
@@ -3816,7 +3800,7 @@ class _Run:
         result = ConversionResult(**document["conversion"])
         if result.outcome != "converted":
             return None
-        heading = MirrorDocument(**document["mirror"]).name_heading
+        heading = FILENAME_HEADING
         proven = None
         if self.authority is not None and self.pipeline.policy.reuse_converted_body:
             # The body is the donor's only when its accepted (caller-signed) stage names
@@ -3859,116 +3843,51 @@ class _Run:
         )
         return result, identity, rows
 
-    def _check_name(self, prepared: _Prepared, plan, heading: str | None) -> None:
-        name = prepared.entry.path.rsplit("/", 1)[-1]
-        if prepared.projection in ("replaced", "appended"):
-            rows = plan.rows
-            last = rows[-1] if rows else None
-            if (
-                last is None
-                or last.heading != heading
-                or last.body.partition("\n")[2].strip() != name
-                and last.body != ("# " + " ".join(name.splitlines())).rstrip()
-            ):
-                # The projected name section did not chunk as its own last row (for
-                # instance the user's text ends inside an open block): never guessed.
-                # A user section with the same heading earlier in the text is content.
-                # The entry keeps whatever it had accepted.
-                raise ConsumerError("name-section-unprojectable", stage="index")
-            return
-        heading = heading or (plan.rows[-1].heading if plan.rows else None)
-        name_rows = [i for i, row in enumerate(plan.rows) if row.heading == heading]
-        heading_name = " ".join(name.splitlines())
+    def _check_name(self, prepared: _Prepared, plan) -> None:
+        name = " ".join(prepared.entry.path.rsplit("/", 1)[-1].splitlines())
+        last = plan.rows[-1] if plan.rows else None
         if (
-            len(name_rows) != 1
-            or name_rows[0] != len(plan.rows) - 1
-            or not (
-                plan.rows[name_rows[0]].body.partition("\n")[2].strip() == name
-                or (
-                    heading == heading_name.strip()
-                    and plan.rows[name_rows[0]].body == ("# " + heading_name).rstrip()
-                )
-            )
+            last is None
+            or last.heading != FILENAME_HEADING
+            or last.body.partition("\n")[2].strip() != name.strip()
         ):
-            self._refuse_policy(prepared, "mirror-name-section-invalid")
+            # The filename section did not chunk as its own last row (for instance the
+            # user's text ends inside an open block): never guessed. A user section with
+            # the same heading earlier in the text is content. The entry keeps whatever
+            # it had accepted.
+            raise ConsumerError("name-section-unprojectable", stage="index")
 
-    def _project(self, prepared: _Prepared, heading: str | None) -> str | None:
-        """Choose the bytes Palace indexes for this mirror and return their name heading.
-
-        Never writes the mirror. When the mirror ends with exactly the name section the
-        renderer recorded for the name it was rendered with, that section is the core's
-        metadata: unchanged name, the mirror itself (``exact``); renamed, that section is
-        swapped for the renderer's section for the current name (``replaced``), provided
-        the renderer changes nothing else. Otherwise every mirror byte is the user's
-        content and the current name's section is appended (``appended``)."""
-        from biblios.pipeline import ConversionResult, MirrorDocument
-
+    def _project(self, prepared: _Prepared) -> None:
+        """Choose the bytes Palace indexes: every mirror byte as the user's content, then
+        the current Castle filename as its own section. Never writes the mirror; a rename
+        changes only that section."""
         data = prepared.data
-        name = prepared.entry.path.rsplit("/", 1)[-1]
         if prepared.indexed is not None:
-            return heading
-        if prepared.record is None and prepared.provenance in ("converted", "copy"):
-            # A first mirror is the renderer's fresh rendering for the current name: it is
-            # indexed exactly, and a rendering without its own name section is refused.
-            return self._projected(prepared, data, "exact", len(data), "", heading)
-        document = None
-        if prepared.entry.metadata is not None:
-            row = self.derived.conn.execute(
-                "SELECT document FROM checkpoints WHERE key=?",
-                (self._conversion_key(prepared.entry),),
-            ).fetchone()
-            document = None if row is None else json.loads(row[0])
-        if document is not None and "mirror" in document and "conversion" in document:
-            # Under a stage authority the recorded rendering is used only once the caller
-            # verifies its seal; otherwise every mirror byte is the user's (appended).
-            verified = self._verified(prepared.entry, document)
-            if isinstance(verified, str):
-                document = None
-            elif self.authority is not None and (
-                prepared.checkpoint is None or prepared.checkpoint.sha256 != verified[0]
-            ):
-                prepared.checkpoint = StageCheckpoint(verified[0], True)
-        if document is not None and "mirror" in document and "conversion" in document:
-            recorded = MirrorDocument(**document["mirror"])
-            old = _name_section(recorded.markdown, recorded.name_heading)
-            if old is not None and data.endswith(old.encode("utf-8")):
-                if document.get("mirror_name") == name:
-                    return self._projected(prepared, data, "exact", len(data), "", heading)
-                rendered = controlled(
-                    lambda: self.pipeline.renderer(
-                        ConversionResult(**document["conversion"]), name
-                    ),
-                    self.control,
-                    "conversion",
-                    effect="uncertain",
-                )
-                new = (
-                    _name_section(rendered.markdown, rendered.name_heading)
-                    if type(rendered) is MirrorDocument
-                    else None
-                )
-                if new is not None and (
-                    recorded.markdown[: len(recorded.markdown) - len(old)]
-                    == rendered.markdown[: len(rendered.markdown) - len(new)]
-                ):
-                    cut = len(data) - len(old.encode("utf-8"))
-                    return self._projected(
-                        prepared, data, "replaced", cut, new, rendered.name_heading
-                    )
+            return
+        name = prepared.entry.path.rsplit("/", 1)[-1]
         text_end = data.decode("utf-8", errors="strict")
         gap = "" if text_end.endswith("\n\n") else "\n" if text_end.endswith("\n") else "\n\n"
         if not data:
             gap = ""
-        section = gap + "## Filename\n\n" + " ".join(name.splitlines()) + "\n"
-        return self._projected(prepared, data, "appended", len(data), section, "Filename")
+        fields = attributed_fields(
+            text_end, frozenset(self.pipeline.policy.provenance_header_fields)
+        )
+        metadata = (
+            "## " + METADATA_HEADING + "\n\n" + "".join(f"{k}: {v}\n" for k, v in fields) + "\n"
+            if fields
+            else ""
+        )
+        line = " ".join(name.splitlines())
+        # A name that begins like a heading is indented one space so it stays the row's
+        # text, never a heading of its own; the row check compares it stripped.
+        line = " " + line if line.lstrip().startswith("#") else line
+        section = gap + metadata + "## " + FILENAME_HEADING + "\n\n" + line + "\n"
+        self._projected(prepared, data, "appended", len(data), section)
 
     @staticmethod
-    def _projected(
-        prepared: _Prepared, data: bytes, rule: str, cut: int, suffix: str, heading
-    ) -> str | None:
+    def _projected(prepared: _Prepared, data: bytes, rule: str, cut: int, suffix: str) -> None:
         prepared.projection, prepared.indexed_cut, prepared.indexed_suffix = rule, cut, suffix
         prepared.indexed = data[:cut] + suffix.encode("utf-8")
-        return heading
 
     def _snapshot_floor(self, plan) -> int:
         """A lower bound on the bytes Palace's committed-snapshot check will count for this

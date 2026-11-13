@@ -17,7 +17,7 @@ import pytest
 
 from biblios.control import CallControl, ConsumerError
 from biblios.core import BringCurrentRequest
-from biblios.curation import CreateDirectory, CreateFile, CurationRequest
+from biblios.curation import CreateFile, CurationRequest
 from biblios.derived import DERIVED_NAME
 from biblios.pipeline import (
     ConsumerPipeline,
@@ -97,7 +97,7 @@ def test_explicit_body_and_mirror_envelopes_preserve_the_complete_conversion(
         done = fixture.bound.derive(pipeline, entry, operation_id=operation)
         mirror = fixture.bound._shelf.mirror_path(entry).read_text()
         assert _outcome(done, entry) == ("searchable", None) and len(calls) == 2
-        assert body.strip() in mirror and mirror.endswith("## Filename\n\none.txt\n")
+        assert body.strip() in mirror and "one.txt" not in mirror
         fixture.reopen()
         replay = fixture.bound.derive(pipeline, entry, operation_id=operation)
         assert replay.replayed and replay.outcome(entry) == done.outcome(entry)
@@ -134,18 +134,18 @@ def test_envelope_declarations_are_strict_and_finite() -> None:
     )
 
 
-def test_heading_only_own_name_preserves_projection_and_inputs(tmp_path: Path) -> None:
-    """Failure mode: an own-name heading with separators, odd spacing or maximal length
-    is refused, or the caller's exact supplied inputs are altered."""
+def test_an_odd_filename_is_indexed_as_its_own_row_with_exact_inputs(tmp_path: Path) -> None:
+    """Failure mode: a filename with separators, odd spacing or maximal length is refused
+    or absorbed into the content's row, or the caller's exact supplied inputs are
+    altered."""
     fixture = consumer_fixture(tmp_path)
     names = ("Quillfern # second part.txt", "  MiXeD  # café.txt  ", "x" * 251 + ".txt")
     observed, expected = [], []
     try:
         embedder = HashEmbedder()
 
-        def renderer(result, name):
-            flattened = " ".join(name.splitlines())
-            return MirrorDocument("# Section\nbody\n\n# " + flattened + "\n", flattened.strip())
+        def renderer(result):
+            return MirrorDocument("# Section\nbody\n")
 
         pipeline, _ = _lane(fixture, renderer=renderer, embedder=embedder)
         pipeline.input_view = lambda plan: tuple("exact:" + row.body for row in plan.rows)
@@ -154,7 +154,10 @@ def test_heading_only_own_name_preserves_projection_and_inputs(tmp_path: Path) -
             before = len(embedder.calls)
             flattened = " ".join(name.splitlines())
             expected.append(
-                ("searchable", ("exact:# Section\nbody", "exact:" + ("# " + flattened).rstrip()))
+                (
+                    "searchable",
+                    ("exact:# Section\nbody", ("exact:## Filename\n\n" + flattened).rstrip()),
+                )
             )
             result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
             observed.append(
@@ -164,46 +167,6 @@ def test_heading_only_own_name_preserves_projection_and_inputs(tmp_path: Path) -
                 )
             )
         assert observed == expected
-    finally:
-        fixture.close()
-
-
-def test_heading_only_name_refuses_forged_or_ambiguous_rows(tmp_path: Path) -> None:
-    """Failure mode: a forged, extra, absent, duplicate or non-final name row is admitted
-    and embedded."""
-    fixture = consumer_fixture(tmp_path)
-    mirrors = (
-        ("# forged.txt\n", "forged.txt"),
-        ("# own.txt\nextra text\n", "own.txt"),
-        ("# own.txt\n# extra\n", "own.txt"),
-        ("# own.txt\n\n# Body\nbody\n", "own.txt"),
-        ("# own.txt\n\n# own.txt\n", "own.txt"),
-        ("body without name\n", "own.txt"),
-        ("# own.txt extra\n", "own.txt extra"),
-    )
-    observed = []
-    try:
-        embedder = HashEmbedder()
-        pipeline, _ = _lane(fixture, embedder=embedder)
-        for index, (markdown, heading) in enumerate(mirrors):
-            folder = fixture.bound.curate(
-                CurationRequest(
-                    identifier(),
-                    fixture.bound.view.revision,
-                    CreateDirectory(fixture.root_id, str(index)),
-                )
-            ).mutation.affected_entry_ids[0]
-            entry = fixture.bound.curate(
-                CurationRequest(
-                    identifier(),
-                    fixture.bound.view.revision,
-                    CreateFile(folder, "own.txt", b"body", "text/plain", ADDED),
-                )
-            ).mutation.affected_entry_ids[0]
-            pipeline.renderer = lambda result, name, m=markdown, h=heading: MirrorDocument(m, h)
-            result = fixture.bound.derive(pipeline, entry, operation_id=identifier())
-            observed.append(result.outcome(entry).code)
-        assert (observed, embedder.calls) == (["mirror-name-row-invalid"] * len(mirrors), [])
     finally:
         fixture.close()
 
@@ -424,9 +387,9 @@ def test_invalid_callback_results_remain_uncertain_and_active_close_is_refused(
 
 
 def test_exact_injected_sources_scratch_and_bounded_rendering(tmp_path: Path) -> None:
-    """Failure mode: the converter receives altered source bytes, a wrong media type or
-    name, scratch outside the shelf's scratch root, or scratch left behind; or the
-    escaped rendering lets source structure through."""
+    """Failure mode: the converter receives altered source bytes, a wrong media type,
+    scratch outside the shelf's scratch root, or scratch left behind; or the escaped
+    rendering lets source structure through or writes the entry's name into the mirror."""
     fixture = consumer_fixture(tmp_path)
     text = b"---\nsource-marker: true\n---\n# Unsafe heading\nbody"
     png = base64.b64decode(
@@ -444,7 +407,6 @@ def test_exact_injected_sources_scratch_and_bounded_rendering(tmp_path: Path) ->
             (
                 request.source,
                 request.media_type,
-                request.display_name,
                 request.scratch_root.is_relative_to(fixture.binding.scratch_root),
             )
         )
@@ -465,14 +427,9 @@ def test_exact_injected_sources_scratch_and_bounded_rendering(tmp_path: Path) ->
                     tuple((fixture.binding.scratch_root / "consumer").iterdir()),
                 )
             )
-        expected_body = (
-            "| ---\n| source-marker: true\n| ---\n| # Unsafe heading\n| body\n\n## Filename\n\n"
-        )
-        assert calls == [(source, media, name, True) for source, media, name in supplied]
-        assert outcomes == [
-            ("searchable", source, expected_body + name + "\n", ())
-            for source, _media, name in supplied
-        ]
+        expected_body = "| ---\n| source-marker: true\n| ---\n| # Unsafe heading\n| body\n"
+        assert calls == [(source, media, True) for source, media, _name in supplied]
+        assert outcomes == [("searchable", source, expected_body, ()) for source, *_ in supplied]
         assert inventory(outside) == outside_before
     finally:
         fixture.close()

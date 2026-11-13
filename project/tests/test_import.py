@@ -6,6 +6,7 @@ and nothing else becomes searchable, converted or rewritten without an explicit 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -26,10 +27,15 @@ def _legacy(shelf, entry_ids, *, never_converted=()) -> None:
     for entry_id in entry_ids:
         record = records[entry_id]
         metadata = EntryMetadata.from_mapping(shelf._live()[entry_id].metadata)
+        # An earlier release indexed its mirror's bytes exactly, the name section inside
+        # the mirror: rewrite each mirror to the bytes this release's index holds.
+        mirror = shelf.mirror_path(entry_id)
+        indexed = _indexed_bytes(mirror.read_bytes(), shelf._live()[entry_id].name)
+        mirror.write_bytes(indexed)
         keys = {
             "converter": record.converter,
             "converter_version": record.converter_version,
-            "mirror_sha256": record.mirror_sha256,
+            "mirror_sha256": hashlib.sha256(indexed).hexdigest(),
             "source_cas_id": record.source_cas_id or "",
             "conversion": record.conversion,
         }
@@ -41,6 +47,13 @@ def _legacy(shelf, entry_ids, *, never_converted=()) -> None:
         for suffix in ("", "-wal", "-shm"):
             (shelf.palace_store / (name + suffix)).unlink(missing_ok=True)
     (shelf.palace_store / ACCEPTED_MARKER).unlink(missing_ok=True)
+
+
+def _indexed_bytes(data: bytes, name: str) -> bytes:
+    from biblios.core import FILENAME_HEADING
+
+    gap = "" if data.endswith(b"\n\n") else "\n" if data.endswith(b"\n") else "\n\n"
+    return data + (gap + "## " + FILENAME_HEADING + "\n\n" + name + "\n").encode()
 
 
 def _outcomes(result) -> dict[str, tuple[str, str | None]]:

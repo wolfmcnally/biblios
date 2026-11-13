@@ -23,15 +23,13 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _edited(body: str, name: str = "note.txt") -> str:
-    return f"# Body\n\n{body}\n\n## Filename\n\n{name}\n"
+def _edited(body: str) -> str:
+    return f"# Body\n\n{body}\n"
 
 
-def _rendered(body: str, name: str = "note.txt") -> bytes:
-    """The fixture renderer's output for converted ``body``."""
-    return (
-        f"# Body\n\n{body}\n\n## Extra\n\nIndependent body row.\n\n## Filename\n\n{name}\n"
-    ).encode()
+def _rendered(body: str) -> bytes:
+    """The fixture renderer's output for converted ``body``: content only, no name."""
+    return f"# Body\n\n{body}\n\n## Extra\n\nIndependent body row.\n".encode()
 
 
 def _pipeline(fixture, calls: list) -> ConsumerPipeline:
@@ -152,17 +150,22 @@ def test_a_corrupt_mirror_isolates_only_its_entry(seeded) -> None:
 def test_an_update_is_validated_at_its_seam_and_keeps_the_previous_mirror(seeded) -> None:
     """Failure mode: a malformed update lands, a stale update overwrites a newer edit,
     or a valid update discards the bytes it replaced."""
+    from dataclasses import replace
+
     fixture, pipeline, entry, _calls = seeded
     path = fixture.bound._shelf.mirror_path(entry)
     original = path.read_bytes()
+    policy = pipeline.policy
+    pipeline.policy = replace(policy, max_mirror_bytes=len(original))
     invalid = fixture.bound.update_mirror(
         pipeline,
         entry,
         operation_id=identifier(),
-        markdown="---\n[unclosed\n---\n" + _edited("x"),
+        markdown=_edited("x" * len(original)),
         expected_sha256=_sha(original),
     )
-    assert (_outcome(invalid, entry)[1] or "").startswith("mirror-update-invalid:")
+    pipeline.policy = policy
+    assert _outcome(invalid, entry)[1] == "mirror-update-invalid:mirror-too-large"
     stale = fixture.bound.update_mirror(
         pipeline,
         entry,
@@ -312,8 +315,9 @@ def test_an_edit_racing_a_failed_update_is_kept(seeded, monkeypatch) -> None:
 
 
 def test_policy_refusals_of_an_edit_isolate_only_that_entry(seeded) -> None:
-    """Failure mode: an edit refused by the declared policy blocks the shelf, or a
-    required header field is not enforced."""
+    """Failure mode: an edit refused by the declared policy blocks the shelf, or a header
+    that is not YAML isolates the entry (a header is never an authority, so it can only
+    contribute searchable metadata, never refuse the content)."""
     from dataclasses import replace
 
     fixture, pipeline, entry, _calls = seeded
@@ -324,11 +328,11 @@ def test_policy_refusals_of_an_edit_isolate_only_that_entry(seeded) -> None:
     large = fixture.bound.derive(pipeline, entry, operation_id=identifier())
     assert "mirror-too-large" in str(_outcome(large, entry))
     assert _hits(fixture, "Harbour tide tables") == {other}
-    pipeline.policy = replace(POLICY, required_header_fields=("speakers",))
-    path.write_bytes(b"---\ntitle: notes\n---\n" + _rendered("Edited."))
+    pipeline.policy = POLICY
+    path.write_bytes(b"---\nspeakers: [\n---\n" + _rendered("Edited lighthouse ledger."))
     header = fixture.bound.derive(pipeline, entry, operation_id=identifier())
-    assert "mirror-header-invalid" in str(_outcome(header, entry))
-    assert _hits(fixture, "Harbour tide tables") == {other}
+    assert _outcome(header, entry) == ("searchable", None)
+    assert entry in _hits(fixture, "Edited lighthouse ledger")
 
 
 def test_a_symlinked_mirror_isolates_without_being_followed(seeded, tmp_path: Path) -> None:
@@ -443,42 +447,6 @@ def test_an_exchange_over_unexpected_bytes_is_undone(tmp_path: Path) -> None:
 
 
 # ---- review-driven proofs (CODE-F001, F002, F003, F008) ------------------------------
-
-
-@pytest.mark.parametrize(
-    ("lane", "text", "required", "valid"),
-    (
-        pytest.param("consumer", "# Body\n\nNo front matter.\n", (), True, id="no-front-matter"),
-        pytest.param(
-            "consumer",
-            "---\r\nspeakers: [a, b]\r\n---\r\n# Body\r\n",
-            ("speakers",),
-            True,
-            id="crlf-required-present",
-        ),
-        pytest.param(
-            "consumer", "---\n- not\n- a mapping\n---\n# Body\n", (), False, id="non-mapping"
-        ),
-        pytest.param("consumer", "---\nspeakers: [\n---\n# Body\n", (), False, id="unparseable"),
-        pytest.param(
-            "consumer", "---\ntitle: x\n---\n# Body\n", ("speakers",), False, id="required-missing"
-        ),
-        pytest.param(
-            "envelope", "# Body without the Drawbridge header\n", (), False, id="envelope-unheaded"
-        ),
-    ),
-)
-def test_header_lanes_follow_their_contract(lane, text, required, valid) -> None:
-    """Failure mode: the consumer lane imposes a schema it never declared, accepts
-    unparseable or non-mapping front matter, or the envelope lane skips Drawbridge."""
-    from biblios.mirrors import MirrorInvalid, validate_mirror
-
-    if valid:
-        assert validate_mirror(text.encode(), lane=lane, required_header_fields=required)
-    else:
-        with pytest.raises(MirrorInvalid) as refused:
-            validate_mirror(text.encode(), lane=lane, required_header_fields=required)
-        assert refused.value.code == "mirror-header-invalid"
 
 
 def test_a_crash_after_the_exchange_keeps_the_displaced_bytes(tmp_path: Path, monkeypatch) -> None:

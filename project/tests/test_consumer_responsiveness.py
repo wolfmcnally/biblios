@@ -174,11 +174,11 @@ def test_a_source_change_during_the_provider_window_is_never_published_over(
         settled = fixture.bound.derive(pipeline, entry, operation_id=identifier())
         retained = [path for path in mirror.parent.iterdir() if ".retained-" in path.name]
         if change == "rename":
-            # The stale bytes' own first mirror (old name) is retained; the accepted
-            # mirror and its embedded name row carry the current name.
+            # The first mirror carries no name, so it stays the entry's mirror, neither
+            # retained nor rewritten; only the index's filename row carries the new name.
             assert settled.outcome(entry).outcome == "searchable"
-            assert len(retained) == 1 and retained[0].read_bytes() == staged
-            assert mirror.read_text().endswith("## Filename\n\nrenamed.txt\n")
+            assert retained == [] and mirror.read_bytes() == staged
+            assert b"renamed" not in staged
             assert len(converted) == 1  # a rename never re-runs the converter
             found = fixture.bound.search(
                 "renamed.txt", embedder=HashEmbedder(), reranker=OverlapReranker()

@@ -19,7 +19,7 @@ import drawbridge
 from drawbridge.configuration import Configuration, configuration_context, load_configuration
 from drawbridge.documents import convert_file
 from drawbridge.errors import DrawbridgeError
-from drawbridge.mirror import render_mirror
+from drawbridge.mirror import REQUIRED_HEADER_FIELDS, render_mirror
 
 from biblios.config import Settings
 from biblios.pipeline import (
@@ -35,6 +35,24 @@ CONVERTER = "drawbridge"
 RENDERING = "drawbridge-mirror"
 _DEFERRED_PREFIX = "conversion-deferred:"
 _PENDING_FLAGS = {"mirror-pending", "ocr-pending", "description-pending"}
+NEUTRAL_TITLE = "Document"
+"""The title Drawbridge writes as the mirror's H1. A mirror carries no filename or path:
+Castle's namespace is the only authority for them (operator ruling, 2026-11-13)."""
+_STAGED_STEM = "document"
+DRAWBRIDGE_PROVENANCE = tuple(
+    sorted(
+        REQUIRED_HEADER_FIELDS
+        | {"format", "unit", "extensions", "page_citations", "pdf_page_map", "page_count"}
+        | {"pdf_processor", "ocr_pages", "slide_count", "slide_map", "presentation"}
+        | {"attachment_count", "audio_duration_seconds", "detected_language"}
+        | {"speaker_count", "transcription_package", "speech_level_spread_db"}
+        | {"leveling_applied", "second_pass_agreement", "speakers_rendered_at"}
+    )
+)
+"""The header keys Drawbridge writes about its own conversion (its required set and the
+per-format fields of the pinned release): provenance, not attributed metadata, so a freshly
+converted mirror contributes no metadata section. A Drawbridge release that adds a key
+must add it here."""
 
 
 def default_policy(max_mirror_bytes: int = 8 * 1024 * 1024) -> DerivationPolicy:
@@ -49,6 +67,7 @@ def default_policy(max_mirror_bytes: int = 8 * 1024 * 1024) -> DerivationPolicy:
         chunker="palace",
         name_policy="drawbridge",
         max_mirror_bytes=max_mirror_bytes,
+        provenance_header_fields=DRAWBRIDGE_PROVENANCE,
     )
 
 
@@ -57,7 +76,9 @@ def _convert(source: Path, request: ConversionRequest, configuration: Configurat
         result = convert_file(
             source,
             ocr=drawbridge.CliOcrBackend(available_cores=1, preflight=False),
-            options=drawbridge.ConversionOptions(title=request.display_name),
+            options=drawbridge.ConversionOptions(
+                title=NEUTRAL_TITLE, mirror_of=_STAGED_STEM, acquired_from="biblios"
+            ),
             media_type=request.media_type,
             stages=bool(configuration.profile.stages),
         )
@@ -77,9 +98,9 @@ def drawbridge_converter(settings: Settings) -> Callable[[ConversionRequest], Co
         except Exception as error:
             # A configuration refusal is the operator's problem, not the document's.
             raise ConversionConfigurationError from error
-        # Drawbridge names the mirror after the file it reads: convert a copy carrying
-        # the entry's display name, inside the caller's scratch root.
-        staged = request.scratch_root / request.display_name
+        # Drawbridge would name the mirror after the file it reads: convert a copy under a
+        # neutral name, so no filename reaches the converted text or its header.
+        staged = request.scratch_root / (_STAGED_STEM + _suffix(request.media_type))
         staged.write_bytes(request.source)
         try:
             rendered = _convert(staged, request, configuration)
@@ -95,6 +116,12 @@ def drawbridge_converter(settings: Settings) -> Callable[[ConversionRequest], Co
     return convert
 
 
-def envelope_renderer(result: ConversionResult, display_name: str) -> MirrorDocument:
+def envelope_renderer(result: ConversionResult) -> MirrorDocument:
     """Drawbridge's rendered mirror is already the shelf's mirror; it is kept exactly."""
-    return MirrorDocument(result.body, display_name)
+    return MirrorDocument(result.body)
+
+
+def _suffix(media_type: str) -> str:
+    import mimetypes
+
+    return mimetypes.guess_extension(media_type, strict=False) or ""

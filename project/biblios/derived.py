@@ -289,7 +289,7 @@ class DerivedRecord:
     """The digest of the bytes Palace indexed for the accepted stage: the mirror's own
     digest, or its in-memory current-filename projection's (the stage's signed rule)."""
     indexed_name: str | None = None
-    """The filename the accepted stage's name section carries."""
+    """The Castle filename the accepted stage's appended filename section carries."""
 
     @property
     def index_digest(self) -> str:

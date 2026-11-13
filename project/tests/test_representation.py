@@ -1,7 +1,7 @@
 """The Drawbridge adapter's result and error mapping, with synthetic Drawbridge stand-ins:
 a configuration refusal is the operator's (raised, its cause kept); a document refusal,
 deferral or pending result is an unconverted outcome; only a finished rendering is the
-body, and it is converted from a copy named for the entry."""
+body, and it is converted from a copy under a neutral name, never the entry's."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ def convert(tmp_path: Path):
     with _shelf:
         scratch = tmp_path / "scratch-convert"
         scratch.mkdir()
-        request = ConversionRequest(b"# Notes\n\nbody\n", "text/markdown", "notes.md", scratch)
+        request = ConversionRequest(b"# Notes\n\nbody\n", "text/markdown", scratch)
         yield representation.drawbridge_converter(settings), request
 
 
@@ -55,13 +55,15 @@ def test_drawbridge_outcomes_map_to_unconverted_or_the_finished_rendering(
 ):
     """Failure mode: a refused, deferred or still-pending conversion becomes a mirror
     (so an unfinished rendering is indexed), the semantic rendering is ignored when the
-    profile produced one, or the document is converted under another name than the
-    entry's."""
+    profile produced one, or the entry's filename reaches the converter (as the staged
+    file's name, the title or the provenance header), so it would land in the mirror."""
     converter, request = convert
     seen: list[Path] = []
+    options: list = []
 
     def convert_file(source, **kwargs):
         seen.append(source)
+        options.append(kwargs["options"])
         return SimpleNamespace(
             method="conversion-deferred:size" if fake == "deferred" else "fidelity",
             flags={"ocr-pending"} if fake == "pending" else set(),
@@ -78,8 +80,14 @@ def test_drawbridge_outcomes_map_to_unconverted_or_the_finished_rendering(
         representation.drawbridge.__version__,
     )
     [source] = seen
-    assert source == request.scratch_root / "notes.md"
+    assert source == request.scratch_root / "document.md"
     assert source.read_bytes() == request.source
+    [given] = options
+    assert (given.title, given.mirror_of, given.acquired_from) == (
+        representation.NEUTRAL_TITLE,
+        "document",
+        "biblios",
+    )
 
 
 def test_a_document_refusal_is_raised_typed_with_drawbridge_s_own_error(convert, monkeypatch):

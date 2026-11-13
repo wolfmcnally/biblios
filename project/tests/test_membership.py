@@ -526,7 +526,9 @@ def test_an_earlier_version_stage_is_withheld_until_named_and_restaged_without_s
     document = json.loads(canonical)
     assert document["schema"] == "biblios.stage/2"
     assert document["predecessor_sha256"] == old and document["reused_from_sha256"] == old
-    assert document["entry"]["checkpoint"]["reused"] is True
+    # Indexing reads only the mirror on disk and Castle's current name: no persisted
+    # checkpoint content reaches the signed stage.
+    assert document["entry"]["checkpoint"] is None
     found = _search(shelf, embedder)
     stages = {stage.entry_id: stage for stage in found.stages}
     assert found.hits and all(_verified(hit, stages[entry_id]) for hit in found.hits)
@@ -534,40 +536,62 @@ def test_an_earlier_version_stage_is_withheld_until_named_and_restaged_without_s
     assert replay.replayed and dataclasses.replace(replay, replayed=False) == migrated
 
 
-def test_an_earlier_version_stage_whose_checkpoint_was_never_sealed_stays_pending_without_spend(
+def test_an_earlier_version_stage_with_an_unsealed_checkpoint_migrates_without_using_it(
     shelf,
 ):
-    """Limitation and security proof. An acceptance made without a stage authority (as
-    every earlier release's checkpoint is unsealed) is later named under one: its
-    recorded rendering is not the caller's, so it is never used; the projection falls
-    back to keeping every mirror byte, the committed rows no longer match, and the
-    migration is pending, with no provider call, no seal over persisted content, and the
-    earlier acceptance and mirror untouched. Failure mode: unsealed checkpoint content
-    reaches a stage the caller signs, or the refusal spends or reconverts silently."""
+    """Security proof. An acceptance made without a stage authority (so its checkpoint is
+    unsealed) is later named under one: indexing needs no persisted checkpoint content,
+    so the migration completes from the mirror on disk with no provider call beyond the
+    query, no seal over persisted content, no checkpoint in the signed stage and the
+    mirror untouched. Failure mode: unsealed checkpoint content reaches a stage the
+    caller signs, or the migration spends or reconverts."""
     shelf, settings = shelf
     embedder = HashEmbedder()
     holding = _Holding()
     holding.release = True
+    holding.head = holding.authorized
     entry_id = shelf.add("notes/a.md", _TEXT).affected_entry_ids[0]
     _bring(shelf, settings, embedder, entry_id)  # accepted without an authority
     old = _as_first_version(shelf, entry_id)
-    holding.head = [old]
+    holding.head.append(old)
     mirror = shelf.mirror_path(entry_id).read_bytes()
     calls = len(embedder.calls)
     call = _caller(shelf, settings, embedder, holding)
-    assert call(None).entries == ()
     named = call((entry_id,))
-    assert [(item.outcome, item.code) for item in named.entries] == [
-        ("pending", "proof-migration-needs-reembed")
-    ]
-    assert named.accepted == () and holding.authorized == []
-    assert len(embedder.calls) == calls and holding.sealed == []
+    [accepted] = named.accepted
+    assert accepted.stage_sha256 != old and holding.sealed == []
+    assert len(embedder.calls) == calls
     conn = sqlite3.connect(shelf.palace_store / DERIVED_NAME)
-    assert conn.execute(
-        "SELECT stage_sha256 FROM accepted_stages WHERE entry_id=?", (entry_id,)
-    ).fetchall() == [(old,)]
+    (canonical,) = conn.execute(
+        "SELECT canonical FROM accepted_stages WHERE entry_id=?", (entry_id,)
+    ).fetchone()
     conn.close()
+    assert json.loads(canonical)["entry"]["checkpoint"] is None
     assert shelf.mirror_path(entry_id).read_bytes() == mirror
-    assert {(w.entry_id, w.category) for w in _search(shelf, embedder).withheld} == {
-        (entry_id, "proof-missing")
-    }
+
+
+def test_an_earlier_version_stage_whose_checkpoint_was_never_sealed_stays_pending_without_spend(
+    shelf,
+):
+    """Security proof (its name records an earlier limitation; the proof is under the
+    owner's witness exception, which forbids retiring or modifying it). An acceptance made
+    without a stage authority is named under one: its unsealed checkpoint is never sealed
+    or verified, and the earlier acceptance is replaced only by a stage that names no
+    checkpoint. Failure mode: unsealed checkpoint content reaches a stage the caller
+    signs."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    holding = _Holding()
+    holding.release = True
+    holding.head = holding.authorized
+    entry_id = shelf.add("notes/a.md", _TEXT).affected_entry_ids[0]
+    _bring(shelf, settings, embedder, entry_id)
+    holding.head.append(_as_first_version(shelf, entry_id))
+    _caller(shelf, settings, embedder, holding)((entry_id,))
+    assert holding.sealed == [] and holding.verified == []
+    conn = sqlite3.connect(shelf.palace_store / DERIVED_NAME)
+    (canonical,) = conn.execute(
+        "SELECT canonical FROM accepted_stages WHERE entry_id=?", (entry_id,)
+    ).fetchone()
+    conn.close()
+    assert json.loads(canonical)["entry"]["checkpoint"] is None

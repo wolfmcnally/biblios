@@ -39,18 +39,14 @@ PENDING_CONVERSION = "pending-conversion"
 ISOLATED = (
     "mirror-missing",
     "mirror-unicode-invalid",
-    "mirror-header-invalid",
     "mirror-too-large",
-    "mirror-name-section-invalid",
     "mirror-path-unsafe",
     "mirror-unreadable",
 )
-POLICY_CLASSES = frozenset(
-    {"mirror-too-large", "mirror-name-section-invalid", "mirror-header-invalid"}
-)
-"""Classes found only against the pipeline's policy (byte bound, name section, declared
-required header fields) when a mirror is planned for indexing; recorded on the entry's
-derived record against the mirror digest so status reports them without the policy."""
+POLICY_CLASSES = frozenset({"mirror-too-large"})
+"""Classes found only against the pipeline's policy (its byte bound) when a mirror is
+planned for indexing; recorded on the entry's derived record against the mirror digest
+so status reports them without the policy."""
 
 Lane = Literal["envelope", "consumer"]
 
@@ -124,18 +120,12 @@ def _normalised(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def validate_mirror(
-    data: bytes,
-    *,
-    lane: Lane,
-    max_bytes: int | None = None,
-    required_header_fields: tuple[str, ...] = (),
-) -> str:
+def validate_mirror(data: bytes, *, max_bytes: int | None = None) -> str:
     """Return the text of valid mirror bytes, or raise :class:`MirrorInvalid`.
 
-    Checks strict UTF-8, the byte bound and the lane's header. The envelope lane uses
-    Drawbridge's own parser unchanged. The consumer lane imposes no schema: a recognised
-    front-matter block must load as a mapping and carry the consumer's declared fields.
+    Checks strict UTF-8 and the byte bound only. A front-matter header is never
+    interpreted: after Castle admits an entry, Castle's metadata is the only authority
+    and a mirror's header is ignored for every purpose (operator ruling, 2026-11-13).
     """
     try:
         text = data.decode("utf-8", errors="strict")
@@ -143,30 +133,76 @@ def validate_mirror(
         raise MirrorInvalid("mirror-unicode-invalid") from None
     if max_bytes is not None and len(data) > max_bytes:
         raise MirrorInvalid("mirror-too-large")
-    if lane == "envelope":
-        from drawbridge.mirror import parse_mirror_header
+    return text
 
-        try:
-            parse_mirror_header(text)
-        except Exception as error:
-            raise MirrorInvalid("mirror-header-invalid") from error
-        return text
-    match = _FRONT_MATTER.match(_normalised(text))
-    if match is None:
-        if required_header_fields:
-            raise MirrorInvalid("mirror-header-invalid")
-        return text
+
+_FIELD_KEY = re.compile(r"[^\W\d_][\w.-]{0,63}")
+_HEADER = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+"""The front matter exactly as Palace recognises it, so a header Palace indexes as body
+text is never also read here."""
+CASTLE_KEYS = frozenset(
+    {
+        "name",
+        "filename",
+        "path",
+        "media_type",
+        "tags",
+        "dates",
+        "content_hash",
+        "content_address",
+        "cas_id",
+        "byte_size",
+        "size",
+    }
+)
+"""Header keys naming an attribute Castle controls: never read from a mirror, never indexed
+and never applied, so a header can neither copy nor override Castle's value."""
+
+
+def attributed_fields(text: str, provenance: frozenset[str]) -> list[tuple[str, str]]:
+    """The mirror header's searchable attributed metadata, in header order: each top-level
+    key (a letter, then letters, digits, ``_``, ``.`` or ``-``) that is neither
+    Castle-controlled nor declared converter provenance (both compared case-insensitively),
+    whose value is a scalar, a date or a list of those, as one flattened line. A header
+    that cannot be read as a YAML mapping contributes nothing; it is never an error."""
+    import datetime
+
     import yaml
 
+    match = _HEADER.match(text)
+    if match is None:
+        return []
     try:
         header = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as error:
-        raise MirrorInvalid("mirror-header-invalid") from error
-    if header is None:
-        header = {}
-    if not isinstance(header, dict) or any(key not in header for key in required_header_fields):
-        raise MirrorInvalid("mirror-header-invalid")
-    return text
+    except Exception:  # noqa: BLE001 - any unreadable header contributes nothing
+        return []
+    if not isinstance(header, dict):
+        return []
+    reserved = CASTLE_KEYS | {key.casefold() for key in provenance}
+    scalars = (str, int, float, bool, datetime.date, datetime.time)
+    fields = []
+    for key, value in header.items():
+        if not isinstance(key, str) or not _FIELD_KEY.fullmatch(key):
+            continue
+        if key.casefold() in reserved:
+            continue
+        items = value if isinstance(value, list) else [value]
+        if not items or not all(isinstance(item, scalars) for item in items):
+            continue
+        rendered = (
+            item.isoformat() if isinstance(item, (datetime.date, datetime.time)) else str(item)
+            for item in items
+        )
+        line = " ".join(", ".join(rendered).split())
+        if line:
+            fields.append((key, line))
+    return fields
+
+
+def mirror_body(text: str) -> str:
+    """The mirror's text after a leading front-matter block, which is removed unread."""
+    match = _FRONT_MATTER.match(_normalised(text))
+    return text if match is None else match.group(2)
 
 
 def digest(data: bytes) -> str:
@@ -350,7 +386,7 @@ def _classify(
     if found == record.mirror_sha256:
         return SEARCHABLE, found
     try:
-        validate_mirror(data, lane=lane)
+        validate_mirror(data)
     except MirrorInvalid as error:
         return error.code, found
     return record.refused_for(found) or PENDING_REINDEX, found

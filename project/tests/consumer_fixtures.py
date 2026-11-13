@@ -131,7 +131,7 @@ LANE_POLICY_FIELDS = ("injected", "1", "escaped/1", "palace", "palace", "palace"
 
 def lane_pipeline(fixture, calls: list, *, embedder=None, reuse_converted_body: bool = False):
     """A consumer-lane pipeline over the fixture's store: an injected converter that
-    records each source, a renderer with two body sections and a name section, each
+    records each source, a name-free renderer with two body sections, each
     chunk's literal body as its input, and the store's selector declaring the
     representation."""
     from palace.index.embedder_config import load_embedder_config, save_embedder_config
@@ -148,11 +148,9 @@ def lane_pipeline(fixture, calls: list, *, embedder=None, reuse_converted_body: 
         calls.append(request.source)
         return ConversionResult("converted", request.source.decode(), "injected", "1")
 
-    def renderer(result, name):
+    def renderer(result):
         return MirrorDocument(
-            "# Body\n\n" + result.body + "\n\n## Extra\n\nIndependent body row.\n\n"
-            "## Filename\n\n" + name + "\n",
-            "Filename",
+            "# Body\n\n" + result.body + "\n\n## Extra\n\nIndependent body row.\n"
         )
 
     pipeline = ConsumerPipeline(

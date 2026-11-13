@@ -93,7 +93,7 @@ def test_lagging_member_is_admitted_and_named(tmp_path: Path) -> None:
         )
         federated = open_stack([a, b])
         behind = federated.search("fresnel lens", embedder=embedder, rerank=False)
-        assert [hit.entry_id for hit in behind.hits] == [notes.entry_id]
+        assert {hit.entry_id for hit in behind.hits} == {notes.entry_id}
         assert behind.indexing == (b.shelf_id,)
         assert behind.status[b.shelf_id].lagging and not behind.status[b.shelf_id].built
         assert behind.status[b.shelf_id].pending is None  # unknown until Castle's count

@@ -48,7 +48,6 @@ def literal_inputs(plan: FilePlan) -> tuple[str, ...]:
 class ConversionRequest:
     source: bytes
     media_type: str
-    display_name: str
     scratch_root: Path
 
 
@@ -89,8 +88,10 @@ class ConversionRefused(Exception):  # noqa: N818 - a document's answer, not a f
 
 @dataclass(frozen=True, slots=True)
 class MirrorDocument:
+    """A rendered mirror: document content only. The entry's name and path are Castle's
+    and never appear here; the index adds the current filename as its own section."""
+
     markdown: str
-    name_heading: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,8 +109,9 @@ class DerivationPolicy:
     max_mirror_bytes: int = 8 * 1024 * 1024
     max_chunks: int = 16384
     reuse_converted_body: bool = False
-    required_header_fields: tuple[str, ...] = ()
-    """Front-matter keys a consumer's own mirror format requires; none are imposed."""
+    provenance_header_fields: tuple[str, ...] = ()
+    """Mirror-header keys that are converter provenance: kept in the mirror, never indexed
+    as attributed metadata. Castle-controlled keys are excluded regardless."""
     max_concurrency: int = 4
     """Entries prepared in overlap; the effective bound is also the embedder's own."""
 
@@ -132,26 +134,23 @@ class DerivationPolicy:
             or type(self.max_chunks) is not int
             or not 0 < self.max_chunks <= 16384
             or type(self.reuse_converted_body) is not bool
-            or type(self.required_header_fields) is not tuple
-            or not all(_bounded_text(key, 256) and key for key in self.required_header_fields)
+            or type(self.provenance_header_fields) is not tuple
+            or not all(_bounded_text(key, 256) and key for key in self.provenance_header_fields)
             or type(self.max_concurrency) is not int
             or not 1 <= self.max_concurrency <= 32
         ):
             raise ConsumerError("policy-invalid", stage="conversion")
 
 
-def render_escaped(result: ConversionResult, display_name: str) -> MirrorDocument:
-    """An explicit optional policy: quote structure, preserve text, one finite name section."""
-    if len(display_name.encode()) > 255 or any(char in display_name for char in "\r\n\x00"):
-        raise ConsumerError("name-invalid", stage="conversion")
-    body = "\n".join("| " + line for line in result.body.split("\n"))
-    return MirrorDocument(body + "\n\n## Filename\n\n" + display_name + "\n", "Filename")
+def render_escaped(result: ConversionResult) -> MirrorDocument:
+    """An explicit optional policy: quote structure and preserve text."""
+    return MirrorDocument("\n".join("| " + line for line in result.body.split("\n")) + "\n")
 
 
 def _policy_document(policy: DerivationPolicy) -> dict:
     """The policy as a JSON- and canonical-encodable mapping (sequences as lists)."""
     document = asdict(policy)
-    document["required_header_fields"] = list(policy.required_header_fields)
+    document["provenance_header_fields"] = list(policy.provenance_header_fields)
     return document
 
 
@@ -195,7 +194,7 @@ class ConsumerPipeline:
         self,
         *,
         converter: Callable[[ConversionRequest], ConversionResult],
-        renderer: Callable[[ConversionResult, str], MirrorDocument],
+        renderer: Callable[[ConversionResult], MirrorDocument],
         input_view: Callable[[FilePlan], Sequence[str]] | None,
         policy: DerivationPolicy,
         embedder: Embedder,

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from biblios.curation import CreateDirectory, CreateFile, CurationRequest, DeleteEntry
-from biblios.pipeline import MirrorDocument
 from biblios.testing import HashEmbedder, OverlapReranker
 from tests.consumer_fixtures import ADDED, consumer_fixture, identifier, lane_pipeline
 
@@ -47,16 +46,14 @@ def _accepted(fixture, entry_id: str) -> tuple[dict, list[str]]:
     return json.loads(bytes(canonical)), vectors
 
 
-@pytest.mark.parametrize(
-    "case", ("identical", "different-name", "different-heading", "path-in-name-input")
-)
+@pytest.mark.parametrize("case", ("identical", "different-name", "path-in-name-input"))
 def test_a_nominated_duplicate_reuses_its_name_row_only_for_a_complete_identical_input(
     tmp_path: Path, case: str
 ) -> None:
     """Failure mode: a duplicate repeats the converter or embeds unchanged rows again;
-    the donor's name vector is reused for a name input that differs in any way (name,
-    heading, or a path the input composes); or the destination keeps answering through
-    the removed donor."""
+    the donor's name vector is reused for a name input that differs in any way (name or
+    a path the input composes); or the destination keeps answering through the removed
+    donor."""
     fixture = consumer_fixture(tmp_path)
     calls: list = []
     embedder = HashEmbedder()
@@ -88,12 +85,6 @@ def test_a_nominated_duplicate_reuses_its_name_row_only_for_a_complete_identical
                 CreateFile(folder, name, b"Lighthouse lens maintenance.", "text/plain", ADDED),
             )
         ).mutation.affected_entry_ids[0]
-        if case == "different-heading":
-            pipeline.renderer = lambda result, name: MirrorDocument(
-                "# Body\n\n" + result.body + "\n\n## Extra\n\nIndependent body row.\n\n"
-                "## Name\n\n" + name + "\n",
-                "Name",
-            )
         before = len(embedder.calls)
         second = fixture.bound.derive(pipeline, destination, operation_id=identifier(), donor=donor)
         new_inputs = _submitted(embedder, before)
@@ -117,9 +108,8 @@ def test_a_nominated_duplicate_reuses_its_name_row_only_for_a_complete_identical
             assert new_inputs[0].splitlines()[-1] == name
             assert vectors[:2] == donor_vectors[:2] and vectors[2] != donor_vectors[2]
         mirror = fixture.bound._shelf.mirror_path(destination).read_text()
-        assert mirror.startswith("# Body\n\nLighthouse lens maintenance.\n") and mirror.endswith(
-            name + "\n"
-        )
+        assert mirror == fixture.bound._shelf.mirror_path(source).read_text()
+        assert mirror.startswith("# Body\n\nLighthouse lens maintenance.\n") and name not in mirror
         fixture.bound.curate(
             CurationRequest(identifier(), fixture.bound.view.revision, DeleteEntry(source))
         )

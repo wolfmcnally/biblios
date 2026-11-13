@@ -1,6 +1,6 @@
 [project]
 name = "biblios"
-version = "0.3.2"
+version = "0.4.0"
 description = "Standalone, portable knowledge bases (shelves) that can be searched alone or federated in a stack, built from Drawbridge, Castle and Palace."
 requires-python = ">=3.12,<3.14"
 license = "MIT"
@@ -12,6 +12,7 @@ dependencies = [
     "castle @ git+https://github.com/wolfmcnally/castle.git@v0.4.0#subdirectory=project",
     "drawbridge @ git+https://github.com/wolfmcnally/drawbridge.git@v0.3.1",
     "conric @ git+https://github.com/wolfmcnally/conric.git@v0.1.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

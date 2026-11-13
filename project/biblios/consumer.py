@@ -266,9 +266,9 @@ class BoundShelf:
         control: CallControl = CallControl(),
     ) -> Page:
         def read() -> Page:
-            from drawbridge.mirror import parse_mirror_header
             from palace.index.embedder_config import load_embedder_config
 
+            from biblios.mirrors import mirror_body
             from biblios.search import MirrorUnavailable, readable_mirror
 
             entry = self._shelf.resolve(entry_id)
@@ -280,8 +280,7 @@ class BoundShelf:
                 # A supplied representation owns its complete Markdown view, including
                 # any front matter. It is not Drawbridge's provenance-envelope format.
                 return _page(entry, text, page=page, mirror_state=state)
-            _header, body = parse_mirror_header(text)
-            return _page(entry, body, page=page, mirror_state=state)
+            return _page(entry, mirror_body(text), page=page, mirror_state=state)
 
         return self._read(read, control)
 
