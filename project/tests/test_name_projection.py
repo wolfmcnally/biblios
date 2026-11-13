@@ -311,95 +311,6 @@ def test_a_filename_that_reads_as_a_heading_is_indexed_as_the_filename(shelf):
     assert names[0].chunk.splitlines()[-1].strip() == "# notes.md"
 
 
-def _as_rendered_by_an_earlier_release(fixture, entry_id: str, name: str) -> bytes:
-    """Rewrite the lane's accepted entry into an earlier release's shape: a mirror that is
-    Biblios's own recorded rendering with the filename in it, and no conversion recorded
-    under the current policy."""
-    import hashlib
-
-    from biblios.derived import DERIVED_NAME
-
-    path = fixture.bound._shelf.mirror_path(entry_id)
-    old = path.read_bytes() + f"\n## Filename\n\n{name}\n".encode()
-    path.write_bytes(old)
-    with sqlite3.connect(fixture.binding.palace_root / DERIVED_NAME) as conn:
-        conn.execute(
-            "UPDATE entries SET mirror_sha256=? WHERE entry_id=?",
-            (hashlib.sha256(old).hexdigest(), entry_id),
-        )
-        conn.execute("DELETE FROM checkpoints")
-    return old
-
-
-def _lane_entry(tmp_path: Path):
-    from tests.consumer_fixtures import consumer_fixture, identifier, lane_pipeline
-
-    fixture = consumer_fixture(tmp_path)
-    calls: list = []
-    pipeline = lane_pipeline(fixture, calls)
-    entry_id = fixture.bound.curate(
-        fixture.request("recipe-old-name.txt", b"sourdough starter fed daily")
-    ).mutation.affected_entry_ids[0]
-    fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
-    return fixture, pipeline, calls, entry_id
-
-
-def _rename(fixture, entry_id: str, name: str) -> None:
-    from biblios.curation import CurationRequest, RelocateEntry
-    from tests.consumer_fixtures import identifier
-
-    fixture.bound.curate(
-        CurationRequest(
-            identifier(),
-            fixture.bound.view.revision,
-            RelocateEntry(entry_id, fixture.root_id, name),
-        )
-    )
-
-
-def test_an_unedited_mirror_from_an_earlier_release_is_regenerated_name_free_on_rename(tmp_path):
-    """Failure mode: after a rename, a mirror an earlier release rendered with the old
-    filename keeps it on disk and in search; or its bytes are lost rather than kept as a
-    retained version outside the index."""
-    from biblios.mirrors import retained_files
-    from tests.consumer_fixtures import identifier
-
-    fixture, pipeline, calls, entry_id = _lane_entry(tmp_path)
-    try:
-        old = _as_rendered_by_an_earlier_release(fixture, entry_id, "recipe-old-name.txt")
-        _rename(fixture, entry_id, "bread.txt")
-        done = fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
-        assert done.outcome(entry_id).outcome == "searchable" and len(calls) == 2
-        path = fixture.bound._shelf.mirror_path(entry_id)
-        assert b"recipe-old-name" not in path.read_bytes()
-        assert [file.read_bytes() for file in retained_files(path.parent, entry_id)] == [old]
-        found = fixture.bound.search(
-            "recipe-old-name.txt", embedder=HashEmbedder(), reranker=OverlapReranker()
-        )
-        assert found.hits and all("recipe-old-name" not in hit.chunk for hit in found.hits)
-    finally:
-        fixture.close()
-
-
-def test_an_edited_mirror_from_an_earlier_release_is_never_regenerated(tmp_path):
-    """Failure mode: a rename converts over a mirror the user edited, losing the edit."""
-    from biblios.mirrors import retained_files
-    from tests.consumer_fixtures import identifier
-
-    fixture, pipeline, calls, entry_id = _lane_entry(tmp_path)
-    try:
-        _as_rendered_by_an_earlier_release(fixture, entry_id, "recipe-old-name.txt")
-        path = fixture.bound._shelf.mirror_path(entry_id)
-        edited = path.read_bytes() + b"\nMy own note.\n"
-        path.write_bytes(edited)
-        _rename(fixture, entry_id, "bread.txt")
-        done = fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
-        assert done.outcome(entry_id).outcome == "searchable" and len(calls) == 1
-        assert path.read_bytes() == edited and retained_files(path.parent, entry_id) == []
-    finally:
-        fixture.close()
-
-
 def test_a_header_that_cannot_be_loaded_never_stops_the_entry_indexing(shelf):
     """Failure mode: a header value YAML parses but cannot construct (an impossible date)
     leaves the entry unindexed, in Biblios's attributed metadata or in Palace's own
@@ -413,3 +324,16 @@ def test_a_header_that_cannot_be_loaded_never_stops_the_entry_indexing(shelf):
     hits = _hits(shelf, "sourdough starter Ada Quillfern", embedder)
     assert any(hit.entry_id == entry_id and "sourdough" in hit.chunk for hit in hits)
     assert all(hit.heading != "Mirror metadata" for hit in hits)
+
+
+def test_castle_entry_metadata_carries_no_name_and_a_rename_leaves_it_unchanged(shelf):
+    """Failure mode: Biblios's entry metadata in Castle keeps a copy of the filename, which
+    a rename leaves stale (a second source of truth for the name, and a spill source)."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id, _mirror = _setup(shelf, settings, embedder)
+    before = dict(shelf._live()[entry_id].metadata)
+    assert "recipe" not in json.dumps(before)
+    shelf.rename("recipe.txt", "bread.txt")
+    entry = shelf._live()[entry_id]
+    assert entry.name == "bread.txt" and dict(entry.metadata) == before

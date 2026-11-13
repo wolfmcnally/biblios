@@ -76,7 +76,6 @@ class SetEntryMetadata:
 
     entry_id: str
     media_type: str
-    display_name: str
     added_at: str
     tags: tuple[str, ...] = ()
     dates: tuple[tuple[str, str], ...] = ()
@@ -196,7 +195,6 @@ def content(data: bytes, limits: CurationLimits) -> dict[str, str | int]:
 
 def metadata(
     media_type: str,
-    display_name: str,
     added_at: str,
     tags: tuple[str, ...],
     dates: tuple[tuple[str, str], ...],
@@ -204,7 +202,7 @@ def metadata(
     if not media_type or not added_at or len(dict(dates)) != len(dates):
         raise ConsumerError("metadata-invalid", stage="curation")
     value = EntryMetadata(
-        media_type, display_name, added_at, tags=tuple(sorted(set(tags))), dates=dict(dates)
+        media_type, added_at, tags=tuple(sorted(set(tags))), dates=dict(dates)
     ).to_mapping()
     EntryMetadata.from_mapping(value)
     return value
@@ -228,9 +226,7 @@ def compile_request(
                 "entry_id": action.entry_id or generated,
                 "parent_id": action.parent_id,
                 "name": name(action.name),
-                "metadata": metadata(
-                    action.media_type, name(action.name), action.added_at, action.tags, action.dates
-                ),
+                "metadata": metadata(action.media_type, action.added_at, action.tags, action.dates),
                 "content": spec,
             },
         )
@@ -258,7 +254,6 @@ def compile_request(
                 "entry_id": action.entry_id,
                 "metadata": metadata(
                     action.media_type,
-                    name(action.display_name),
                     action.added_at,
                     action.tags,
                     action.dates,
@@ -318,9 +313,7 @@ def compile_request(
                 payload += len(item.data)
                 row.update(
                     kind="file",
-                    metadata=metadata(
-                        item.media_type, name(item.name), item.added_at, item.tags, item.dates
-                    ),
+                    metadata=metadata(item.media_type, item.added_at, item.tags, item.dates),
                     **spec,
                 )
                 sources[str(spec["cas_id"])] = item.data

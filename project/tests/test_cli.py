@@ -38,7 +38,7 @@ from biblios import (
 from biblios.testing import HashEmbedder
 from tests.support import SETTINGS_TEXT, make_shelf
 
-ENTRY = Entry("entry", "file", "résumé.txt", 3, "content", EntryMetadata("text/plain", "x", "now"))
+ENTRY = Entry("entry", "file", "résumé.txt", 3, "content", EntryMetadata("text/plain", "now"))
 MUTATION = Mutation("request", "create-file", "entry", ("entry",), 1, 2, False)
 STATUS = IndexStatus(
     "shelf",

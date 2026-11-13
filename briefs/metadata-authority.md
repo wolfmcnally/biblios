@@ -19,7 +19,7 @@ A consuming service found that a rename left the old filename readable inside th
 Three kinds of data, each with one home.
 
 1. **Original content.** The source bytes, addressed by content hash, are the only immutable thing in Castle. Facts true of those bytes forever (content hash, size) may be recorded anywhere as provenance.
-2. **Current attributes are Castle's.** Name, path, kind, media type, tags and dates live in Castle and change only through curation. They are never copied into a mirror, into converted text or into content embeddings, so there is no second copy to keep current. Biblios's `display_name`, set at ingestion and never updated, is such a copy and is to be removed; its removal waits on the decision under Unresolved, and nothing reads it meanwhile.
+2. **Current attributes are Castle's.** Name, path, kind, media type, tags and dates live in Castle and change only through curation. They are never copied into a mirror, into converted text or into content embeddings, so there is no second copy to keep current. Biblios's former `display_name`, set at ingestion and never updated, was such a copy and is removed.
 3. **Mirrors are content.** A mirror is the user's once it exists and is never rewritten by Biblios. Its body is indexed as content. Its front-matter header is not an authority for anything Castle controls: a header value under a Castle-controlled key is ignored, never applied and never indexed.
 
 ## Mirror headers: attributed metadata
@@ -43,7 +43,7 @@ Mirrors that Biblios generates carry no filename or path. The default converter 
 - **Castle.** No change.
 - **User-edited mirrors.** A name or a Castle-controlled field that a user typed into a mirror stays where it is. In the body it is indexed as content; in the header it is ignored.
 - **Earlier-release imports.** A shelf imported from an earlier release keeps its committed rows exactly until the entry is next indexed.
-- **Mirrors written before 0.4.0.** A mirror an earlier release generated carries the filename it was converted under. When such an entry is renamed and its mirror is still exactly the converted output Biblios recorded (not a user edit), and no conversion of its source exists under the current policy, Biblios converts it again from Castle's original bytes under the current name-free policy. The old mirror is exchanged out, digest-bound so a concurrent edit wins, and kept as a retained version outside the index; excision removes it. An edited earlier-release mirror is never converted over: its old name stays as content. An entry never renamed keeps its mirror.
+- **Shelves written by earlier releases.** Earlier releases were developer previews and no shelves exist to carry, so there is no compatibility path: a shelf written by 0.3.x is not supported (its entries' metadata no longer matches, so reads of them fail) and is rebuilt from its originals.
 
 ## Consumer formats checked
 
@@ -53,11 +53,10 @@ As of 2026-11-13, read-only against two existing book corpora. A legal-domain co
 
 - The renderer is `renderer(result) -> MirrorDocument(markdown)`: no name argument, no `name_heading`.
 - `ConversionRequest` carries no display name.
+- `EntryMetadata.display_name` and `SetEntryMetadata.display_name` are gone.
 - `DerivationPolicy.required_header_fields` is gone; `DerivationPolicy.provenance_header_fields` declares the header keys that are converter provenance.
 - The isolation classes `mirror-header-invalid` and `mirror-name-section-invalid` are gone.
 
 ## Unresolved
 
-
-- **Existing shelves and `display_name`.** Entries written by 0.3.x carry `display_name` in Castle. Without a compatibility read they are refused once it is removed; whether to accept that, defer the removal or provide a one-time rewrite is the operator's decision.
 - **Drawbridge's H1.** Drawbridge always writes an H1; Biblios passes a fixed neutral title. An option in Drawbridge to omit the H1 would remove even that line, and would be a request to Drawbridge's owner.

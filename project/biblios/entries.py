@@ -17,8 +17,8 @@ from biblios.errors import BibliosError
 ENTRY_SCHEMA = "biblios.entry/1"
 """Schema identifier carried by every entry's metadata."""
 
-_FILE_FIELDS = frozenset({"schema", "media_type", "display_name", "added_at", "tags", "dates"})
-_STRING_FIELDS = ("media_type", "display_name", "added_at")
+_FILE_FIELDS = frozenset({"schema", "media_type", "added_at", "tags", "dates"})
+_STRING_FIELDS = ("media_type", "added_at")
 LEGACY_FIELDS = frozenset(
     {"converter", "converter_version", "mirror_sha256", "source_cas_id", "conversion"}
 )
@@ -37,7 +37,6 @@ class EntryMetadata:
     """What Biblios records in Castle about one file entry: descriptive fields only."""
 
     media_type: str
-    display_name: str
     added_at: str
     tags: tuple[str, ...] = ()
     dates: dict[str, str] = field(default_factory=dict)
@@ -49,7 +48,6 @@ class EntryMetadata:
         return {
             "schema": ENTRY_SCHEMA,
             "media_type": self.media_type,
-            "display_name": self.display_name,
             "added_at": self.added_at,
             "tags": list(self.tags),
             "dates": dict(self.dates),
@@ -79,7 +77,6 @@ class EntryMetadata:
             raise EntryMetadataError("entry dates must map strings to strings")
         return cls(
             media_type=value["media_type"],
-            display_name=value["display_name"],
             added_at=value["added_at"],
             tags=tuple(tags),
             dates=dict(dates),

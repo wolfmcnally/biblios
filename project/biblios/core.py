@@ -75,8 +75,6 @@ METADATA_HEADING = "Mirror metadata"
 """The heading of the section the index adds before the filename for a mirror header's
 attributed metadata: fields Castle does not control, labelled as the mirror's."""
 FILENAME_HEADING = "Filename"
-_KEEP = object()
-"""Returned by a regeneration that leaves the existing mirror to be re-indexed as is."""
 """The heading of the section the index adds after the mirror's bytes, naming the entry's
 current Castle filename. Castle is the only authority for names and paths; a mirror
 carries none and its header is ignored for every purpose (operator ruling, 2026-11-13)."""
@@ -3005,15 +3003,6 @@ class _Run:
             self._restat(record, read_stat)
             self._report(entry_id, SEARCHABLE, stage_sha256=record.accepted_stage_sha256)
             return None
-        if (
-            renamed
-            and found == record.mirror_sha256
-            and record.converter != EDIT_CONVERTER
-            and self._rendered_under_earlier_policy(entry)
-        ):
-            regenerated = self._regenerate(entry, record, data)
-            if regenerated is not _KEEP:
-                return regenerated
         refused = record.refused_for(found)
         if refused is not None and entry_id not in (self.request.entry_ids or ()):
             self._report(entry_id, "isolated:" + refused)
@@ -3112,69 +3101,6 @@ class _Run:
                 converter=EDIT_CONVERTER,
                 expected_exchange=found,
                 preexisting=found == digest(update.new_mirror),
-            )
-        )
-
-    def _rendered_under_earlier_policy(self, entry: Entry) -> bool:
-        """Whether this core holds no complete conversion of the entry's source under the
-        current policy, so its mirror was rendered under an earlier one (which wrote the
-        filename into converted text). A missing row costs a reconversion only; a forged
-        one only leaves the old mirror in place."""
-        row = self.derived.conn.execute(
-            "SELECT document FROM checkpoints WHERE key=?", (self._conversion_key(entry),)
-        ).fetchone()
-        return row is None or json.loads(row[0]).get("state") != "complete"
-
-    def _regenerate(self, entry: Entry, record, existing: bytes):
-        """A renamed entry whose mirror is still exactly the converted output this core
-        recorded under an earlier policy, which carried the old filename, is converted
-        again from Castle's original bytes under the current name-free policy. The old
-        mirror is exchanged out digest-bound and kept as a retained version outside the
-        index, so a concurrent user edit wins and nothing is lost. An edited mirror never
-        reaches here. Returns ``_KEEP`` when the existing mirror should simply be
-        re-indexed."""
-        found = digest(existing)
-        if self.authority is not None:
-            creation = CreationIdentity(
-                self.request.operation_id,
-                "regenerate",
-                "regenerate-own",
-                entry.cas_id,
-                found,
-                self.revision,
-            )
-            try:
-                admitted = self._answer(
-                    lambda: self.authority.authorize_creation(creation, entry.entry_id),
-                    self.control,
-                    "conversion",
-                )
-            except StageRefused as refused:
-                self._report(entry.entry_id, "unrecorded", refused.code)
-                return None
-            if type(admitted) is not bytes or len(admitted) > MAX_EVIDENCE:
-                raise ConsumerError("evidence-invalid", stage="conversion")
-        converted = self._convert(entry, None)
-        if converted is None:
-            return None
-        result, mirror, checkpoint = converted
-        if result.outcome == "unconverted":
-            return _KEEP
-        data = mirror.markdown.encode("utf-8")
-        if digest(data) == found:
-            return _KEEP
-        return self._planned(
-            _Prepared(
-                entry,
-                record,
-                "publish",
-                "converted",
-                data,
-                converter=result.converter,
-                converter_version=result.converter_version,
-                body_sha256=_text_digest(result.body),
-                expected_exchange=found,
-                checkpoint=checkpoint,
             )
         )
 
@@ -4697,13 +4623,7 @@ class _Run:
                 if prepared.mirror_written:
                     pass
                 elif prepared.expected_exchange is not None:
-                    reason = (
-                        "update"
-                        if prepared.provenance == "update-seam"
-                        else "regenerated"
-                        if record is not None and record.source_cas_id == entry.cas_id
-                        else "source-replaced"
-                    )
+                    reason = "update" if prepared.provenance == "update-seam" else "source-replaced"
                     write_mirror(
                         path,
                         prepared.data,

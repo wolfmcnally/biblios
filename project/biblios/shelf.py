@@ -587,7 +587,6 @@ class Shelf:
         parent_id, name = self._parent_and_name(path)
         metadata = EntryMetadata(
             media_type=media_type if media_type is not None else _sniff(data, name),
-            display_name=name,
             added_at=_now(),
             tags=tuple(tags),
             dates=dict(dates or {}),
