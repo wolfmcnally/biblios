@@ -548,13 +548,24 @@ class BoundShelf:
         )
 
     def grant_first_ingestion(
-        self, entry_id: str, *, expected_cas_id: str, operation_id: str
+        self,
+        entry_id: str,
+        *,
+        expected_cas_id: str,
+        operation_id: str,
+        expected_mirror_sha256: str | None = None,
     ) -> bool:
-        """The explicit first-ingestion grant for one never-converted entry."""
+        """The explicit first-ingestion grant for one never-converted entry; with
+        ``expected_mirror_sha256``, adoption of the existing mirror with exactly that
+        digest (rebuilding a lost derived store)."""
         from biblios.core import grant_first_ingestion
 
         return grant_first_ingestion(
-            self, entry_id, expected_cas_id=expected_cas_id, operation_id=operation_id
+            self,
+            entry_id,
+            expected_cas_id=expected_cas_id,
+            operation_id=operation_id,
+            expected_mirror_sha256=expected_mirror_sha256,
         )
 
     def mark_dirty(self, entry_ids: Sequence[str], *, source: str) -> int:

@@ -803,7 +803,12 @@ def mark_dirty(bound: BoundShelf, entry_ids: Sequence[str], *, source: str) -> i
 
 
 def grant_first_ingestion(
-    bound: BoundShelf, entry_id: str, *, expected_cas_id: str, operation_id: str
+    bound: BoundShelf,
+    entry_id: str,
+    *,
+    expected_cas_id: str,
+    operation_id: str,
+    expected_mirror_sha256: str | None = None,
 ) -> bool:
     """Grant one named entry its first mirror: the explicit, write-grade first-ingestion
     route (root ruling). Never invoked automatically and adds no approval gate.
@@ -818,7 +823,14 @@ def grant_first_ingestion(
     this operation and the observed revision; a later
     :func:`bring_current` naming the entry materializes the mirror exactly as for any
     creation grant, and a caller's ``authorize_creation`` sees that provenance. Returns
-    False when an identical grant already exists (idempotent)."""
+    False when an identical grant already exists (idempotent).
+
+    With ``expected_mirror_sha256`` the grant instead adopts the file already at the
+    mirror path, for rebuilding a lost derived store: it is granted only when that
+    file's bytes hash to exactly the caller's vouched digest (any other bytes refuse
+    ``mirror-user-owned``, an absent file ``mirror-missing``), and the next
+    :func:`bring_current` naming the entry indexes those bytes as they are, converting
+    nothing and writing nothing at the path."""
     if not isinstance(operation_id, str) or not operation_id:
         raise ConsumerError("operation-invalid", stage="index")
     with bound._writer("biblios grant-first-ingestion"):
@@ -839,27 +851,57 @@ def grant_first_ingestion(
             if record is not None and (record.converted or record.state == "accepted"):
                 raise ConsumerError("converted-before", stage="index")
             path = shelf.mirror_path(entry_id)
-            if path.exists() or path.is_symlink():
+            kind = "first-ingestion"
+            if expected_mirror_sha256 is not None:
+                # The same contained, no-follow read the indexing pass uses.
+                try:
+                    existing = read_mirror(path, shelf.mirror_root)
+                except MirrorInvalid:
+                    raise ConsumerError("mirror-user-owned", stage="index") from None
+                except OSError as error:
+                    raise ConsumerError("mirror-unreadable", stage="index") from error
+                if existing is None:
+                    raise ConsumerError("mirror-missing", stage="index")
+                if digest(existing) != expected_mirror_sha256:
+                    raise ConsumerError("mirror-user-owned", stage="index")
+                kind = "adopt-existing"
+            elif path.exists() or path.is_symlink():
                 raise ConsumerError("mirror-user-owned", stage="index")
-            fingerprint = hashlib.sha256(
-                canonical_bytes(["explicit", entry_id, entry.cas_id, operation_id])
-            ).hexdigest()
+            identity = ["explicit", entry_id, entry.cas_id, operation_id]
+            if expected_mirror_sha256 is not None:
+                identity.append(expected_mirror_sha256)
+            fingerprint = hashlib.sha256(canonical_bytes(identity)).hexdigest()
             row = volatile.conn.execute(
-                "SELECT role, request_fingerprint, state FROM grants WHERE entry_id=? AND cas_id=?",
+                "SELECT role, request_fingerprint, state, kind, intended_mirror_sha256 "
+                "FROM grants WHERE entry_id=? AND cas_id=?",
                 (entry_id, entry.cas_id),
             ).fetchone()
             if row is not None and row[2] == "granted":
-                return False  # this grant, or a creation grant for the same content
-            if row is not None:
+                same = (row[3], row[4]) == (kind, expected_mirror_sha256)
+                if row[0] != "explicit" or same or expected_mirror_sha256 is None:
+                    return False  # this grant, or a creation grant for the same content
+                # An explicit grant re-vouched for the bytes now at the path (the user
+                # edited the mirror after the first vouch): the new digest replaces the
+                # old one, so a stale vouch can never leave the entry unindexable.
+            elif row is not None:
                 raise ConsumerError("grant-consumed", stage="index")
             with transaction(volatile.conn):
                 volatile.conn.execute(
-                    "INSERT INTO grants VALUES (?, ?, 'explicit', ?, 'first-ingestion', "
-                    "?, ?, 'granted', NULL) ON CONFLICT (entry_id, cas_id) DO UPDATE SET "
+                    "INSERT INTO grants VALUES (?, ?, 'explicit', ?, ?, "
+                    "?, ?, 'granted', ?) ON CONFLICT (entry_id, cas_id) DO UPDATE SET "
                     "role=excluded.role, operation_id=excluded.operation_id, "
                     "kind=excluded.kind, request_fingerprint=excluded.request_fingerprint, "
-                    "revision_after=excluded.revision_after, state='granted'",
-                    (entry_id, entry.cas_id, operation_id, fingerprint, revision),
+                    "revision_after=excluded.revision_after, state='granted', "
+                    "intended_mirror_sha256=excluded.intended_mirror_sha256",
+                    (
+                        entry_id,
+                        entry.cas_id,
+                        operation_id,
+                        kind,
+                        fingerprint,
+                        revision,
+                        expected_mirror_sha256,
+                    ),
                 )
             return True
 
@@ -3086,8 +3128,16 @@ class _Run:
             return None
         expected_exchange = None
         own_staged = False
+        adopted = False
         stale = existing is not None and record is None and self._own_stale(entry, existing)
-        if existing is not None and not stale:
+        if grant[2] == "adopt-existing":
+            # A caller-vouched existing mirror (rebuilding a lost store): exactly the
+            # vouched bytes, or nothing; never converted over, never written.
+            if existing is None or digest(existing) != grant[6]:
+                self._report(entry_id, "isolated:mirror-user-owned")
+                return None
+            adopted, stale = True, False
+        elif existing is not None and not stale:
             found = digest(existing)
             if replaced and record is not None and found == record.mirror_sha256:
                 expected_exchange = found
@@ -3117,6 +3167,21 @@ class _Run:
                 return None
             if type(admitted) is not bytes or len(admitted) > MAX_EVIDENCE:
                 raise ConsumerError("evidence-invalid", stage="conversion")
+        if adopted:
+            text = self._validated(entry, existing, record)
+            if text is None:
+                return None
+            return self._planned(
+                _Prepared(
+                    entry,
+                    record,
+                    "publish",
+                    "direct-edit",
+                    existing,
+                    converter=EDIT_CONVERTER,
+                    grant=grant,
+                )
+            )
         if stale:
             # Only after write-grade creation admission: the first mirror this core wrote
             # for an earlier source of the entry is retained, digest-bound.

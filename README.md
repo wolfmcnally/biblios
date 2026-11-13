@@ -2,7 +2,7 @@
 
 Biblios builds portable knowledge bases called **shelves**. Each shelf keeps exact source files, a file tree, Markdown mirrors and a searchable index in one directory. Search one shelf or federate several as a **stack**, with each result identifying its shelf and source. Curate a live shelf while its index catches up, or seal it and carry a read-only copy elsewhere.
 
-**Version 0.3.1 is experimental.** The Python library and 23-command CLI are implemented. APIs and storage formats may change before a stable release. The library provides an [explicit consumer adoption contract](project/ADOPTION.md), including finite history and excision coordination. Mirrors belong to the user once created, and removing an entry retains its bytes in Castle. MCP is not included. A shelf provides no encryption, authentication or authorization. Protect sensitive material in the surrounding application and storage.
+**Version 0.3.2 is experimental.** The Python library and 23-command CLI are implemented. APIs and storage formats may change before a stable release. The library provides an [explicit consumer adoption contract](project/ADOPTION.md), including finite history and excision coordination. Mirrors belong to the user once created, and removing an entry retains its bytes in Castle. MCP is not included. A shelf provides no encryption, authentication or authorization. Protect sensitive material in the surrounding application and storage.
 
 ## Install
 

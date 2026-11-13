@@ -1,14 +1,22 @@
-# Biblios 0.3.1 release preparation
+# Biblios 0.3.2 release preparation
 
-Version 0.3.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It is a patch release after the published experimental 0.3.0 with two corrections found by a consuming service; dependencies, CLI and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.3.2 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios). It is a patch release after the published experimental 0.3.1 with one recovery correction found by a consuming service; dependencies, CLI and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.3.1`. The attached package artifacts are `biblios-0.3.1-py3-none-any.whl`, `biblios-0.3.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.3.2`. The attached package artifacts are `biblios-0.3.2-py3-none-any.whl`, `biblios-0.3.2.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
 
-## Changes since 0.3.0
+## Changes since 0.3.1
+
+A lost derived store can be rebuilt while the user's mirrors survive. Before, after the palace store was removed, every surviving mirror read as user-owned and no call could index it again without deleting or rewriting the user's file. `grant_first_ingestion` now takes an optional `expected_mirror_sha256`: the existing file is adopted as the entry's mirror only if its bytes hash to exactly that caller-vouched digest, and the next `bring_current` indexes those bytes without conversion or any write. A mismatched digest refuses `mirror-user-owned`, an absent file `mirror-missing`, and a mirror edited between the grant and indexing is isolated, never adopted. The grant stays bound to the entry's current content, the operation id and write-grade creation admission.
+
+Adoption still runs the caller's write-grade `authorize_creation`, which sees the grant kind `adopt-existing` and may refuse it with the mirror untouched. Granting again with a new digest, after the user edits the file, replaces the vouched digest. Each adoption is consumed once its entry is accepted; a second grant for the same entry refuses `converted-before`. The rebuild proof checks that no mirror is renamed, retained or rewritten.
+
+One independent code review ran on this correction. Its findings on re-vouching, the missing proofs of creation admission and grant consumption, and the strength of the no-write proof were addressed afterward with failing-first witnesses; two smaller findings, an unintended change to the ordinary grant fingerprint and an uncontained grant-time file read, were fixed without a dedicated witness. Those changes were not reviewed again. Two findings are documented rather than changed. An adopted mirror is treated wholly as user content, so the rebuilt index adds its own filename section and the renderer's original name section stays as body text; the rebuilt index is therefore not identical to the lost one. And excising an adopted entry's source keeps its mirror in place and reports it as kept, as for any user-edited mirror.
+
+## Included from 0.3.1
 
 Excision now leaves no selected entry id or content id (prefixed or bare sha256) in Biblios's own records. Recorded call results drop the excised entries; replaying such an operation returns `redacted=True`, and its operation id and request digest stay, so a changed request under that id is still refused. Curation and cancellation records that name the selection are removed, an unselected entry's record of a selected earlier source forgets that source, and kept retention records forget it too; the completed disposition marker keeps only the operation id, request digest, counts and the residue it reported. A final bounded byte scan of the palace and mirror roots is reported as `biblios.identifier-files` in the residue; it is expected to be zero, and a caller relying on the removal should check it. The release's proofs also scan the successor's Castle roots and find none.
 

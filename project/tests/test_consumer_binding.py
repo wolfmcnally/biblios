@@ -189,3 +189,187 @@ def test_dynamic_readonly_read_and_refused_write_create_no_sidecars(tmp_path: Pa
         ), "dynamic read-only operations wrote or created a sidecar"
     finally:
         fixture.close()
+
+
+def _rebuilt(tmp_path: Path):
+    """Two entries indexed, then the whole derived store deleted while the mirrors and
+    Castle survive, and the shelf bound again (the lost-store rebuild)."""
+    import shutil
+
+    from biblios.consumer import BoundShelf
+    from biblios.mirrors import digest
+    from tests.consumer_fixtures import lane_pipeline
+
+    fixture = consumer_fixture(tmp_path)
+    pipeline = lane_pipeline(fixture, [])
+    ids = [
+        fixture.bound.curate(
+            fixture.request(f"n{index}.txt", f"lighthouse note {index}".encode())
+        ).mutation.affected_entry_ids[0]
+        for index in range(2)
+    ]
+    for entry_id in ids:
+        fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
+    mirrors = {
+        entry_id: fixture.bound._shelf.mirror_path(entry_id).read_bytes() for entry_id in ids
+    }
+    shutil.rmtree(fixture.binding.palace_root)
+    fixture.bound = BoundShelf(fixture.binding, fixture.bound._shelf)
+    calls: list = []
+    return (
+        fixture,
+        lane_pipeline(fixture, calls),
+        calls,
+        ids,
+        mirrors,
+        {entry_id: digest(data) for entry_id, data in mirrors.items()},
+    )
+
+
+def test_a_lost_derived_store_is_rebuilt_from_vouched_mirrors_without_conversion(
+    tmp_path: Path,
+) -> None:
+    """Failure mode (observed by a consuming service): after the derived store is lost,
+    every surviving mirror reads as user-owned and no route can index it again without
+    deleting or rewriting the user's files."""
+    from biblios.testing import HashEmbedder, OverlapReranker
+
+    fixture, pipeline, calls, ids, mirrors, vouched = _rebuilt(tmp_path)
+    try:
+        root = fixture.binding.mirror_root
+
+        def identities() -> dict:
+            return {
+                entry_id: (
+                    fixture.bound._shelf.mirror_path(entry_id).stat().st_ino,
+                    fixture.bound._shelf.mirror_path(entry_id).stat().st_mtime_ns,
+                )
+                for entry_id in ids
+            }
+
+        listing, before = sorted(path.name for path in root.iterdir()), identities()
+        refused = fixture.bound.derive(pipeline, ids[0], operation_id=identifier())
+        assert refused.outcome(ids[0]).outcome == "isolated:mirror-user-owned"
+        for entry_id in ids:
+            assert fixture.bound.grant_first_ingestion(
+                entry_id,
+                expected_cas_id=fixture.bound.resolve(entry_id).cas_id,
+                operation_id=identifier(),
+                expected_mirror_sha256=vouched[entry_id],
+            )
+            result = fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
+            assert result.outcome(entry_id).outcome == "searchable"
+        assert calls == [], "an adopted mirror was converted"
+        assert {
+            entry_id: fixture.bound._shelf.mirror_path(entry_id).read_bytes() for entry_id in ids
+        } == mirrors
+        found = fixture.bound.search(
+            "lighthouse", embedder=HashEmbedder(), reranker=OverlapReranker()
+        )
+        assert {hit.entry_id for hit in found.hits} == set(ids)
+        # Nothing was renamed, retained or rewritten: same names, inodes and mtimes.
+        assert (sorted(path.name for path in root.iterdir()), identities()) == (listing, before)
+        # The grant was consumed at acceptance: a second one finds a converted record.
+        with pytest.raises(ConsumerError) as again:
+            fixture.bound.grant_first_ingestion(
+                ids[0],
+                expected_cas_id=fixture.bound.resolve(ids[0]).cas_id,
+                operation_id=identifier(),
+                expected_mirror_sha256=vouched[ids[0]],
+            )
+        assert again.value.code == "converted-before"
+    finally:
+        fixture.close()
+
+
+def test_a_vouched_digest_adopts_only_exactly_those_bytes(tmp_path: Path) -> None:
+    """Failure mode: a rebuild adopts a mirror the user changed, or one whose digest the
+    caller never vouched for, or creates one where none exists."""
+    fixture, pipeline, calls, ids, mirrors, vouched = _rebuilt(tmp_path)
+    try:
+        edited, missing = ids
+        path = fixture.bound._shelf.mirror_path
+        cas = {entry_id: fixture.bound.resolve(entry_id).cas_id for entry_id in ids}
+        # The first call after the loss runs the preservation import, as a rebuild does.
+        fixture.bound.derive(pipeline, edited, operation_id=identifier())
+        with pytest.raises(ConsumerError) as wrong:
+            fixture.bound.grant_first_ingestion(
+                edited,
+                expected_cas_id=cas[edited],
+                operation_id=identifier(),
+                expected_mirror_sha256="0" * 64,
+            )
+        assert wrong.value.code == "mirror-user-owned"
+        assert fixture.bound.grant_first_ingestion(
+            edited,
+            expected_cas_id=cas[edited],
+            operation_id=identifier(),
+            expected_mirror_sha256=vouched[edited],
+        )
+        path(edited).write_bytes(mirrors[edited] + b"\nthe user's later edit\n")
+        result = fixture.bound.derive(pipeline, edited, operation_id=identifier())
+        assert result.outcome(edited).outcome == "isolated:mirror-user-owned"
+        assert path(edited).read_bytes().endswith(b"the user's later edit\n")
+        path(missing).unlink()
+        with pytest.raises(ConsumerError) as absent:
+            fixture.bound.grant_first_ingestion(
+                missing,
+                expected_cas_id=cas[missing],
+                operation_id=identifier(),
+                expected_mirror_sha256=vouched[missing],
+            )
+        assert absent.value.code == "mirror-missing" and not path(missing).exists()
+        assert calls == []
+    finally:
+        fixture.close()
+
+
+def test_adoption_runs_the_callers_creation_admission_and_a_re_vouch_replaces_the_digest(
+    tmp_path: Path,
+) -> None:
+    """Failure mode: adoption publishes without the caller's write-grade creation
+    admission, or a vouch made stale by a later edit can never be replaced, leaving the
+    entry unindexable without touching the user's file."""
+    from biblios.core import StageRefused
+    from biblios.mirrors import digest
+
+    fixture, pipeline, calls, ids, mirrors, vouched = _rebuilt(tmp_path)
+    try:
+        entry_id = ids[0]
+        path = fixture.bound._shelf.mirror_path(entry_id)
+        cas = fixture.bound.resolve(entry_id).cas_id
+        fixture.bound.derive(pipeline, ids[1], operation_id=identifier())  # the import
+        assert fixture.bound.grant_first_ingestion(
+            entry_id,
+            expected_cas_id=cas,
+            operation_id=identifier(),
+            expected_mirror_sha256=vouched[entry_id],
+        )
+        seen = []
+
+        class Refusing:
+            def authorize_creation(self, creation, entry):
+                seen.append(creation.kind)
+                raise StageRefused("caller-refused")
+
+        refused = fixture.bound.derive(
+            pipeline, entry_id, operation_id=identifier(), authority=Refusing()
+        )
+        assert (refused.outcome(entry_id).outcome, refused.outcome(entry_id).code) == (
+            "unrecorded",
+            "caller-refused",
+        )
+        assert seen == ["adopt-existing"] and path.read_bytes() == mirrors[entry_id]
+        edited = mirrors[entry_id] + b"\nthe user's edit before the rebuild finished\n"
+        path.write_bytes(edited)
+        assert fixture.bound.grant_first_ingestion(
+            entry_id,
+            expected_cas_id=cas,
+            operation_id=identifier(),
+            expected_mirror_sha256=digest(edited),
+        )
+        result = fixture.bound.derive(pipeline, entry_id, operation_id=identifier())
+        assert result.outcome(entry_id).outcome == "searchable"
+        assert path.read_bytes() == edited and calls == []
+    finally:
+        fixture.close()
