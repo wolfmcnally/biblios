@@ -43,7 +43,11 @@ Mirrors that Biblios generates carry no filename or path. The default converter 
 - **Castle.** No change.
 - **User-edited mirrors.** A name or a Castle-controlled field that a user typed into a mirror stays where it is. In the body it is indexed as content; in the header it is ignored.
 - **Earlier-release imports.** A shelf imported from an earlier release keeps its committed rows exactly until the entry is next indexed.
-- **Mirrors written before 0.4.0.** Mirrors are never rewritten, so a mirror an earlier release generated keeps the filename it was converted under (its H1, header and name section). After a rename that old name stays in the mirror and is indexed as content; the current Castle filename is added as its own row. Removing old names from such mirrors would mean rewriting them, which this design does not do.
+- **Mirrors written before 0.4.0.** A mirror an earlier release generated carries the filename it was converted under. When such an entry is renamed and its mirror is still exactly the converted output Biblios recorded (not a user edit), and no conversion of its source exists under the current policy, Biblios converts it again from Castle's original bytes under the current name-free policy. The old mirror is exchanged out, digest-bound so a concurrent edit wins, and kept as a retained version outside the index; excision removes it. An edited earlier-release mirror is never converted over: its old name stays as content. An entry never renamed keeps its mirror.
+
+## Consumer formats checked
+
+As of 2026-11-13, read-only against two existing book corpora. A legal-domain corpus's search feed is body-only text files, with tags, year and document number pushed to Palace's document-metadata filters from the consumer's own records; its headers never reach the index, so this design changes nothing for it. A pattern-book corpus's mirrors carry `slug`, `type`, `summary`, creation and update dates, all of which Biblios makes searchable as attributed metadata, and a nested `related` mapping, which it does not (only scalars and lists of scalars are attributed). Replacing either consumer's indexing with Biblios without re-deriving mirrors is a separate integration: its tags would need to become Castle attributes and Palace filters, and its body projections and file naming differ.
 
 ## Interface changes for consumers
 
