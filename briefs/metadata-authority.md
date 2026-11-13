@@ -27,7 +27,7 @@ Three kinds of data, each with one home.
 Header fields that Castle does not control and that are not converter provenance are preserved untouched in the mirror and made searchable as attributed metadata: the index adds them, after the mirror's content, as a section headed `Mirror metadata`, one `key: value` line per field. They are labelled as coming from the mirror, never promoted to Castle values and never allowed to override one.
 
 - **Which fields.** Every top-level header key (a letter, then letters, digits, `_`, `.` or `-`) whose value is a string, number, boolean, date or list of those, except the Castle-controlled keys (`name`, `filename`, `path`, `media_type`, `tags`, `dates`, `content_hash`, `content_address`, `cas_id`, `byte_size`, `size`) and the keys the pipeline's policy declares as converter provenance, both compared case-insensitively. The shelf's default Drawbridge policy declares every header key the pinned Drawbridge release writes, its required set and its per-format fields for PDFs, slides, email and audio, so a freshly converted mirror contributes no attributed fields; a field a user adds, such as `author`, does. A Drawbridge release that writes a new key must be added to that declaration.
-- **Bad headers.** A header that is not valid YAML or not a mapping contributes nothing and never isolates the entry. One limit sits in Palace: its front-matter parser lets a date-shaped value it cannot load (such as `2026-02-30`) raise, so such an entry stays pending until the header is corrected.
+- **Bad headers.** A header that is not valid YAML or not a mapping contributes nothing and never isolates the entry. Palace v0.5.1 treats a header it cannot load (such as an impossible date like `2026-02-30`) as malformed front matter in the same way, so the body still indexes.
 - **Recognition.** Front matter is recognised exactly as Palace recognises it: a leading `---` block with LF line ends. A CRLF header is indexed by Palace as body text, Castle-controlled keys included; that is Palace's behaviour and is unchanged here.
 - **Edits.** A header edit changes the mirror's bytes, so it re-indexes like any content edit, with the same lag. Only the sections whose text changed are embedded again.
 
@@ -58,7 +58,6 @@ As of 2026-11-13, read-only against two existing book corpora. A legal-domain co
 
 ## Unresolved
 
-- **A request for Palace's owner.** Palace's front-matter parser catches only YAML syntax errors, so a header value PyYAML parses but cannot construct (an impossible date) makes indexing fail rather than treating the header as malformed. Treating any load failure as malformed front matter would close the one case where a header can still stop an entry.
 
 - **Existing shelves and `display_name`.** Entries written by 0.3.x carry `display_name` in Castle. Without a compatibility read they are refused once it is removed; whether to accept that, defer the removal or provide a one-time rewrite is the operator's decision.
 - **Drawbridge's H1.** Drawbridge always writes an H1; Biblios passes a fixed neutral title. An option in Drawbridge to omit the H1 would remove even that line, and would be a request to Drawbridge's owner.

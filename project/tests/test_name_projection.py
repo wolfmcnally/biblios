@@ -398,3 +398,18 @@ def test_an_edited_mirror_from_an_earlier_release_is_never_regenerated(tmp_path)
         assert path.read_bytes() == edited and retained_files(path.parent, entry_id) == []
     finally:
         fixture.close()
+
+
+def test_a_header_that_cannot_be_loaded_never_stops_the_entry_indexing(shelf):
+    """Failure mode: a header value YAML parses but cannot construct (an impossible date)
+    leaves the entry unindexed, in Biblios's attributed metadata or in Palace's own
+    front-matter split, instead of indexing the body with no attributed metadata."""
+    shelf, settings = shelf
+    embedder = HashEmbedder()
+    entry_id, mirror = _setup(shelf, settings, embedder)
+    _edit_header(mirror, "date: 2026-02-30\nauthor: Ada Quillfern\n")
+    result = shelf.reconcile(settings, embedder=embedder, entry_ids=(entry_id,))
+    assert [(item.outcome, item.code) for item in result.entries] == [("searchable", None)]
+    hits = _hits(shelf, "sourdough starter Ada Quillfern", embedder)
+    assert any(hit.entry_id == entry_id and "sourdough" in hit.chunk for hit in hits)
+    assert all(hit.heading != "Mirror metadata" for hit in hits)
