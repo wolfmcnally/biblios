@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import random
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +12,15 @@ from threading import Event
 
 import pytest
 from castle.namespace_environment import LocalSession
+from palace.index import ProviderCallError
+from palace.index.pacing import (
+    AttemptFailure,
+    PacedRequest,
+    PacerRefused,
+    RetryPolicy,
+    current_scope,
+    perform,
+)
 
 from biblios.consumer import open_bound_stack
 from biblios.control import CallControl, ConsumerError
@@ -344,6 +355,209 @@ def test_dynamic_readonly_search_requires_writer_checkpoint_and_has_no_sidecars(
         reader.close()
         assert (bool(result.hits), inventory(fixture.binding.root)) == (True, before), (
             "dynamic read-only search changed storage or created sidecars"
+        )
+    finally:
+        fixture.close()
+
+
+_MARKER = "query-source-name-path-marker"
+
+
+class _RemoteEmbedder(HashEmbedder):
+    """A remote embedder's request path: every embed runs Palace's own retry loop, whose
+    attempts follow ``script`` (an ``AttemptFailure``, or ``None`` to answer), so the
+    fence classifies the typed error Palace itself raises."""
+
+    def __init__(self, *script, pacer=None, on_attempt=None) -> None:
+        super().__init__()
+        self.script, self.pacer, self.on_attempt = list(script), pacer, on_attempt
+        self.attempts, self.sleeps, self.scopes = 0, [], []
+
+    def embed(self, texts):
+        self.scopes.append(current_scope())
+
+        def send(info):
+            self.attempts += 1
+            if self.on_attempt is not None:
+                self.on_attempt()
+            step = self.script.pop(0) if self.script else None
+            if step is not None:
+                raise step
+            return HashEmbedder.embed(self, texts)
+
+        request = PacedRequest(
+            "fixture:region", "fixture-model", "embed", "query", len(texts), 8 * len(texts)
+        )
+        policy = RetryPolicy(max_attempts=3, base_seconds=20.0, max_wait_seconds=30.0)
+        return perform(
+            send,
+            request=request,
+            policy=policy,
+            pacer=self.pacer,
+            rng=random.Random(0).random,
+            sleep=self.sleeps.append,
+        )
+
+
+def _failure(kind: str, delivery: str, *, retryable: bool = True, hint=None) -> AttemptFailure:
+    return AttemptFailure(
+        f"{kind} {_MARKER}",
+        kind=kind,
+        delivery=delivery,
+        code=f"Fixture{kind.title()}",
+        retryable=retryable,
+        retry_after=hint,
+    )
+
+
+class _RefusingPacer:
+    def acquire(self, request, *, deadline, cancelled):
+        raise PacerRefused(_MARKER)
+
+    def settle(self, reservation, outcome, *, retry_after):
+        raise AssertionError("a refused acquire has no reservation to settle")
+
+
+@pytest.mark.parametrize(
+    ("case", "through"),
+    (
+        ("definite-throttle", "shelf"),
+        ("definite-throttle", "stack"),
+        ("throttle-after-timeout", "shelf"),
+        ("rejected-credential", "shelf"),
+        ("pacer-refused", "shelf"),
+        ("provider-raised-consumer-error", "shelf"),
+    ),
+)
+def test_a_query_embedding_failure_is_a_throttle_only_when_nothing_was_performed(
+    tmp_path: Path, case: str, through: str
+) -> None:
+    """Failure modes: a definite provider throttle reaches the caller as
+    ``callback-failed`` with no hint, so a scheduler cannot tell it from a genuine
+    failure; or the throttle class is trusted for certainty, so a throttle after an
+    attempt that may have been processed is reported as a clean throttle; or every typed
+    failure, or a provider's own ConsumerError, is passed through as Biblios's verdict;
+    or provider text reaches the diagnostic."""
+    fixture = indexed_fixture(tmp_path)
+    embedder = {
+        # A hint beyond the policy's cap ends the request at once with the uncapped hint.
+        "definite-throttle": lambda: _RemoteEmbedder(_failure("throttled", "rejected", hint=60.0)),
+        "throttle-after-timeout": lambda: _RemoteEmbedder(
+            _failure("timeout", "unknown"), _failure("throttled", "rejected", hint=60.0)
+        ),
+        "rejected-credential": lambda: _RemoteEmbedder(
+            _failure("rejected", "rejected", retryable=False)
+        ),
+        "pacer-refused": lambda: _RemoteEmbedder(pacer=_RefusingPacer()),
+        "provider-raised-consumer-error": lambda: _RemoteEmbedder(
+            on_attempt=lambda: (_ for _ in ()).throw(
+                ConsumerError("deadline-exceeded", stage="embedding")
+            )
+        ),
+    }[case]()
+    reranker = OverlapReranker()
+    target = open_bound_stack([fixture.bound]) if through == "stack" else fixture.bound
+    try:
+        with pytest.raises(ConsumerError) as refused:
+            target.search("lens", embedder=embedder, reranker=reranker)
+        error = refused.value
+        hint = error.retry_after
+        observed = (
+            error.code,
+            error.stage,
+            error.effect,
+            hint is not None and 59.0 < hint <= 60.0,
+            hint is None,
+            embedder.attempts,
+            type(error.__cause__).__name__,
+            _MARKER in str(error),
+            reranker.calls,
+            fixture.bound.active_work,
+        )
+        expected = {
+            "definite-throttle": ("provider-throttled", True, False, 1, "ProviderThrottledError"),
+            "throttle-after-timeout": ("callback-failed", False, True, 2, "ProviderThrottledError"),
+            "rejected-credential": ("callback-failed", False, True, 1, "ProviderCallError"),
+            "pacer-refused": ("pacer-refused", False, True, 0, "ProviderCallError"),
+            "provider-raised-consumer-error": ("callback-failed", False, True, 1, "ConsumerError"),
+        }[case]
+        code, hinted, unhinted, attempts, cause = expected
+        assert observed == (
+            code,
+            "embedding",
+            "none",
+            hinted,
+            unhinted,
+            attempts,
+            cause,
+            False,
+            [],
+            0,
+        ), "query embedding failure misclassified, mis-hinted or leaked provider text"
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize("case", ("deadline", "deadline-after-ambiguous", "cancelled", "infinite"))
+def test_the_query_embedder_runs_under_the_calls_deadline_and_cancellation(
+    tmp_path: Path, case: str
+) -> None:
+    """Failure modes: the search's deadline or cancellation never reaches Palace, so its
+    retry loop sleeps and starts further attempts the caller has already given up on; a
+    deadline that stops a request after an attempt that may have been processed is
+    reported as a clean deadline; or a non-finite deadline, which CallControl treats as
+    none, makes Palace refuse the scope and fails every search."""
+    fixture = indexed_fixture(tmp_path)
+    cancelled = Event()
+    control = {
+        # Palace's first backoff (10 to 20 seconds) cannot finish before this deadline,
+        # which still leaves search setup ample time to reach the embedder.
+        "deadline": CallControl(deadline=time.monotonic() + 10.0),
+        "deadline-after-ambiguous": CallControl(deadline=time.monotonic() + 10.0),
+        "cancelled": CallControl(cancelled=cancelled.is_set),
+        "infinite": CallControl(deadline=math.inf),
+    }[case]
+    embedder = {
+        "deadline": lambda: _RemoteEmbedder(_failure("connection", "not-sent")),
+        "deadline-after-ambiguous": lambda: _RemoteEmbedder(_failure("timeout", "unknown")),
+        "cancelled": lambda: _RemoteEmbedder(
+            _failure("connection", "not-sent"), on_attempt=cancelled.set
+        ),
+        "infinite": lambda: _RemoteEmbedder(_failure("connection", "not-sent")),
+    }[case]()
+    try:
+        if case == "infinite":
+            found = fixture.bound.search(
+                "lens", embedder=embedder, reranker=OverlapReranker(), control=control
+            )
+            assert (bool(found.hits), embedder.attempts, embedder.scopes[0].deadline) == (
+                True,
+                2,
+                None,
+            ), "a non-finite deadline refused the search or bounded Palace"
+            return
+        with pytest.raises(ConsumerError) as refused:
+            fixture.bound.search(
+                "lens", embedder=embedder, reranker=OverlapReranker(), control=control
+            )
+        scope = embedder.scopes[0]
+        expected_code = {
+            "deadline": "deadline-exceeded",
+            "deadline-after-ambiguous": "callback-failed",
+            "cancelled": "cancelled",
+        }[case]
+        assert (
+            refused.value.code,
+            refused.value.effect,
+            refused.value.retry_after,
+            isinstance(refused.value.__cause__, ProviderCallError),
+            embedder.attempts,
+            embedder.sleeps,
+            scope.deadline == control.deadline,
+            len(scope.cancelled) == (control.cancelled is not None),
+            fixture.bound.active_work,
+        ) == (expected_code, "none", None, True, 1, [], True, True, 0), (
+            "the search's control did not bound Palace's retry loop, or overclaimed a deadline"
         )
     finally:
         fixture.close()

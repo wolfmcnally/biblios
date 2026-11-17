@@ -1825,14 +1825,20 @@ families:
   - project/pyproject.toml
   - project/uv.lock
   contract: Strict supplied-member retrieval and completion fences, active lifecycle,
-    explicit lag and read-only checkpoint behavior.
+    explicit lag and read-only checkpoint behavior; the query embedder runs under
+    the call's deadline and cancellation as a Palace call scope, and only a Palace
+    provider failure that left nothing performed reports its own code (a throttle
+    as provider-throttled with its remaining hint), every other embedding failure
+    staying callback-failed.
   risk_class: consumer-public-contract
   oracle: Actual public calls over unique synthetic Castle/Palace storage, independently
     expected bytes/revisions/effects/provider counts and full pre/post inventories;
     finite actual durable interruption boundaries where applicable.
-  admission: As of 2026-11-09, bounded six-family capability development; per-scenario
+  admission: 'As of 2026-11-09, bounded six-family capability development; per-scenario
     marginal value and attempted work are recorded in the append-only admissions.
-    No baseline reassessment or retirement.
+    No baseline reassessment or retirement. As of 2026-11-17, provider throttling
+    (operator direction relayed by the factotum, 2026-11-17): two functions (ten proofs)
+    drive Palace''s own retry loop through the search fence; each red-witnessed.'
   nearest_overlap: Ordinary search deliberately permits degraded reranking and does
     not admit supplied binding/view/cancellation contracts.
   tier: changed
@@ -2020,16 +2026,24 @@ families:
   - project/tests/test_core.py
   - project/pyproject.toml
   - project/uv.lock
-  contract: Independent entries' provider calls overlap up to the smaller of the policy
-    bound and the embedder's declared max_concurrency, while every caller callback,
-    store write and commit stays on the calling thread in entry order; failures, cancellation
-    and yields settle per entry and leave no provider thread.
+  contract: 'Independent entries'' provider calls overlap up to the smaller of the
+    policy bound and the embedder''s declared max_concurrency, while every caller
+    callback, store write and commit stays on the calling thread in entry order; failures,
+    cancellation and yields settle per entry and leave no provider thread. Each entry''s
+    provider failures are classified once after its submitted slices drain: pending
+    only when every failure left nothing performed and was a throttle or definite
+    stop, otherwise uncertain, provider-throttled whenever throttled; once a throttle
+    is observable no entry is admitted and no slice is sent; malformed or unstorable
+    answers are contained; pooled calls carry the caller''s context; call-local accounting
+    is exact and never recorded.'
   risk_class: concurrency
   oracle: A barrier-held recording provider's most-outstanding count and threads,
     an owner-locked caller's foreign-callback list, outcome order, replay equality,
     live provider threads and derived accepted records.
   admission: 'As of 2026-11-12, indexing-core-publication: bounded concurrency in
-    the core; each proof red-witnessed. No retirement.'
+    the core; each proof red-witnessed. No retirement. As of 2026-11-17, provider
+    throttling (operator direction relayed by the factotum, 2026-11-17): nineteen
+    proofs, each red-witnessed. No retirement.'
   nearest_overlap: indexing-core proves serial publication; shelf-index-progress proves
     serial yields; this family proves the overlapped loop.
   tier: changed
@@ -2055,12 +2069,16 @@ families:
   - project/uv.lock
   contract: A translated failure keeps a stable code, stage and effect, and its cause
     chain reaches the original exception and the frame that raised it, whether a caller
-    callback or a dependency; a replayed outcome carries no stale cause.
+    callback or a dependency; a replayed outcome carries no stale cause. Palace provider
+    failures are definite only when their merged delivery shows nothing performed
+    and the latest kind is a throttle or definite stop.
   risk_class: public-contract
   oracle: ConsumerError code and stage, the cause chain's last element identity, traceback
     frame names and filenames, and the replayed outcome's cause.
   admission: 'As of 2026-11-12, indexing-core-publication: cause-preserving translation;
-    each proof red-witnessed. No retirement.'
+    each proof red-witnessed. No retirement. As of 2026-11-17, provider throttling
+    (operator direction relayed by the factotum, 2026-11-17): one classification proof,
+    red-witnessed.'
   nearest_overlap: consumer-curation and consumer-search prove refusal codes; this
     family proves their causes.
   tier: changed

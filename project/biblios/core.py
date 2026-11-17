@@ -11,6 +11,7 @@ revision; Castle is read only through the adapter below, using published calls.
 
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import math
@@ -29,7 +30,13 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from castle.namespace import canonical_bytes
 
-from biblios.control import CallControl, ConsumerError, controlled
+from biblios.control import (
+    CallControl,
+    ConsumerError,
+    controlled,
+    provider_outcome,
+    provider_throttled,
+)
 from biblios.derived import (
     ACCEPTED_MARKER,
     GRANULARITY_NS,
@@ -62,6 +69,7 @@ from biblios.mirrors import (
 if TYPE_CHECKING:
     from palace.index import FilePlan
     from palace.index.config import EmbeddingIdentity
+    from palace.index.egress import EmbeddingUsage, EmbeddingUsageSummary
 
     from biblios.consumer import BoundShelf
     from biblios.entries import Entry
@@ -217,13 +225,47 @@ class BringCurrentResult:
     replayed: bool = False
     """True when this is the recorded result of an earlier identical request."""
     provider_calls: int = 0
-    """Provider calls the call this result records made (for a replay: the original's)."""
+    """Embed invocations that returned, counted when each returns, before its answer is
+    checked or used (for a replay: the original's). Raised invocations are not counted
+    here; they and returned answers the call did not use are in :class:`CallLocal`."""
     swept: bool = False
     redacted: bool = False
     """True for a replayed result from which an excision removed the selected entries."""
+    local: CallLocal | None = field(default=None, compare=False, repr=False)
+    """This call's own accounting and retry hint. Never recorded: a replay carries
+    ``None``, so a replay can never renew a cooldown."""
 
     def outcome(self, entry_id: str) -> EntryOutcome | None:
         return next((item for item in self.entries if item.entry_id == entry_id), None)
+
+    @property
+    def throttled(self) -> bool:
+        """Whether the provider throttled this call, read from the stored entry codes: an
+        entry the call stopped or failed because of a throttle carries
+        ``provider-throttled``. So it holds on a replay too. A redacted replay may have
+        lost its throttled entries and is not a scheduling input."""
+        return any(item.code == "provider-throttled" for item in self.entries)
+
+
+@dataclass(frozen=True, slots=True)
+class CallLocal:
+    """What one :func:`bring_current` call observed of its provider, for its caller only.
+
+    ``retry_after`` is the longest provider hint still to wait when the call returned,
+    in seconds, or ``None``. ``invocations_failed`` counts embed invocations that raised.
+    ``answers_discarded`` and ``inputs_discarded`` count invocations (and their inputs)
+    that returned an answer no persisted stage keeps: the entry failed or was stopped, the
+    answer was refused, or the entry was refused or found stale before its stage was
+    persisted. Answers in a persisted stage that a later call can finish are not counted.
+    ``usage`` is Palace's summary of the physical requests made inside this call, retries
+    included, or ``None`` when the embedder recorded none (a non-Palace embedder records
+    nothing; that is not zero)."""
+
+    retry_after: float | None = None
+    invocations_failed: int = 0
+    answers_discarded: int = 0
+    inputs_discarded: int = 0
+    usage: EmbeddingUsageSummary | None = None
 
 
 # ---- the stage seam -------------------------------------------------------------------
@@ -1992,8 +2034,15 @@ def _index_hashes(shelf) -> dict[str, str]:
 
 
 def _result_document(result: BringCurrentResult) -> str:
-    stripped = replace(result, entries=tuple(replace(item, cause=None) for item in result.entries))
+    """The stored record: every field except the call-local ``local`` and each ``cause``.
+    Its key set is fixed; :func:`_result_from` restores exactly these keys."""
+    stripped = replace(
+        result,
+        entries=tuple(replace(item, cause=None) for item in result.entries),
+        local=None,
+    )
     document = asdict(stripped)
+    del document["local"]
     for item in document["entries"]:
         del item["cause"]
     return json.dumps(document, sort_keys=True)
@@ -2084,6 +2133,10 @@ class _Prepared:
     re-staged from exactly its committed rows, with no embedding, or not at all."""
     checkpoint: StageCheckpoint | None = None
     """The sealed or verified conversion checkpoint this entry's content derives from."""
+    answered: tuple[int, int] = (0, 0)
+    """Provider invocations, and their inputs, whose answers were assembled into ``rows``."""
+    persisted: bool = False
+    """B2 wrote the stage and its rows; from here a failure leaves resumable work."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2098,7 +2151,11 @@ class _Pending:
 
 
 class _Job:
-    """One entry's provider work in an overlapped call; owned by the calling thread."""
+    """One entry's provider work in an overlapped call; owned by the calling thread.
+
+    Every failure of the entry is kept with its slice index, and the entry is reported
+    once, after every slice it submitted has drained (:meth:`_Run._settle`), so its
+    outcome never depends on the order in which its calls completed."""
 
     def __init__(self, prepared: _Prepared) -> None:
         self.prepared = prepared
@@ -2110,36 +2167,28 @@ class _Job:
         self.total = len(inputs)
         self.sent = 0
         self.collected = 0
-        self.outstanding: deque[tuple[Future, tuple[str, ...]]] = deque()
+        self.outstanding: deque[tuple[Future, tuple[str, ...], int]] = deque()
         self.answers: list[list[float]] = []
-        self.error: object | None = None
+        self.answered = 0
+        """Slices whose answers were taken into ``answers``."""
+        self.failures: list[tuple[int, BaseException]] = []
+        self.stopped = False
+        """The call observed a throttle while this entry still had slices to send."""
         self.settled = prepared.pending is None
 
+    def closed(self) -> bool:
+        return bool(self.failures) or self.stopped
+
     def unsent(self) -> bool:
-        return self.error is None and self.sent < len(self.batches)
+        return not self.closed() and self.sent < len(self.batches)
 
-    def next_batch(self) -> tuple[str, ...]:
-        batch = self.batches[self.sent]
+    def next_batch(self) -> tuple[int, tuple[str, ...]]:
+        index = self.sent
         self.sent += 1
-        return batch
-
-    def fail(self, run: _Run, error: Exception) -> None:
-        """Report the entry once, as the serial loop would; its later answers are dropped."""
-        if self.error is None:
-            self.error = error
-            entry_id = self.prepared.entry.entry_id
-            if isinstance(error, ConsumerError):
-                run._refused(entry_id, error)
-            else:
-                run._report(entry_id, "pending", "prepare-failed", cause=error)
-        self.settle_if_drained()
-
-    def settle_if_drained(self) -> None:
-        if self.error is not None and not self.outstanding:
-            self.settled = True
+        return index, self.batches[index]
 
     def complete(self) -> bool:
-        return self.error is None and self.prepared.pending is None
+        return not self.closed() and self.prepared.pending is None
 
 
 class _Run:
@@ -2177,6 +2226,13 @@ class _Run:
         self.swept_index: dict[str, str] | None = None
         self.accepted: list[AcceptedStage] = []
         self.provider_calls = 0
+        self.throttled = False
+        """The provider throttled a call: no fresh slice is sent and no entry admitted."""
+        self.retry_not_before: float | None = None
+        """The latest provider hint as a monotonic instant; never recorded."""
+        self.invocations_failed = 0
+        self.answers_discarded = 0
+        self.inputs_discarded = 0
 
     # -- entry ---------------------------------------------------------------------------
 
@@ -2192,6 +2248,25 @@ class _Run:
                 raise ConsumerError("operation-conflict", stage="index")
             if recorded[1] is not None:
                 return _result_from(recorded[1])
+        from palace.index import call_scope
+        from palace.index.egress import EmbeddingUsage, current_usage, usage_scope
+
+        # Every provider call made below, on this thread or in a pooled task's copy of
+        # this context, is bounded by the caller's control and counted in this call's own
+        # collector (and, through its parent, in any enclosing one).
+        deadline = self.control.deadline
+        usage = EmbeddingUsage(parent=current_usage())
+        with (
+            call_scope(
+                deadline=deadline if deadline is not None and math.isfinite(deadline) else None,
+                cancelled=self.control.cancelled,
+            ),
+            usage_scope(usage),
+        ):
+            return self._execute(wanted, usage)
+
+    def _execute(self, wanted: str, usage: EmbeddingUsage) -> BringCurrentResult:
+        request = self.request
         with self.shelf._handle.mutex:
             revision = self.castle.observe_revision()
         if request.expected_revision is not None and request.expected_revision != revision:
@@ -2231,6 +2306,8 @@ class _Run:
                 self.control.check("index")
                 self._bring(entry_id, live.get(entry_id), ceiling)
                 visited += 1
+                if self.throttled:
+                    break  # no further entry is visited once the provider throttles
             unreached = ordered[visited:]
         else:
             yielded, unreached = self._overlapped(ordered, live, ceiling, width)
@@ -2248,6 +2325,7 @@ class _Run:
         requeued = unsettled + unreached
         self.volatile.mark_dirty(requeued, source="requeue")
         self.unsettled = len(set(requeued))
+        summary = usage.summary()
         result = BringCurrentResult(
             request.operation_id,
             self.revision,
@@ -2257,6 +2335,17 @@ class _Run:
             False,
             self.provider_calls,
             request.sweep,
+            local=CallLocal(
+                retry_after=(
+                    None
+                    if self.retry_not_before is None
+                    else max(0.0, self.retry_not_before - time.monotonic())
+                ),
+                invocations_failed=self.invocations_failed,
+                answers_discarded=self.answers_discarded,
+                inputs_discarded=self.inputs_discarded,
+                usage=summary if summary.requests else None,
+            ),
         )
         if request.sweep:
             self._reconcile_marker()
@@ -2367,13 +2456,21 @@ class _Run:
         are prepared at once and they finish strictly in entry order, so the outcomes,
         commits and replay are the serial loop's. A raised check stops new work, waits
         for every outstanding provider call to return, and propagates; no provider call
-        is ever repeated, and none outlives this call."""
+        is ever repeated, and none outlives this call.
+
+        Before every admission and every dispatch the calling thread looks at every
+        submitted call that has already finished, without taking it out of order. Once
+        one was throttled, no entry is admitted and no further slice is sent for any
+        entry; what was submitted drains, a fully answered entry still commits, and an
+        entry left incomplete is reported (``provider-throttled``) and requeued."""
         position = {entry_id: index for index, entry_id in enumerate(ordered)}
         active: deque[_Job] = deque()
         admitted, yielded = 0, False
         with ThreadPoolExecutor(max_workers=width, thread_name_prefix="biblios-provider") as pool:
             while True:
                 while admitted < len(ordered) and len(active) < width and not yielded:
+                    if self._throttle_seen(active):
+                        break
                     if self.should_yield():
                         yielded = True
                         break
@@ -2399,27 +2496,47 @@ class _Run:
 
     def _dispatch(self, active: deque[_Job], pool: ThreadPoolExecutor, width: int) -> None:
         """Submit the next provider slices, in entry order, while fewer than ``width``
-        are outstanding; the checks before each call run here, as the serial loop's do."""
+        are outstanding; the checks before each call run here, as the serial loop's do.
+        Each call runs in its own copy of this thread's context, made at submission."""
         outstanding = sum(len(job.outstanding) for job in active)
         for job in active:
             while outstanding < width and job.unsent():
+                if self._throttle_seen(active):
+                    return
                 try:
                     self.control.check("embedding")
                     self.control.check("embedding", effect="uncertain")
-                except ConsumerError as error:
-                    job.fail(self, error)
-                    break
-                if job.sent == 0:
-                    try:
+                    if job.sent == 0:
                         # The commit fence, run before any spend (as the serial loop does).
                         self._fence(job.prepared)
-                    except ConsumerError as error:
-                        job.fail(self, error)
-                        break
-                batch = job.next_batch()
-                embed = self.pipeline.embedder.embed
-                job.outstanding.append((pool.submit(embed, list(batch)), batch))
+                except ConsumerError as error:
+                    job.failures.append((job.sent, error))
+                    self._settle(job)
+                    break
+                index, batch = job.next_batch()
+                task = contextvars.copy_context()
+                future = pool.submit(task.run, self.pipeline.embedder.embed, list(batch))
+                job.outstanding.append((future, batch, index))
                 outstanding += 1
+
+    def _throttle_seen(self, active: deque[_Job]) -> bool:
+        """Whether any submitted call has been throttled; once one is, every entry that
+        still has slices to send is stopped. Finished calls are only looked at here; they
+        are taken, in order, by :meth:`_collect`."""
+        if not self.throttled:
+            self.throttled = any(
+                future.done()
+                and future.exception() is not None
+                and provider_throttled(future.exception())
+                for job in active
+                for future, _batch, _index in job.outstanding
+            )
+        if self.throttled:
+            for job in active:
+                if job.unsent():
+                    job.stopped = True
+                    self._settle(job)
+        return self.throttled
 
     def _collect(self, job: _Job) -> None:
         """Take the oldest outstanding answer of the first entry, in order, here."""
@@ -2427,36 +2544,89 @@ class _Run:
             # Every slice answered (the first entry is always dispatched before any later
             # one, so it never waits on capacity): complete its rows here.
             assert not job.unsent()
+            if job.closed():
+                self._settle(job)
+                return
             job.settled = True
-            if job.error is None:
-                try:
-                    self._assemble(job.prepared, job.answers)
-                except Exception as error:
-                    job.error = None
-                    job.fail(self, error)
+            try:
+                self._assemble(job.prepared, job.answers)
+            except Exception as error:
+                # ``pending`` stays set, so the entry is never complete: it is reported
+                # once here and never published.
+                self._discard(job.answered, len(job.answers))
+                if isinstance(error, ConsumerError):
+                    self._refused(job.prepared.entry.entry_id, error)
+                else:
+                    self._report(
+                        job.prepared.entry.entry_id, "pending", "prepare-failed", cause=error
+                    )
             return
-        future, batch = job.outstanding.popleft()
+        future, batch, index = job.outstanding.popleft()
         start = job.collected
         job.collected += len(batch)
-        if job.error is not None:
-            future.exception()  # an earlier failure: wait for it, never use it
-            job.settle_if_drained()
+        try:
+            returned = future.result()
+        except Exception as error:
+            self.invocations_failed += 1
+            self.throttled = self.throttled or provider_throttled(error)
+            job.failures.append((index, _raised(error)))
+            self._settle(job)
+            return
+        self.provider_calls += 1
+        if job.closed():
+            # The entry already failed or was stopped: drained, never used, but still
+            # checked, so an invalid answer counts whichever slice failed first.
+            self._discard(1, len(batch))
+            try:
+                self._checked(batch, returned)
+            except ConsumerError as error:
+                job.failures.append((index, error))
+            self._settle(job)
             return
         try:
-            try:
-                returned = future.result()
-            except Exception as error:
-                raise ConsumerError(
-                    "callback-failed", stage="embedding", effect="uncertain"
-                ) from error
             self.control.check("embedding", effect="uncertain")
-            self.provider_calls += 1
-            job.answers.extend(
-                self._answered(job.prepared.entry, batch, returned, start, job.total)
-            )
+            answers = self._answered(job.prepared.entry, batch, returned, start, job.total)
         except Exception as error:
-            job.fail(self, error)
-        job.settle_if_drained()
+            self._discard(1, len(batch))
+            job.failures.append((index, error))
+            self._settle(job)
+            return
+        job.answers.extend(answers)
+        job.answered += 1
+
+    def _settle(self, job: _Job) -> None:
+        """Report a failed or stopped entry once every slice it submitted has drained."""
+        if job.settled or job.outstanding or not job.closed():
+            return
+        job.settled = True
+        self._discard(job.answered, len(job.answers))
+        failures = [error for _index, error in sorted(job.failures, key=lambda item: item[0])]
+        self._refused(job.prepared.entry.entry_id, self._classified(failures, job.stopped))
+
+    def _classified(self, failures: Sequence[BaseException], stopped: bool) -> ConsumerError:
+        """One entry's embedding failures, classified once (:func:`provider_outcome`).
+
+        A lone Biblios refusal keeps its own code, stage and effect, as before. Otherwise
+        the entry is ``pending`` only when every failure is definite; any uncertainty in
+        any slice or attempt makes it ``uncertain``, and a throttle names the code."""
+        if len(failures) == 1 and not stopped and isinstance(failures[0], ConsumerError):
+            return failures[0]
+        outcome = provider_outcome(failures, stopped_by_throttle=stopped)
+        if outcome.retry_after is not None:
+            until = time.monotonic() + outcome.retry_after
+            self.retry_not_before = max(until, self.retry_not_before or until)
+        error = ConsumerError(
+            outcome.code,
+            stage="embedding",
+            effect="none" if outcome.definite else "uncertain",
+            retry_after=outcome.retry_after,
+        )
+        error.__cause__ = failures[0] if failures else None
+        return error
+
+    def _discard(self, answers: int, inputs: int) -> None:
+        self.answers_discarded += answers
+        self.inputs_discarded += inputs
 
     def _identity(self) -> EmbeddingIdentity:
         from palace.index.embedder_config import identity_for, load_embedder_config
@@ -2750,11 +2920,17 @@ class _Run:
             return
         if prepared.pending is not None:
             pending = prepared.pending
-            done = self._contained(
-                entry_id,
-                lambda: self._assemble(prepared, self._embed(prepared, list(pending.inputs))),
-            )
+            answered: list[list[float]] = []
+
+            def embedded() -> None:
+                answered.extend(self._embed(prepared, list(pending.inputs)))
+                self._assemble(prepared, answered)
+
+            done = self._contained(entry_id, embedded)
             if done is False:
+                if prepared.pending is not None and answered:
+                    # Embedded but not assembled: every answer is discarded.
+                    self._discard(-(-len(answered) // EMBED_SLICE), len(answered))
                 return
         self._finish_entry(prepared, ceiling)
 
@@ -2841,6 +3017,10 @@ class _Run:
             # stays for restart re-presentation, and the call continues with the rest.
             self._report(entry_id, "recovery-required", "publication-failed", cause=error)
             return
+        finally:
+            if not prepared.persisted:
+                # Refused or stale before B2: the answers it assembled are not kept.
+                self._discard(*prepared.answered)
         self._clear(entry_id, ceiling)
 
     def _work_after_resume(
@@ -3713,14 +3893,17 @@ class _Run:
             else list(reusable[(row.chunk_id, _text_digest(text))])
             for i, (row, text) in enumerate(zip(plan.rows, plan.embed_inputs, strict=True))
         ]
+        rows = [
+            (row.chunk_id, row.body, _text_digest(text), _float32(vector))
+            for row, text, vector in zip(plan.rows, plan.embed_inputs, vectors, strict=True)
+        ]
+        # Only a complete assembly settles the entry's provider work.
+        prepared.rows = rows
         prepared.pending = None
         prepared.embedded = len(missing)
         prepared.reused = len(donated)
         prepared.reused_from = source if len(missing) + len(donated) < len(plan.rows) else None
-        prepared.rows = [
-            (row.chunk_id, row.body, _text_digest(text), _float32(vector))
-            for row, text, vector in zip(plan.rows, plan.embed_inputs, vectors, strict=True)
-        ]
+        prepared.answered = (-(-len(answered) // EMBED_SLICE), len(answered))
 
     def _donated(self, prepared: _Prepared, plan) -> dict[int, tuple[float, ...]]:
         """A nominated donor's vectors, by destination row.
@@ -3998,37 +4181,62 @@ class _Run:
     def _embed(self, prepared: _Prepared, inputs: list[str]) -> list[list[float]]:
         entry = prepared.entry
         vectors: list[list[float]] = []
-        for start in range(0, len(inputs), EMBED_SLICE):
-            self.control.check("embedding")
-            batch = list(inputs[start : start + EMBED_SLICE])
-            if start == 0:
-                # The commit fence, run before any spend: a change that already landed
-                # requeues the entry without a provider call.
-                self._fence(prepared)
-            returned = controlled(
-                lambda batch=batch: self.pipeline.embedder.embed(batch),
-                self.control,
-                "embedding",
-                effect="uncertain",
-            )
-            self.provider_calls += 1
-            vectors.extend(self._answered(entry, batch, returned, start, len(inputs)))
+        answered = 0
+        try:
+            for start in range(0, len(inputs), EMBED_SLICE):
+                self.control.check("embedding")
+                batch = list(inputs[start : start + EMBED_SLICE])
+                if start == 0:
+                    # The commit fence, run before any spend: a change that already landed
+                    # requeues the entry without a provider call.
+                    self._fence(prepared)
+                self.control.check("embedding", effect="uncertain")
+                try:
+                    returned = self.pipeline.embedder.embed(batch)
+                except Exception as error:
+                    self.invocations_failed += 1
+                    self.throttled = self.throttled or provider_throttled(error)
+                    raise self._classified([_raised(error)], False) from error
+                self.provider_calls += 1
+                try:
+                    self.control.check("embedding", effect="uncertain")
+                    vectors.extend(self._answered(entry, batch, returned, start, len(inputs)))
+                except Exception:
+                    self._discard(1, len(batch))
+                    raise
+                answered += 1
+        except Exception:
+            self._discard(answered, len(vectors))
+            raise
         return vectors
 
     def _answered(
         self, entry: Entry, batch: list[str], returned, start: int, total: int
     ) -> list[list[float]]:
-        """One provider answer, checked: one finite vector of the store's width per input."""
+        """One provider answer, reported and checked."""
         self._progress(entry.entry_id, "indexing", start + len(batch), total)
-        if len(returned) != len(batch):
-            raise ConsumerError("embedding-result-invalid", stage="embedding", effect="uncertain")
-        vectors = []
-        for vector in returned:
-            if len(vector) != self.identity.dim or any(not math.isfinite(v) for v in vector):
-                raise ConsumerError(
-                    "embedding-result-invalid", stage="embedding", effect="uncertain"
-                )
-            vectors.append(list(vector))
+        return self._checked(batch, returned)
+
+    def _checked(self, batch: Sequence[str], returned) -> list[list[float]]:
+        """One finite vector of the store's width per input, each storable as float32.
+
+        Any answer of another shape (not a sequence, a scalar where a vector belongs, a
+        component that is not a number) is ``embedding-result-invalid``, never an
+        exception that escapes the call."""
+        try:
+            if len(returned) != len(batch):
+                raise ValueError("answer count")
+            vectors = []
+            for vector in returned:
+                values = list(vector)
+                if len(values) != self.identity.dim or not all(map(math.isfinite, values)):
+                    raise ValueError("vector")
+                struct.pack(f"<{len(values)}f", *values)
+                vectors.append(values)
+        except Exception as error:
+            raise ConsumerError(
+                "embedding-result-invalid", stage="embedding", effect="uncertain"
+            ) from error
         return vectors
 
     # -- the stage -----------------------------------------------------------------------
@@ -4183,6 +4391,7 @@ class _Run:
                     for position, (chunk_id, body, inputs, vector) in enumerate(prepared.rows)
                 ],
             )
+        prepared.persisted = True
         # B3: promote, with the content recomputed from the persisted rows.
         rows = self._stored_rows(entry_id)
         staged = content_digest(rows)[0] if prepared.action == "publish" else None
@@ -4823,6 +5032,16 @@ class _Run:
         """Maintain the per-state counters and the served-view accumulator in the same
         transaction that changes an entry's served identity."""
         account(self.derived, old, new)
+
+
+def _raised(error: Exception) -> Exception:
+    """A failure raised by the embedder itself. A :class:`ConsumerError` the supplied
+    embedder raised is its failure, never a Biblios check: it stays uncertain."""
+    if not isinstance(error, ConsumerError):
+        return error
+    wrapped = ConsumerError("callback-failed", stage="embedding", effect="uncertain")
+    wrapped.__cause__ = error
+    return wrapped
 
 
 def _answer(call, control: CallControl, stage):

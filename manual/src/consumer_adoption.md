@@ -1,6 +1,6 @@
 # Consumer Adoption
 
-The experimental 0.4.0 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
+The experimental 0.5.0 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
 
 ## Choose the binding and lifetime
 
@@ -27,6 +27,10 @@ The caller supplies `ConsumerPipeline` with conversion, rendering, an exact embe
 Capture one completed donor view and nominate it for a destination. Same-shelf identity, live source, policy, ordered actual input digests and the committed donor view must agree. Missing or incompatible donors use ordinary work; stale or corrupt admission evidence refuses. Every destination filename is freshly embedded, even when names match. Destination rows remain independent after donor deletion.
 
 Completed provider results and actual index commits survive restart. An uncertain dispatch requires explicit reconciliation and retry; a completed replay validates the real destination instead of silently repairing changed state. `pipeline.finish` removes obsolete index members and validates the watermark after all current entries finish. The writer's separate `checkpoint` prepares dynamic read-only access. Source distributions include a runnable `examples/consumer_binding.py` example with deterministic local providers.
+
+## Handle provider throttling
+
+Palace raises a typed provider failure that records whether the provider may have performed the work. Biblios reports an entry whose only failures were definite throttles, deadlines, cancellations or pacer refusals as `pending` with nothing committed, and anything that may have been processed as `uncertain`; the code is `provider-throttled` whenever the provider throttled. Once a call observes a throttle it sends no further work, finishes what it already sent and leaves the rest marked for the next call. Requeue a `pending`/`provider-throttled` entry after `result.local.retry_after` under a new operation id, without counting it against your failure retries; replaying the same operation id returns the recorded result, whose `throttled` flag is kept but whose call-local `local` is not. Share one Palace request pacer among every embedder you create, with queries first. The pacer counts requests and request bytes in one process; it is not a token quota. The source distribution's `ADOPTION.md` states the full contract and its limits.
 
 ## Declare finite resource envelopes
 

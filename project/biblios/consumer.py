@@ -8,19 +8,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 from threading import Lock
 from typing import TYPE_CHECKING, TypeVar
 
+from palace.index import ProviderCallError, call_scope
 from palace.index.embedder import Embedder
 from palace.rerank import Reranker
 from palace.writer_lock import WriterLockTimeout, writer_lock
 
 from biblios.binding import ShelfBinding, validate_handle
 from biblios.config import Settings
-from biblios.control import CallControl, ConsumerError, Observation, ShelfView, Stage, controlled
+from biblios.control import (
+    CallControl,
+    ConsumerError,
+    Observation,
+    ShelfView,
+    Stage,
+    controlled,
+    provider_outcome,
+)
 from biblios.curation import (
     CopyIdentity,
     CurationRequest,
@@ -590,6 +600,18 @@ class BoundShelf:
 
 
 class _EmbedderFence:
+    """The query embedder under the search's control.
+
+    Each call runs inside Palace's ``call_scope`` carrying the control's deadline and
+    cancellation, so a Palace remote embedder stops its pacer wait, its backoff and any
+    further attempt at them; an attempt already in flight is bounded only by the
+    embedder's own transport timeouts, and an embedder that ignores the scope is not
+    bounded by it at all. A Palace provider failure that left nothing performed and was a
+    throttle, a deadline, a cancellation or a pacer refusal is reported as that code with
+    effect ``none``; a throttle carries its remaining hint as ``retry_after``. Every other
+    failure, including a throttle that may have been processed, is ``callback-failed``.
+    """
+
     def __init__(self, provider: Embedder, control: CallControl) -> None:
         self.provider, self.control = provider, control
 
@@ -598,10 +620,31 @@ class _EmbedderFence:
         return self.provider.max_concurrency
 
     def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        return controlled(lambda: self.provider.embed(texts), self.control, "embedding")
+        return self._call(lambda: self.provider.embed(texts))
 
     def probe(self) -> None:
-        controlled(self.provider.probe, self.control, "embedding")
+        self._call(self.provider.probe)
+
+    def _call(self, call: Callable[[], T]) -> T:
+        control = self.control
+        control.check("embedding")
+        deadline = control.deadline
+        if deadline is not None and not math.isfinite(deadline):
+            deadline = None  # CallControl never expires a non-finite deadline either
+        try:
+            with call_scope(deadline=deadline, cancelled=control.cancelled):
+                result = call()
+        except Exception as error:
+            # Only Palace's typed failure is classified; any other exception, including a
+            # ConsumerError the supplied provider raised itself, is the provider's failure.
+            outcome = provider_outcome([error]) if isinstance(error, ProviderCallError) else None
+            if outcome is not None and outcome.definite:
+                raise ConsumerError(
+                    outcome.code, stage="embedding", retry_after=outcome.retry_after
+                ) from error
+            raise ConsumerError("callback-failed", stage="embedding") from error
+        control.check("embedding")
+        return result
 
     def close(self) -> None:
         pass  # The injected provider always remains caller-owned.

@@ -24,10 +24,11 @@ Biblios builds standalone, portable knowledge bases ("shelves") that can be sear
 ## Project briefs
 
 - [Biblios: thesis, operator requirements, the shelf design, access planes, consumers, proposals, rulings and unresolved decisions](briefs/BRIEF.md)
-- [Requirement sent upstream: a Bedrock embedding provider in Palace, read from a top-level Conric section](briefs/palace-bedrock-provider-requirement.md)
-- [Castle requirement and its adoption: incremental admission and replay facts, satisfied by Castle v0.4.0](briefs/castle-incremental-admission-requirement.md)
-- [AWS qualification results: what one approved EC2 run with shelves on EBS established](briefs/aws-qualification-results.md)
+- [Palace Bedrock provider requirement, read from Conric](briefs/palace-bedrock-provider-requirement.md)
+- [Castle incremental admission and replay facts, adopted from Castle v0.4.0](briefs/castle-incremental-admission-requirement.md)
+- [AWS qualification results: one approved EC2 run with shelves on EBS](briefs/aws-qualification-results.md)
 - [Metadata authority: Castle owns attributes and filenames; mirrors own content](briefs/metadata-authority.md)
+- [Provider throttling: typed failures, pacing and outcomes](briefs/provider-throttling.md)
 
 ## Project surfaces
 
