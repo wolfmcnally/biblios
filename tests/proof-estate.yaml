@@ -2428,3 +2428,40 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: vector-acceleration
+  kind: pytest
+  selectors:
+  - project/tests/test_acceleration.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_acceleration.py
+  - project/tests/acceleration_support.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_acceleration.py
+  - project/tests/acceleration_support.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: 'Opt-in exact vector acceleration at the bound seam: without an acceleration
+    object search is the released path and loads neither cache nor feed; with one,
+    single and stack search return the exact answer from memory through every Biblios
+    writer, report each shelf''s route, refuse or visibly fall back only for operational
+    unavailability, and fail closed with their own codes for authorization, divergence,
+    malformed feed state and other cache failures; feed writes go through the one
+    writer and keep an existing lineage; eviction needs no admission.'
+  risk_class: consumer-public-contract
+  oracle: Paired exact and accelerated public searches over synthetic shelves with
+    a dense deterministic embedder (equal hits, evidence and stages; cached legs,
+    no oracle or fallback legs), typed ConsumerError codes and effects, feed state,
+    cache statistics and counters, and a child process's loaded modules.
+  admission: 'As of 2026-11-19, palace-cache-exposure (operator direction relayed
+    by the factotum, 2026-11-19): twenty proofs, each red-witnessed. No retirement.'
+  nearest_overlap: consumer-search proves strict exact search and its fences; this
+    family proves the opt-in cache's parity, visibility and refusals.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []

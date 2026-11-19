@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/e60b3520584929808d753ecc7c3ad1268a34176b289028c6d6efada191b172ba;sole-owner:9435c7a5-11ff-45ae-8b72-d17c2664149e",
+  "from": "not-started",
+  "id": "70126a2a0f2a40c68c4643c5bda74bf6",
+  "owner": "biblios-core-amorphous-terrier",
+  "phase": "palace-cache-exposure",
+  "previous": "4d949745bef3446783d94de1208066fc",
+  "reason": "Coordinator-relayed operator direction for a new release pinning published Palace v0.7.0 and exposing its opt-in vector acceleration and memory observability; primary mode, one advisory plan review and one advisory code review",
+  "state": "in-progress",
+  "writer": "biblios-core-amorphous-terrier"
+}

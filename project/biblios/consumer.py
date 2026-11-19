@@ -9,12 +9,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import replace
 from threading import Lock
 from typing import TYPE_CHECKING, TypeVar
 
+import sqlite_vec
 from palace.index import ProviderCallError, call_scope
 from palace.index.embedder import Embedder
 from palace.rerank import Reranker
@@ -45,13 +47,14 @@ from biblios.progress import (
     index_status,
     recorded_identity_incomplete,
 )
-from biblios.search import Page, SearchResult, _page
+from biblios.search import Page, SearchResult, _page, search
 from biblios.shelf import Shelf
 from biblios.stack import Stack, StackResult, open_stack
 
 if TYPE_CHECKING:
     from castle.namespace import ExcisionInventory, OperationStatus, SnapshotView
 
+    from biblios.acceleration import StoredVectors, VectorAcceleration
     from biblios.core import BringCurrentRequest, BringCurrentResult, StageAuthority
     from biblios.history import ContentReference, ExcisionProposal, ExcisionRequest, ExcisionResult
     from biblios.pipeline import ConsumerPipeline, ReuseDonor
@@ -413,12 +416,21 @@ class BoundShelf:
         reranker: Reranker,
         limit: int = 5,
         control: CallControl = CallControl(),
+        acceleration: VectorAcceleration | None = None,
     ) -> SearchResult:
+        """Strict search. With ``acceleration`` the vector leg may be served from the
+        process's exact in-memory cache (same answer); the result's ``vector_routes``
+        says how. Without it the released search runs and ``vector_routes`` is ``None``."""
         if embedder is None or reranker is None:
             raise ConsumerError("provider-required", stage="search")
         with self._working():
             return self._search(
-                query, embedder=embedder, reranker=reranker, limit=limit, control=control
+                query,
+                embedder=embedder,
+                reranker=reranker,
+                limit=limit,
+                control=control,
+                acceleration=acceleration,
             )
 
     def _search(
@@ -429,22 +441,27 @@ class BoundShelf:
         reranker: Reranker,
         limit: int,
         control: CallControl,
+        acceleration: VectorAcceleration | None = None,
     ) -> SearchResult:
         try:
             before = self._search_identity()
+            views = None if acceleration is None else {self._shelf.palace_store: self.view}
         except ConsumerError:
             raise
         except Exception as error:
             raise ConsumerError("view-unreadable", stage="read") from error
         control.check("search")
         try:
-            result = self._shelf.search(
-                query,
-                limit=limit,
-                embedder=_EmbedderFence(embedder, control),
-                reranker=_RerankerFence(reranker, control),
-                strict=True,
-            )
+            with _accelerated(acceleration, views) as cache:
+                result = search(
+                    self._shelf,
+                    query,
+                    limit=limit,
+                    embedder=_EmbedderFence(embedder, control),
+                    reranker=_RerankerFence(reranker, control),
+                    strict=True,
+                    _vector_cache=cache,
+                )
             if self._search_identity() != before:
                 raise ConsumerError("stale-view", stage="search")
             control.check("search")
@@ -453,7 +470,89 @@ class BoundShelf:
         except ConsumerError:
             raise
         except Exception as error:
-            raise ConsumerError("search-failed", stage="search") from error
+            classified = _accelerated_error(acceleration, error, [self._shelf.chunks_db])
+            raise classified or ConsumerError("search-failed", stage="search") from error
+
+    def vector_status(self, *, control: CallControl = CallControl()) -> StoredVectors:
+        """This shelf's stored vectors, read in constant work from its feed state."""
+        from biblios.acceleration import stored_vectors
+
+        return self._read(
+            lambda: stored_vectors(self.binding.shelf_id, self._shelf.chunks_db), control
+        )
+
+    def enable_vector_feed(
+        self, *, new_lineage: bool = False, control: CallControl = CallControl()
+    ) -> StoredVectors:
+        """Opt this shelf's index into Palace's vector change feed, which an accelerated
+        search needs, through the shelf's one writer. An existing feed is kept as it is;
+        ``new_lineage`` starts a new lineage from the store as it is, the explicit remedy
+        for a diverged feed. Indexing writes record into the feed from then on."""
+
+        def enable(conn: sqlite3.Connection) -> None:
+            from palace.index.vector_feed import enable_vector_feed, vector_feed_enabled
+
+            if new_lineage or not vector_feed_enabled(conn):
+                enable_vector_feed(conn)
+
+        return self._feed_write(enable, control)
+
+    def disable_vector_feed(self, *, control: CallControl = CallControl()) -> StoredVectors:
+        """Drop this shelf's vector change feed through the shelf's one writer. A cache
+        then reports the shelf unavailable (``feed-disabled``)."""
+
+        def disable(conn: sqlite3.Connection) -> None:
+            from palace.index.vector_feed import disable_vector_feed
+
+            disable_vector_feed(conn)
+
+        return self._feed_write(disable, control)
+
+    def _feed_write(
+        self, write: Callable[[sqlite3.Connection], None], control: CallControl
+    ) -> StoredVectors:
+        from biblios.acceleration import stored_vectors
+
+        with self._writer("vector-feed", stage="index", control=control):
+            database = self._shelf.chunks_db
+            if not database.is_file():
+                raise ConsumerError("index-unbuilt", stage="index")
+            try:
+                conn = sqlite3.connect(database, isolation_level=None)
+                try:
+                    conn.enable_load_extension(True)
+                    sqlite_vec.load(conn)
+                    conn.enable_load_extension(False)
+                    write(conn)
+                finally:
+                    conn.close()
+            except Exception as error:
+                # Palace runs each feed write in one transaction and rolls it back.
+                raise ConsumerError("vector-feed-failed", stage="index") from error
+            try:
+                return stored_vectors(self.binding.shelf_id, database)
+            except Exception as error:
+                code = error.code if isinstance(error, ConsumerError) else "vector-feed-failed"
+                raise ConsumerError(code, stage="index", effect="derived-committed") from error
+
+    def _warm_vectors(self, acceleration: VectorAcceleration) -> bool:
+        """Load under the lifetime's active work (close waits), never under the reader
+        mutex, with admission checked before and after."""
+        with self._working():
+            if not self._shelf.chunks_db.is_file():
+                return False  # Unbuilt: nothing to load, as a search reports an empty route.
+            try:
+                views = {self._shelf.palace_store: self.view}
+                with acceleration._admitting(views) as cache:
+                    resident = cache.warm(self._shelf.palace_store)
+                with self._shelf._handle.mutex:
+                    self._admit()
+                return resident
+            except ConsumerError:
+                raise
+            except Exception as error:
+                classified = _accelerated_error(acceleration, error, [self._shelf.chunks_db])
+                raise classified or ConsumerError("search-failed", stage="search") from error
 
     def _observe(self, observations) -> None:
         """A writable binding marks the entries its readers' observations name, in the
@@ -685,14 +784,22 @@ class BoundStack:
         reranker: Reranker,
         limit: int = 5,
         control: CallControl = CallControl(),
+        acceleration: VectorAcceleration | None = None,
     ) -> StackResult:
+        """One union search over the members; ``acceleration`` as in
+        :meth:`BoundShelf.search`, with one route per built member."""
         if embedder is None or reranker is None:
             raise ConsumerError("provider-required", stage="search")
         with ExitStack() as work:
             for member in self._members:
                 work.enter_context(member._working())
             return self._search(
-                query, embedder=embedder, reranker=reranker, limit=limit, control=control
+                query,
+                embedder=embedder,
+                reranker=reranker,
+                limit=limit,
+                control=control,
+                acceleration=acceleration,
             )
 
     def _search(
@@ -703,18 +810,26 @@ class BoundStack:
         reranker: Reranker,
         limit: int,
         control: CallControl,
+        acceleration: VectorAcceleration | None = None,
     ) -> StackResult:
         try:
             with self._locked():
                 before = tuple(member._search_identity() for member in self._members)
+                views = (
+                    None
+                    if acceleration is None
+                    else {member._shelf.palace_store: member._view() for member in self._members}
+                )
             control.check("search")
-            result = self._stack.search(
-                query,
-                limit=limit,
-                embedder=_EmbedderFence(embedder, control),
-                reranker=_RerankerFence(reranker, control),
-                strict=True,
-            )
+            with _accelerated(acceleration, views) as cache:
+                result = self._stack.search(
+                    query,
+                    limit=limit,
+                    embedder=_EmbedderFence(embedder, control),
+                    reranker=_RerankerFence(reranker, control),
+                    strict=True,
+                    _vector_cache=cache,
+                )
             with self._locked():
                 if tuple(member._search_identity() for member in self._members) != before:
                     raise ConsumerError("stale-view", stage="search")
@@ -725,7 +840,28 @@ class BoundStack:
         except ConsumerError:
             raise
         except Exception as error:
-            raise ConsumerError("search-failed", stage="search") from error
+            databases = [member._shelf.chunks_db for member in self._members]
+            classified = _accelerated_error(acceleration, error, databases)
+            raise classified or ConsumerError("search-failed", stage="search") from error
+
+
+@contextmanager
+def _accelerated(acceleration, views) -> Iterator:
+    """The Palace cache bound to this call's admitted shelves, or ``None``."""
+    if acceleration is None:
+        yield None
+        return
+    with acceleration._admitting(views) as cache:
+        yield cache
+
+
+def _accelerated_error(acceleration, error: BaseException, databases) -> ConsumerError | None:
+    """A failed accelerated search's own code; ``None`` without acceleration."""
+    if acceleration is None:
+        return None
+    from biblios.acceleration import accelerated_error
+
+    return accelerated_error(error, databases)
 
 
 def open_bound_stack(shelves: Sequence[BoundShelf]) -> BoundStack:

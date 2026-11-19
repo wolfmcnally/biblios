@@ -26,10 +26,13 @@ from palace.rerank import Reranker, RerankStatus
 from biblios.entries import Entry
 from biblios.errors import BibliosError, MixedIdentityError, UndeclaredEmbedderError
 from biblios.progress import IndexStatus, index_status
-from biblios.search import Hit, Page, ServedStage, Withheld
+from biblios.search import Hit, Page, ServedStage, Withheld, _routes
 from biblios.shelf import Shelf
 
 if TYPE_CHECKING:
+    from palace.vector_cache import VectorCache
+
+    from biblios.acceleration import VectorRoute
     from biblios.core import ReadObservation
 
 
@@ -50,6 +53,9 @@ class StackResult:
     observations: dict[str, tuple[ReadObservation, ...]] = field(default_factory=dict)
     """Per shelf id, the observations of :attr:`SearchResult.observations` (only shelves
     with any). A stack search persists nothing; a writable member binding's marks."""
+    vector_routes: tuple[VectorRoute, ...] | None = None
+    """Per built member, how its vector legs were served when the search was
+    accelerated; ``None`` when it ran the exact released search."""
 
 
 class Stack:
@@ -92,17 +98,31 @@ class Stack:
         reranker: Reranker | None = None,
         rerank: bool = True,
         strict: bool = False,
+        _vector_cache: VectorCache | None = None,
     ) -> StackResult:
         """Search the built members through Palace's multi-store search, one rerank over
-        the union, naming every member whose index is still catching up."""
+        the union, naming every member whose index is still catching up.
+
+        ``_vector_cache`` is internal to the bound seam (:meth:`BoundStack.search`); an
+        unbuilt member is not searched and has no route."""
         status = self.status()
         indexing = tuple(
             shelf.shelf_id for shelf in self._shelves if status[shelf.shelf_id].lagging
         )
         built = [shelf for shelf in self._shelves if status[shelf.shelf_id].built]
         if not built:
-            return StackResult((), "disabled", (), (), indexing, status)
-        found = multistore.search_stores(
+            return StackResult(
+                (),
+                "disabled",
+                (),
+                (),
+                indexing,
+                status,
+                vector_routes=None if _vector_cache is None else (),
+            )
+        # Palace's one-shot search_stores is exactly this pair; only execute_prepared
+        # takes an opt-in vector cache.
+        prepared = multistore.prepare_store_search(
             query=query,
             stores=[shelf.palace_store for shelf in built],
             limit=limit,
@@ -110,9 +130,10 @@ class Stack:
             rerank_enabled=rerank,
             strict=strict,
             embedders={self._identity: embedder} if embedder is not None else None,
-            reranker=reranker,
+            injected_reranker=reranker is not None,
             evidence=True,
         )
+        found = multistore.execute_prepared(prepared, reranker=reranker, vector_cache=_vector_cache)
         from biblios.search import _ServingCheck
 
         checks = {shelf.shelf_id: _ServingCheck(shelf) for shelf in built}
@@ -146,6 +167,7 @@ class Stack:
             indexing=indexing,
             status=status,
             observations=observed,
+            vector_routes=_routes(found.vector_cache, lambda store: self._by_store[store].shelf_id),
         )
 
     def resolve(self, shelf_id: str, entry_id: str) -> Entry:

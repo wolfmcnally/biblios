@@ -4,6 +4,15 @@ The Python library is the contract. Every shelf and stack operation is a library
 call; the CLI is a thin layer over it, and an MCP server follows later.
 """
 
+from importlib.metadata import version as _distribution_version
+
+from biblios.acceleration import (
+    AccelerationStats,
+    ResidentShelf,
+    StoredVectors,
+    VectorAcceleration,
+    VectorRoute,
+)
 from biblios.binding import ShelfBinding, bind_shelf, open_bound_shelf
 from biblios.config import Settings, load_settings
 from biblios.consumer import BoundShelf, BoundStack, open_bound_stack
@@ -97,7 +106,8 @@ from biblios.shelf import SHELF_SCHEMA, Mutation, Shelf, ShelfManifest, init_she
 from biblios.stack import Stack, StackResult, open_stack
 from biblios.verify import VerifyReport
 
-__version__ = "0.4.0"
+# One home for the version: the installed distribution's own metadata.
+__version__ = _distribution_version("biblios")
 
 __all__ = [
     "ShelfBinding",
@@ -106,6 +116,11 @@ __all__ = [
     "BoundShelf",
     "BoundStack",
     "open_bound_stack",
+    "VectorAcceleration",
+    "AccelerationStats",
+    "ResidentShelf",
+    "StoredVectors",
+    "VectorRoute",
     "CallControl",
     "ConsumerError",
     "Observation",

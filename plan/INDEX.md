@@ -14,5 +14,6 @@ Definitions and canonical lifecycle state live in `phases/` and `events/`. The o
 - [One incremental indexing core](phases/unified-indexing-core.md), one orchestration with per-entry staged publication and incremental discovery, delivered through two children:
   - [The indexing core and per-entry publication](phases/indexing-core-publication.md), the core, its stores, the stage seam, serving, the verified import and creation grants.
   - [Persistent edit observation](phases/persistent-edit-observation.md), the library-owned observer and indexing loop, depending on the core.
+- [Opt-in exact vector acceleration](phases/palace-cache-exposure.md), Palace 0.7.0's in-memory vector cache and memory observability at the consumer seam, for release 0.6.0; no default change.
 
 Read the target definition, its brief references and actual dependencies before phase work; use the repository's supported custody and review workflow. Product code lives in `project/biblios/`, tests in `project/tests/`, and installation instructions in [the README](../README.md).

@@ -19,6 +19,9 @@ from biblios.progress import index_status
 from biblios.shelf import Shelf
 
 if TYPE_CHECKING:
+    from palace.vector_cache import VectorCache
+
+    from biblios.acceleration import VectorRoute
     from biblios.core import ReadObservation
 
 
@@ -100,6 +103,9 @@ class SearchResult:
     """Withheld entries whose served rows or mirror disagreed with their accepted stage,
     for a write-grade call to verify (:class:`biblios.core.ReadObservation`). A search
     persists nothing; a writable binding's search also marks these entries."""
+    vector_routes: tuple[VectorRoute, ...] | None = None
+    """How the shelf's vector legs were served when the search was accelerated; ``None``
+    when it ran the exact released search (:class:`biblios.acceleration.VectorRoute`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,7 +129,10 @@ def search(
     reranker: Reranker | None = None,
     rerank: bool = True,
     strict: bool = False,
+    _vector_cache: VectorCache | None = None,
 ) -> SearchResult:
+    """``_vector_cache`` is internal to the bound seam
+    (:meth:`biblios.consumer.BoundShelf.search` passes its admitted acceleration)."""
     store = shelf.palace_store
     if not embedder_config_path(store).exists():
         raise UndeclaredEmbedderError(f"no embedder selector declared at {store}")
@@ -134,7 +143,16 @@ def search(
         status.lagging,
     )
     if not status.built:
-        return SearchResult((), "disabled", (), (), revision, searchable_revision, indexing)
+        return SearchResult(
+            (),
+            "disabled",
+            (),
+            (),
+            revision,
+            searchable_revision,
+            indexing,
+            vector_routes=None if _vector_cache is None else (),
+        )
     # One prepared search with per-hit evidence: each returned hit carries the exact
     # stored body, embedding-input digest and vector bytes read in the retrieval's own
     # snapshot, which the serving check compares with the entry's accepted manifest.
@@ -149,7 +167,9 @@ def search(
         injected_reranker=reranker is not None,
         evidence=True,
     )
-    ranked = palace_search.execute_prepared_search(prepared, reranker=reranker)
+    ranked = palace_search.execute_prepared_search(
+        prepared, reranker=reranker, vector_cache=_vector_cache
+    )
     status = ranked.status
     evidence = ranked.evidence or ()
     served = _ServingCheck(shelf)
@@ -169,7 +189,16 @@ def search(
         searchable_revision=searchable_revision,
         indexing=indexing,
         observations=served.observations(),
+        vector_routes=_routes(ranked.vector_cache, lambda _store: shelf.shelf_id),
     )
+
+
+def _routes(outcomes, shelf_of):
+    if outcomes is None:
+        return None
+    from biblios.acceleration import routes
+
+    return routes(outcomes, shelf_of)
 
 
 OBSERVED = {
