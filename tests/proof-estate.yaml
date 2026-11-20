@@ -2465,3 +2465,25 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: release-worktrees
+  kind: pytest
+  selectors:
+  - tests/test_check_release_worktrees.py
+  source_paths:
+  - bin/check-release-worktrees
+  - tests/test_check_release_worktrees.py
+  covers:
+  - bin/check-release-worktrees
+  - tests/test_check_release_worktrees.py
+  contract: A release is refused unless the repository has one registered worktree,
+    the release checkout, and it is clean.
+  risk_class: release-custody
+  oracle: Synthetic repositories distinguish a sole clean checkout from dirt, extra,
+    unusable and unreadable registrations.
+  admission: Release custody is verified before qualification and again immediately
+    before each tag or publication.
+  nearest_overlap: The hook-liveness witness is the nearest read-only repository-state
+    check; it inspects no worktree.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []
