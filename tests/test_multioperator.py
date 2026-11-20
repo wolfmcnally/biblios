@@ -216,7 +216,8 @@ def assert_rehearsal_contract(tmp_path: Path, source: Path, mapping: dict[str, s
         capture_output=True,
         text=True,
         env={**os.environ, "UV_OFFLINE": "1"},
-        timeout=90,
+        # Runs its own pytest and a uv script tool twice; slow under a busy full gate.
+        timeout=180,
     )
     assert adapted_test.returncode == 0, (
         "MIGRATION SHARED NORMALIZATION PROOF LOST: " + adapted_test.stdout + adapted_test.stderr

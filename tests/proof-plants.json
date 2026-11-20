@@ -514,7 +514,7 @@
   },
   "pytest:tests/test_multioperator.py::test_portable_rehearsal_preserves_source_and_guards": {
     "defect": "Record validation never refuses",
-    "expect": "failed",
+    "expect": "MIGRATION STAGED HISTORY REWRITE PASSED",
     "plant": {
       "path": "lib/agentic_starter/multioperator.py",
       "replace": "    if not condition:\n        raise Refusal(reason)",
@@ -609,6 +609,15 @@
       "path": "lib/agentic_starter/test_governance.py",
       "replace": "    if blocking:\n",
       "with": "    if False:\n"
+    }
+  },
+  "pytest:tests/test_test_governance.py::test_parallel_pytest_keeps_coverage_isolation_and_failure_truth": {
+    "defect": "Nested runs inside a worker get their own worker pool",
+    "expect": "PARALLEL CONTRACT FAILED",
+    "plant": {
+      "path": "lib/agentic_starter/test_runner.py",
+      "replace": "nested = bool(os.environ.get(\"PYTEST_XDIST_WORKER\"))",
+      "with": "nested = False"
     }
   },
   "pytest:tests/test_test_governance.py::test_reuse_runs_only_what_changed_since_a_proven_tree_and_everything_when_unsure": {
