@@ -8,7 +8,8 @@ import signal
 import subprocess
 import sys
 import threading
-from collections.abc import Sequence
+import time
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 INCOMPLETE = 124
@@ -33,14 +34,33 @@ def _stop(process: subprocess.Popen[str], grace: float) -> str:
     return "\n".join(errors)
 
 
-def _group_exists(group_id: int) -> bool:
-    try:
-        os.killpg(group_id, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
+SETTLE_POLL_SECONDS = 0.005
+
+
+def _group_outstanding(group_id: int, settle: float) -> bool:
+    """Whether the child's group still has a member after its leader exited.
+
+    A refused probe is ambiguous. For a few milliseconds after the last member of a
+    group exits, and before the system has finished collecting it, this platform refuses
+    a signal to that group exactly as it would refuse one to a group the caller may not
+    signal. Counting the refusal as a live child reported finished commands as incomplete
+    under parallel load. So a refusal is probed again within the cleanup grace: a group
+    that turns out to be gone is finished, one that answers is outstanding, and one still
+    refusing at the deadline is treated as outstanding, because that cannot be told apart
+    from a child that escaped.
+    """
+    deadline = time.monotonic() + settle
+    while True:
+        try:
+            os.killpg(group_id, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(SETTLE_POLL_SECONDS)
+            continue
         return True
-    return True
 
 
 def run_command(
@@ -91,7 +111,7 @@ def run_command(
                 raise InterruptedError("interrupted during child startup")
             stdout, stderr = process.communicate(timeout=timeout)
             code = process.returncode
-            if code < 0 or _group_exists(process.pid):
+            if code < 0 or _group_outstanding(process.pid, cleanup_grace):
                 cleaning = True
                 cleanup_detail = _stop(process, cleanup_grace)
                 code = INCOMPLETE
@@ -157,6 +177,48 @@ def pytest_arguments(arguments: Sequence[str]) -> list[str]:
     ]
 
 
+SCRIPT_SHEBANG = b"#!/usr/bin/env -S uv run --script"
+
+
+def prepare_script_environments(
+    root: Path, arguments: Sequence[str], environment: Mapping[str, str] | None = None
+) -> list[str]:
+    """Build each script tool's cached environment once, before parallel workers start.
+
+    A tool that declares its own dependencies gets an environment the first time it runs.
+    Parallel workers that all start such a tool at once build that environment together,
+    and each can remove what another is using. Building it here, serially, leaves the
+    workers nothing to build. Returns the tools prepared; a tool that cannot be prepared
+    is named and left for its own test to report.
+
+    The build lands in whichever cache `environment` selects, the caller's own by default.
+    A project that gives each worker a private cache gains nothing from the supervisor's
+    build, so each worker passes its own environment here before it runs tools together.
+    """
+    if "-n" in arguments and arguments[arguments.index("-n") + 1] == "0":
+        return []
+    prepared = []
+    for tool in sorted((root / "bin").glob("*")):
+        try:
+            if not tool.is_file() or not tool.read_bytes().startswith(SCRIPT_SHEBANG):
+                continue
+        except OSError:
+            continue
+        built = subprocess.run(
+            ["uv", "sync", "--script", str(tool), "--quiet"],
+            capture_output=True,
+            text=True,
+            env=None if environment is None else dict(environment),
+        )
+        if built.returncode == 0:
+            prepared.append(tool.name)
+        else:
+            print(
+                f"TEST NOTE: could not prepare {tool.name}: {built.stderr.strip()}", file=sys.stderr
+            )
+    return prepared
+
+
 def main() -> int:
     import yaml
 
@@ -164,9 +226,9 @@ def main() -> int:
     try:
         manifest = yaml.safe_load((root / "tests/proof-estate.yaml").read_text())
         timeout = manifest["hang_timeout_seconds"]
-        result = run_command(
-            [sys.executable, *pytest_arguments(sys.argv[1:])], cwd=root, timeout=timeout
-        )
+        arguments = pytest_arguments(sys.argv[1:])
+        prepare_script_environments(root, arguments)
+        result = run_command([sys.executable, *arguments], cwd=root, timeout=timeout)
     except (OSError, ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
         print(f"TEST INCOMPLETE: supervisor could not run: {exc}", file=sys.stderr)
         return INCOMPLETE

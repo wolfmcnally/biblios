@@ -55,7 +55,7 @@ REQUIRED_FAMILY_FIELDS = {
 }
 TIERS = {"vital", "changed", "full"}
 TIMING_RECORD = ".kickoff/test-timing/full.xml"
-KINDS = {"pytest", "gate", "hook"}
+KINDS = {"pytest", "gate", "hook", "command"}
 DISPOSITION_FIELDS = {
     "record_type",
     "proof_id",
@@ -230,8 +230,38 @@ def collect_hooks(root: Path) -> list[Proof]:
     return proofs
 
 
+def collect_commands(root: Path) -> list[Proof]:
+    """Proofs run by a deliverable's own test runner, one per declared ``bin/test`` argument list.
+
+    pytest cannot collect a Swift, Rust or Node suite, so these are declared rather than
+    discovered: each selector of a ``command`` family is the argument string that the
+    repository's ``bin/test`` routes to that runner.
+    """
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    proofs: list[Proof] = []
+    for family in manifest.get("families") or []:
+        if not isinstance(family, dict) or family.get("kind") != "command":
+            continue
+        for selector in family.get("selectors") or []:
+            proofs.append(
+                Proof(
+                    proof_id=f"command:{selector}",
+                    family_id=f"command:{family.get('id')}",
+                    kind="command",
+                    selector=str(selector),
+                    source_path="tests/proof-estate.yaml",
+                )
+            )
+    return proofs
+
+
 def inventory(root: Path) -> dict[str, Any]:
-    proofs = collect_pytest(root) + collect_check_gates(root) + collect_hooks(root)
+    proofs = (
+        collect_pytest(root)
+        + collect_check_gates(root)
+        + collect_hooks(root)
+        + collect_commands(root)
+    )
     proof_ids = [proof.proof_id for proof in proofs]
     if len(proof_ids) != len(set(proof_ids)):
         duplicates = sorted({item for item in proof_ids if proof_ids.count(item) > 1})
@@ -774,7 +804,8 @@ def validate(
         shadow = sorted(active - current_ids)
         errors.append(
             "replayed proof estate does not match inventory"
-            f" (unadmitted={missing[:3]}, shadow={shadow[:3]})"
+            f" (unadmitted={len(missing)}, first {missing[:3]};"
+            f" shadow={len(shadow)}, first {shadow[:3]})"
         )
 
     try:
@@ -903,10 +934,6 @@ DOCUMENT_READER_ROOTS = ("tests", "lib", "bin")
 MAX_READER_BYTES = 4 * 1024 * 1024
 
 
-def _is_document(path: str) -> bool:
-    return path.endswith(".md")
-
-
 def _mentions(text: str, path: str) -> bool:
     """Whether a file names a path: its repository path, or its file name beside its
     parent directory's name (code that joins ``"policies" / "surfaces.md"``; a Python
@@ -954,6 +981,23 @@ def _families_for_reader(families: list[dict[str, Any]], reader: str) -> list[di
     return found
 
 
+def _data_paths(root: Path, changed: list[str]) -> set[str]:
+    """Changed paths that are data rather than code: documents and declared bookkeeping.
+
+    A record such as a log entry or a lifecycle event has readers, not one owning family,
+    so it selects every family that covers or reads it instead of widening to the full
+    suite. Without a readable partition only documents qualify.
+    """
+    data = {path for path in changed if path.endswith(".md")}
+    try:
+        from agentic_starter.candidate_boundaries import load_partition
+
+        partition = load_partition(root)
+    except Exception:
+        return data
+    return data | {path for path in changed if partition.classify(path) == "bookkeeping"}
+
+
 def selected_families(
     root: Path, mode: str, base: str | None = None
 ) -> tuple[list[dict[str, Any]], str | None]:
@@ -964,6 +1008,14 @@ def selected_families(
     vital = [family for family in families if family.get("tier") == "vital"]
     if mode == "vital":
         return vital, None
+    if mode == "reuse":
+        changed, detail = reuse_changes(root)
+        if changed is None:
+            return families, detail
+        engine = sorted(set(changed) & REUSE_ENGINE_PATHS)
+        if engine:
+            return families, "selection-inputs-changed:" + ",".join(engine)
+        return _families_for_changes(root, families, changed, [])
     if mode != "changed" or not base:
         raise GovernanceError("changed selection requires --base <git-ref>")
     resolved = _run(["git", "rev-parse", "--verify", f"{base}^{{commit}}"], root, check=False)
@@ -986,7 +1038,22 @@ def selected_families(
     )
     if not changed:
         return vital, None
-    selected = {family["id"]: family for family in vital}
+    return _families_for_changes(root, families, changed, vital)
+
+
+def _families_for_changes(
+    root: Path,
+    families: list[dict[str, Any]],
+    changed: list[str],
+    seed: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Families a set of changed paths can affect, or every family with the reason."""
+    data = _data_paths(root, changed)
+
+    def _is_document(path: str) -> bool:
+        return path in data
+
+    selected = {family["id"]: family for family in seed}
     unmapped: list[str] = []
     mapped_code: list[str] = []
     for path in changed:
@@ -1033,6 +1100,127 @@ def selected_families(
                 for family in _families_for_reader(families, reader):
                     selected[family["id"]] = family
     return list(selected.values()), None
+
+
+REUSE_RECORD = ".kickoff/test-reuse/proven-tree.json"
+REUSE_PENDING = ".kickoff/test-reuse/pending.json"
+REUSE_SCHEMA = "agentic.test-reuse.v1"
+# A change to what selects or runs tests cannot be judged by the selection it changes.
+REUSE_ENGINE_PATHS = frozenset(
+    {
+        "tests/proof-estate.yaml",
+        "tests/conftest.py",
+        "candidate-partition.yaml",
+        "bin/test",
+        "bin/test-governance",
+        "bin/kickoff-tree-id",
+        "lib/agentic_starter/test_governance.py",
+        "lib/agentic_starter/test_runner.py",
+        "lib/agentic_starter/candidate_boundaries.py",
+    }
+)
+
+
+def _tree_state(root: Path) -> dict[str, Any]:
+    """The candidate identity, per-path manifest and runtime fingerprint of the tree now."""
+    manifest = json.loads(
+        _run([str(root / "bin/kickoff-tree-id"), "--root", str(root), "--json"], root).stdout
+    )
+    fingerprint = _run(
+        [str(root / "bin/check-receipt"), "fingerprint", "--root", str(root)], root
+    ).stdout.strip()
+    if not _is_sha256(manifest.get("candidate_id")) or not _is_sha256(fingerprint):
+        raise GovernanceError("tree identity or environment fingerprint is malformed")
+    return {
+        "candidate_id": manifest["candidate_id"],
+        "environment_fingerprint": fingerprint,
+        "entries": {
+            entry["path"]: [entry["mode"], entry["content_sha256"]] for entry in manifest["entries"]
+        },
+    }
+
+
+def reuse_changes(root: Path) -> tuple[list[str] | None, str]:
+    """Paths that differ from the last tree on which every family passed.
+
+    None, with the reason, whenever that tree cannot be established: no record, another
+    runtime, or anything unreadable. The caller then runs everything. An error here must
+    never read as "nothing changed".
+    """
+    try:
+        record = load_json(root / REUSE_RECORD)
+        current = _tree_state(root)
+    except (GovernanceError, OSError, ValueError, KeyError, TypeError) as exc:
+        return None, "no-proven-tree:" + str(exc).splitlines()[0][:120]
+    entries = record.get("entries")
+    if (
+        record.get("schema") != REUSE_SCHEMA
+        or not _is_sha256(record.get("candidate_id"))
+        or not isinstance(entries, dict)
+        or not entries
+    ):
+        return None, "no-proven-tree:malformed record"
+    if record.get("environment_fingerprint") != current["environment_fingerprint"]:
+        return None, "no-proven-tree:runtime changed since the record"
+    now = current["entries"]
+    return (
+        sorted(path for path in set(entries) | set(now) if entries.get(path) != now.get(path)),
+        str(record["candidate_id"]),
+    )
+
+
+def reuse_begin(root: Path, lane: str) -> dict[str, Any]:
+    """Before a run that may prove the tree: fix its identity and what reuse would have run."""
+    state = _tree_state(root)
+    if lane == "full":
+        families, widened = selected_families(root, "reuse")
+        state["would_run"] = None if widened else sorted(family["id"] for family in families)
+    pending = root / REUSE_PENDING
+    _write_json(pending, {"schema": REUSE_SCHEMA, "lane": lane, **state})
+    return {"candidate_id": state["candidate_id"], "lane": lane}
+
+
+def _failed_families(root: Path) -> set[str] | None:
+    """Families owning a failed test in the last full run; None when that cannot be read."""
+    try:
+        cases = ElementTree.parse(root / TIMING_RECORD).getroot().iter("testcase")
+        files = {
+            str(case.get("file"))
+            for case in cases
+            if case.find("failure") is not None or case.find("error") is not None
+        }
+        families = load_yaml(root / "tests/proof-estate.yaml")["families"]
+    except (OSError, ElementTree.ParseError, GovernanceError, KeyError, TypeError):
+        return None
+    return {family["id"] for name in files for family in _families_for_reader(families, name)}
+
+
+def reuse_finish(root: Path, exit_code: int) -> str:
+    """After the run: record a proven tree, or report that reuse would have missed a failure."""
+    pending_path = root / REUSE_PENDING
+    try:
+        pending = load_json(pending_path)
+    finally:
+        pending_path.unlink(missing_ok=True)
+    record = root / REUSE_RECORD
+    if exit_code == 0:
+        if _tree_state(root)["candidate_id"] != pending.get("candidate_id"):
+            return "TEST REUSE NOT RECORDED: the tree changed during the run"
+        _write_json(
+            record,
+            {key: pending[key] for key in ("candidate_id", "environment_fingerprint", "entries")}
+            | {"schema": REUSE_SCHEMA},
+        )
+        return "TEST REUSE RECORDED: every family passes on tree " + pending["candidate_id"][:12]
+    would_run = pending.get("would_run")
+    if pending.get("lane") != "full" or would_run is None or exit_code == 124 or exit_code >= 128:
+        return "TEST REUSE UNCHANGED: the run did not pass"
+    failed = _failed_families(root)
+    missed = sorted(failed - set(would_run)) if failed is not None else []
+    if not missed:
+        return "TEST REUSE UNCHANGED: the run did not pass"
+    record.unlink(missing_ok=True)
+    return "TEST REUSE UNSOUND " + " ".join(missed) + ": record discarded; the next run is full"
 
 
 def pytest_selectors(families: Iterable[dict[str, Any]]) -> list[str]:
@@ -1364,12 +1552,174 @@ def witness_abort(root: Path) -> dict[str, Any]:
     return {"state": "aborted", "restored": [entry["path"] for entry in request["paths"]]}
 
 
+ADMIT_EVIDENCE = (
+    "contract",
+    "oracle",
+    "red_witness",
+    "nearest_overlap",
+    "replacement_evidence",
+    "rationale",
+)
+
+
+PLANTS = "tests/proof-plants.json"
+PLANT_FIELDS = ("defect", "expect", "plant", "command", "failure_exit")
+
+
+def recorded_plants(root: Path) -> dict[str, Any]:
+    """The defect last planted to witness each proof, kept beside the tests it challenges.
+
+    It travels with the tests: a receiver replays the same defect against its own copy and
+    observes the failure itself. It is an input to a witness, never evidence of one.
+    """
+    path = root / PLANTS
+    if not path.exists():
+        return {}
+    plants = load_json(path)
+    if not all(isinstance(value, dict) for value in plants.values()):
+        raise GovernanceError(f"{PLANTS} must map proof ids to recorded defects")
+    return plants
+
+
+def admit(root: Path, source: Path) -> dict[str, Any]:
+    """Observe each new or changed proof fail, restore the tree, and record the decision.
+
+    One input replaces the begin, plant, finish and author steps. For each proof it names
+    the defect as an exact text replacement, so the plant is repeatable and reviewable; a
+    proof may leave the defect out when one is already recorded for it. Before anything is
+    planted the command checks that the finished ledger would be valid, so an input that
+    cannot be recorded, such as one that leaves another new proof unadmitted, refuses with
+    nothing witnessed. It then observes each proof red, restores the original bytes, and
+    appends the witness receipts and the admission or modification rows together.
+
+    A catch-up that drops proofs while others arrive cannot record either half alone: the
+    arrivals are unadmitted while the retirements are checked, and the retired proofs are
+    unaccounted for while the arrivals are. So the same input may carry `retirements`,
+    authoring records with action `retire` or `disposition`, and `families`, replacement
+    family definitions. They are checked and published with the admissions as one change.
+    """
+    from agentic_starter.input_io import read_object
+
+    request = read_object(source)
+    proofs = request.get("proofs")
+    retirements = request.get("retirements", [])
+    families = request.get("families", [])
+    if (
+        not {"proofs"} <= set(request) <= {"proofs", "retirements", "families"}
+        or not isinstance(proofs, list)
+        or not proofs
+        or not isinstance(retirements, list)
+        or not isinstance(families, list)
+        or any(
+            not isinstance(row, dict) or row.get("action") not in {"retire", "disposition"}
+            for row in retirements
+        )
+    ):
+        raise GovernanceError(
+            "admit input requires a nonempty proofs array; optional retirements carry only "
+            "retire or disposition records, and optional families are family definitions"
+        )
+    plants = recorded_plants(root)
+    resolved = []
+    for supplied in proofs:
+        if not isinstance(supplied, dict):
+            raise GovernanceError("admit proof must be an object")
+        item = {**plants.get(str(supplied.get("proof_id")), {}), **supplied}
+        needed = {"action", "proof_id", "defect", "expect", "plant", *ADMIT_EVIDENCE}
+        if (
+            not needed <= set(item)
+            or set(item) - needed - {"command", "failure_exit"}
+            or item["action"] not in {"admit", "modify"}
+            or not isinstance(item["plant"], dict)
+            or set(item["plant"]) != {"path", "replace", "with"}
+            or not all(isinstance(item["plant"][key], str) for key in item["plant"])
+            or not item["plant"]["replace"]
+        ):
+            raise GovernanceError(
+                "admit proof has missing, unknown or malformed fields, "
+                f"or no defect is recorded for it: {supplied.get('proof_id')}"
+            )
+        resolved.append(item)
+    manifest = load_yaml(root / "tests/proof-estate.yaml")
+    witness_ledger = root / str(manifest["witness_ledger"])
+
+    def author(records: list[dict[str, Any]], *, check_only: bool) -> list[str]:
+        composed = root / ".kickoff/input-writes/admit-request.json"
+        _write_json(composed, {"families": families, "records": [*retirements, *records]})
+        try:
+            return author_inputs(
+                root,
+                composed,
+                _digest((root / "tests/proof-estate.yaml").read_bytes()),
+                _digest((root / str(manifest["audit_ledger"])).read_bytes()),
+                check_only=check_only,
+            )
+        finally:
+            composed.unlink(missing_ok=True)
+
+    def decision(item: dict[str, Any], receipt: int) -> dict[str, Any]:
+        record = {key: item[key] for key in ("action", "proof_id", *ADMIT_EVIDENCE)}
+        if item["action"] == "modify":
+            record["witness_receipts"] = [receipt]
+        return record
+
+    # Every problem except the witnesses this run has yet to make is a reason to stop now.
+    ours = {str(item["proof_id"]) for item in resolved}
+    blocking = [
+        error
+        for error in author([decision(item, 1) for item in resolved], check_only=True)
+        if not (
+            any(error.endswith(proof) for proof in ours)
+            and ("has no witness receipt" in error or error.startswith("modification "))
+        )
+    ]
+    if blocking:
+        raise GovernanceError(
+            "admit input cannot be recorded; nothing was witnessed:\n- " + "\n- ".join(blocking)
+        )
+    records = []
+    for item in resolved:
+        proof_id = str(item["proof_id"])
+        plant = item["plant"]
+        command = item.get("command") or (
+            "./bin/test " + shlex.quote(proof_id.removeprefix("pytest:")) + " -q"
+        )
+        witness_begin(
+            root,
+            proof_ids=[proof_id],
+            defect=item["defect"],
+            expect=item["expect"],
+            command=command,
+            paths=[plant["path"]],
+            failure_exit=item.get("failure_exit", 1),
+        )
+        target = root / plant["path"]
+        try:
+            text = target.read_text()
+            if text.count(plant["replace"]) != 1:
+                raise GovernanceError(
+                    f"plant text must occur exactly once in {plant['path']}: {proof_id}"
+                )
+            target.write_text(text.replace(plant["replace"], plant["with"]))
+        except (OSError, UnicodeDecodeError, GovernanceError):
+            witness_abort(root)
+            raise
+        witness_finish(root)
+        records.append(decision(item, len(load_ledger(witness_ledger))))
+        plants[proof_id] = {key: item[key] for key in PLANT_FIELDS if key in item}
+    author(records, check_only=False)
+    _write_json(root / PLANTS, plants)
+    return {"admitted": [record["proof_id"] for record in records], "witnessed": len(records)}
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
-def author_inputs(root: Path, source: Path, manifest_sha: str, ledger_sha: str) -> None:
+def author_inputs(
+    root: Path, source: Path, manifest_sha: str, ledger_sha: str, *, check_only: bool = False
+) -> list[str]:
     """Compose real family edits and append-only decisions, checking the resulting estate."""
     import fcntl
 
@@ -1470,6 +1820,15 @@ def author_inputs(root: Path, source: Path, manifest_sha: str, ledger_sha: str) 
                 row["witness_receipts"] = semantic["witness_receipts"]
             appended.append(row)
         ledger = load_ledger(ledger_path) + appended
+        if check_only:
+            # Report what would refuse, and publish nothing.
+            try:
+                validate(root, proposed_manifest=manifest, proposed_ledger=ledger)
+            except GovernanceError as exc:
+                return [line[2:] for line in str(exc).splitlines() if line.startswith("- ")] or [
+                    str(exc)
+                ]
+            return []
         validate(root, proposed_manifest=manifest, proposed_ledger=ledger)
         # All refusal checks precede publication. An I/O interruption is not success;
         # retain both files and diagnose it, never rewrite prior ledger history.
@@ -1491,6 +1850,7 @@ def author_inputs(root: Path, source: Path, manifest_sha: str, ledger_sha: str) 
                 os.fsync(stream.fileno())
 
         validate(root)
+        return []
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1510,7 +1870,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     selection = select_parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--tier", choices=("vital",))
     selection.add_argument("--changed-from")
+    selection.add_argument("--reuse", action="store_true")
     select_parser.add_argument("--format", choices=("json", "lines"), default="json")
+    reuse_parser = subparsers.add_parser("reuse", help="record or audit the last proven tree")
+    reuse_actions = reuse_parser.add_subparsers(dest="reuse_action", required=True)
+    reuse_begin_parser = reuse_actions.add_parser("begin")
+    reuse_begin_parser.add_argument("--lane", choices=("full", "reuse"), required=True)
+    reuse_finish_parser = reuse_actions.add_parser("finish")
+    reuse_finish_parser.add_argument("--exit", dest="exit_code", type=int, required=True)
     subparsers.add_parser("report")
     witness_parser = subparsers.add_parser("witness")
     witness_actions = witness_parser.add_subparsers(dest="witness_action", required=True)
@@ -1529,10 +1896,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     author.add_argument("--input-json", type=Path, required=True)
     author.add_argument("--expect-manifest", required=True)
     author.add_argument("--expect-ledger", required=True)
+    admit_parser = subparsers.add_parser(
+        "admit", help="observe new or changed proofs red, then record them in one step"
+    )
+    admit_parser.add_argument("--input-json", type=Path, required=True)
     args = parser.parse_args(argv)
     root = args.repo_root.resolve()
     try:
-        if args.command == "author":
+        if args.command == "admit":
+            print(json.dumps(admit(root, args.input_json), indent=2, sort_keys=True))
+            print("PROOFS WITNESSED AND RECORDED; prior ledger prefix preserved")
+        elif args.command == "author":
             author_inputs(root, args.input_json, args.expect_manifest, args.expect_ledger)
             print("PROOF INPUTS WRITTEN; prior ledger prefix preserved")
         elif args.command == "inventory":
@@ -1544,15 +1918,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "validate":
             print(json.dumps(validate(root), indent=2, sort_keys=True))
         elif args.command == "select":
-            mode = "vital" if args.tier else "changed"
+            mode = "vital" if args.tier else "reuse" if args.reuse else "changed"
             families, widened = selected_families(root, mode, args.changed_from)
             if widened:
                 print(f"TEST GOVERNANCE WIDENED TO FULL: {widened}", file=sys.stderr)
             if args.format == "lines":
-                print("FULL" if widened else "FOCUSED")
-                print(widened or f"locally admitted {mode} families")
+                # FULL: run everything. FOCUSED: the listed selectors. NONE: nothing can
+                # have changed outcome, which only the reuse lane may conclude.
+                print("FULL" if widened else "FOCUSED" if families else "NONE")
+                if mode == "reuse" and not widened:
+                    total = len(load_yaml(root / "tests/proof-estate.yaml")["families"])
+                    print(
+                        f"{len(families)} of {total} families can be affected by changes "
+                        "since the last proven tree"
+                    )
+                else:
+                    print(widened or f"locally admitted {mode} families")
                 for selector in pytest_selectors(families):
                     print(selector)
+                for family in families if not widened else []:
+                    if family.get("kind") == "command":
+                        for selector in family["selectors"]:
+                            print("command " + str(selector))
             else:
                 print(
                     json.dumps(
@@ -1561,6 +1948,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                         sort_keys=True,
                     )
                 )
+        elif args.command == "reuse":
+            if args.reuse_action == "begin":
+                print(json.dumps(reuse_begin(root, args.lane), sort_keys=True))
+            else:
+                print(reuse_finish(root, args.exit_code))
         elif args.command == "report":
             print(json.dumps(report(root), indent=2, sort_keys=True))
         elif args.command == "witness":

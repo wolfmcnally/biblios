@@ -190,6 +190,187 @@ def estate():
         yield _write_estate(Path(directory), pruned=True)
 
 
+def test_admit_records_a_proof_only_after_seeing_it_fail_and_restoring_the_tree(
+    estate: Path, tmp_path: Path
+) -> None:
+    """Admission: admitting one test took a begin, a hand edit, a finish and an authoring call.
+
+    The single command is run against a copy of a valid estate; the oracle is the estate's
+    own validator plus the exact ledger rows and file bytes left behind, for a proof that
+    is seen to fail and for one whose defect cannot be planted.
+    """
+    authored = tmp_path / "authored"
+    shutil.copytree(estate, authored)
+    (authored / "guard.txt").write_text("deny\n")
+    os.utime(authored / "guard.txt", (0, 0))
+    check = authored / "check.sh"
+    check.write_text(
+        '#!/bin/sh\ngrep -qx deny guard.txt || { echo "E GUARD OPEN"; exit 1; }\necho checked\n'
+    )
+    check.chmod(0o755)
+    audit = authored / "reports/reset.jsonl"
+    witnesses = authored / "reports/witnesses.jsonl"
+    proof = {
+        "action": "modify",
+        "proof_id": SAMPLE + "test_admitted",
+        "defect": "The guard allows instead of denying.",
+        "expect": "GUARD OPEN",
+        "command": "./check.sh",
+        "plant": {"path": "guard.txt", "replace": "deny", "with": "allow"},
+        **EVIDENCE,
+    }
+    supplied = tmp_path / "admit.json"
+    supplied.write_text(json.dumps({"proofs": [proof]}))
+    before = len(governance.load_ledger(witnesses))
+    outcome = governance.admit(authored, supplied)
+    recorded = governance.load_ledger(audit)[-1]
+    settled = (audit.read_bytes(), witnesses.read_bytes())
+    supplied.write_text(
+        json.dumps({"proofs": [{**proof, "plant": {**proof["plant"], "replace": "absent"}}]})
+    )
+    with pytest.raises(governance.GovernanceError, match="exactly once"):
+        governance.admit(authored, supplied)
+    assert (
+        outcome == {"admitted": [proof["proof_id"]], "witnessed": 1}
+        and len(governance.load_ledger(witnesses)) == before + 1
+        and recorded["record_type"] == "proof_modification"
+        and recorded["witness_receipts"] == [before + 1]
+        and (authored / "guard.txt").read_bytes() == b"deny\n"
+        and not (authored / governance.WITNESS_PENDING).exists()
+        and (audit.read_bytes(), witnesses.read_bytes()) == settled
+        and governance.validate(authored)["state"] == "valid"
+    ), "ADMIT RECORDED AN UNSEEN FAILURE, LEFT A DEFECT PLANTED OR LOST A RECEIPT"
+
+
+def test_admit_refuses_before_witnessing_and_replays_a_recorded_defect(
+    estate: Path, tmp_path: Path
+) -> None:
+    """Admission: run on part of a batch, the command witnessed and then refused, leaving
+    receipts with no decision; and a receiver had to rediscover each defect to plant.
+
+    Against a copy of a valid estate that gains a second, unadmitted proof, the oracle is
+    the witness ledger's exact bytes after a refused partial input, and then a successful
+    admission that supplies no defect because one was recorded for the proof.
+    """
+    authored = tmp_path / "authored"
+    shutil.copytree(estate, authored)
+    (authored / "guard.txt").write_text("deny\n")
+    os.utime(authored / "guard.txt", (0, 0))
+    check = authored / "check.sh"
+    check.write_text(
+        '#!/bin/sh\ngrep -qx deny guard.txt || { echo "E GUARD OPEN"; exit 1; }\necho checked\n'
+    )
+    check.chmod(0o755)
+    witnesses = authored / "reports/witnesses.jsonl"
+    supplied = tmp_path / "admit.json"
+    defect = {
+        "defect": "The guard allows instead of denying.",
+        "expect": "GUARD OPEN",
+        "command": "./check.sh",
+        "plant": {"path": "guard.txt", "replace": "deny", "with": "allow"},
+    }
+    known = {"action": "modify", "proof_id": SAMPLE + "test_admitted", **EVIDENCE}
+    arriving = {"action": "admit", "proof_id": SAMPLE + "test_arriving", **EVIDENCE}
+
+    sample = authored / "tests/test_sample.py"
+    sample.write_text(sample.read_text() + "\n\ndef test_arriving():\n    pass\n")
+    before = witnesses.read_bytes()
+    supplied.write_text(json.dumps({"proofs": [{**known, **defect}]}))
+    with pytest.raises(governance.GovernanceError, match="nothing was witnessed") as refused:
+        governance.admit(authored, supplied)
+    untouched = witnesses.read_bytes() == before and "test_arriving" in str(refused.value)
+
+    supplied.write_text(json.dumps({"proofs": [{**known, **defect}, {**arriving, **defect}]}))
+    governance.admit(authored, supplied)
+    recorded = governance.recorded_plants(authored)
+    supplied.write_text(json.dumps({"proofs": [known]}))
+    replayed = governance.admit(authored, supplied)
+    assert (
+        untouched
+        and recorded[arriving["proof_id"]]["plant"] == defect["plant"]
+        and replayed == {"admitted": [known["proof_id"]], "witnessed": 1}
+        and len(governance.load_ledger(witnesses)) == len(before.splitlines()) + 3
+        and (authored / "guard.txt").read_bytes() == b"deny\n"
+        and governance.validate(authored)["state"] == "valid"
+    ), "ADMIT WITNESSED WHAT IT COULD NOT RECORD OR LOST THE RECORDED DEFECT"
+
+
+def test_admit_records_a_catch_up_that_retires_one_proof_while_another_arrives(
+    estate: Path, tmp_path: Path
+) -> None:
+    """Catch-up: a transfer that drops a proof while another arrives could record neither
+    half alone, so three recipients each invented a way round the prescribed order.
+
+    Against a copy of a valid estate that loses one proof and gains another, the oracle is
+    each half refused when recorded without the other, with nothing witnessed, and then
+    the two recorded together by one input, leaving a valid estate.
+    """
+    authored = tmp_path / "authored"
+    shutil.copytree(estate, authored)
+    (authored / "guard.txt").write_text("deny\n")
+    os.utime(authored / "guard.txt", (0, 0))
+    check = authored / "check.sh"
+    check.write_text(
+        '#!/bin/sh\ngrep -qx deny guard.txt || { echo "E GUARD OPEN"; exit 1; }\necho checked\n'
+    )
+    check.chmod(0o755)
+    sample = authored / "tests/test_sample.py"
+    sample.write_text(
+        sample.read_text().replace('"case", [1, 2]', '"case", [1]')
+        + "\n\ndef test_arriving():\n    pass\n"
+    )
+    witnesses = authored / "reports/witnesses.jsonl"
+    audit = authored / "reports/reset.jsonl"
+    before = (witnesses.read_bytes(), audit.read_bytes())
+    arriving = {
+        "action": "admit",
+        "proof_id": SAMPLE + "test_arriving",
+        "defect": "The guard allows instead of denying.",
+        "expect": "GUARD OPEN",
+        "command": "./check.sh",
+        "plant": {"path": "guard.txt", "replace": "deny", "with": "allow"},
+        **EVIDENCE,
+    }
+    leaving = {
+        "action": "retire",
+        "proof_id": SAMPLE + "test_cases[2]",
+        "disposition": "delete",
+        "replacement": None,
+        **EVIDENCE,
+    }
+    supplied = tmp_path / "admit.json"
+    supplied.write_text(json.dumps({"proofs": [arriving]}))
+    with pytest.raises(governance.GovernanceError, match="nothing was witnessed"):
+        governance.admit(authored, supplied)
+    alone = tmp_path / "retire.json"
+    alone.write_text(json.dumps({"families": [], "records": [leaving]}))
+    with pytest.raises(governance.GovernanceError):
+        governance.author_inputs(
+            authored,
+            alone,
+            hashlib.sha256((authored / "tests/proof-estate.yaml").read_bytes()).hexdigest(),
+            hashlib.sha256(audit.read_bytes()).hexdigest(),
+        )
+    halves_refused = (witnesses.read_bytes(), audit.read_bytes()) == before
+
+    supplied.write_text(json.dumps({"proofs": [arriving], "retirements": [arriving]}))
+    with pytest.raises(governance.GovernanceError, match="retire or disposition"):
+        governance.admit(authored, supplied)
+    supplied.write_text(json.dumps({"proofs": [arriving], "retirements": [leaving]}))
+    try:
+        outcome = governance.admit(authored, supplied)
+    except governance.GovernanceError as refusal:
+        outcome = {"refused": str(refusal)}
+    kinds = [row["record_type"] for row in governance.load_ledger(audit)[-2:]]
+    assert (
+        halves_refused
+        and outcome == {"admitted": [arriving["proof_id"]], "witnessed": 1}
+        and sorted(kinds) == ["proof_admission", "proof_retirement"]
+        and (authored / "guard.txt").read_bytes() == b"deny\n"
+        and governance.validate(authored)["state"] == "valid"
+    ), "CATCH-UP COULD NOT RECORD A RETIREMENT AND AN ARRIVAL TOGETHER"
+
+
 def test_inventory_counts_executable_families_and_expanded_leaves(estate: Path) -> None:
     observed = governance.inventory(estate)
     assert observed["counts"] == {"families": 6, "leaves": 7}
@@ -582,6 +763,172 @@ def test_changed_code_selects_the_families_of_files_that_use_it(tmp_path: Path) 
     chosen, widened = governance.selected_families(tmp_path, "changed", "HEAD")
     # The module that imports the helper brings its family; the untouched bystander does not.
     assert ({item["id"] for item in chosen}, widened) == ({"vital", "helper", "user"}, None)
+
+
+def test_reuse_runs_only_what_changed_since_a_proven_tree_and_everything_when_unsure(
+    tmp_path: Path,
+) -> None:
+    """Admission: the full gate re-ran every test after changes no test could observe.
+
+    A real git tree, the real tree-identity tool and the real selection are driven through
+    each state the reuse lane must tell apart. The oracle is the set of families selected
+    and the widening reason, compared with what each change can actually reach.
+    """
+
+    def family(name: str, covers: str, tier: str = "changed") -> str:
+        return (
+            f"- id: {name}\n  tier: {tier}\n  kind: pytest\n"
+            f"  selectors: [tests/test_{name}.py]\n  covers: ['{covers}']\n"
+            f"  source_paths: [tests/test_{name}.py]\n"
+        )
+
+    files = {
+        "tests/proof-estate.yaml": "families:\n"
+        + family("vital", "known/**", tier="vital")
+        + family("mapped", "lib/example.py")
+        + family("other", "lib/other.py")
+        + family("records", "plan/events/*")
+        + family("ledger", "plan/events/*.json"),
+        "candidate-partition.yaml": "schema: agentic.candidate-partition.v1\nactive:\n"
+        '  - "/candidate-partition.yaml"\n  - "/lib/**"\n  - "/tests/**"\nbookkeeping:\n'
+        '  - "/EXECUTION_LOG.jsonl"\n  - "/plan/events/**"\n  - "/log/entries/**"\n',
+        ".gitignore": ".kickoff/\n",
+        "known/file": "base\n",
+        "lib/example.py": "VALUE = 1\n",
+        "lib/other.py": "VALUE = 2\n",
+        "plan/events/a.json": "{}\n",
+        "log/entries/x.md": "entry\n",
+        "EXECUTION_LOG.jsonl": "{}\n",
+        ".kickoff/runtime": "1" * 64 + "\n",
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "lib/agentic_starter").mkdir()
+    shutil.copy2(REPO_ROOT / "bin/kickoff-tree-id", tmp_path / "bin/kickoff-tree-id")
+    for module in ("__init__.py", "candidate_boundaries.py"):
+        shutil.copy2(
+            REPO_ROOT / "lib/agentic_starter" / module, tmp_path / "lib/agentic_starter" / module
+        )
+    receipt = tmp_path / "bin/check-receipt"
+    receipt.write_text('#!/bin/sh\ncat "$(dirname "$0")/../.kickoff/runtime"\n')
+    receipt.chmod(0o755)
+
+    def git(*arguments: str) -> None:
+        subprocess.run(["git", *arguments], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    record = tmp_path / governance.REUSE_RECORD
+
+    def edit(*changed: str) -> None:
+        for path in changed:
+            target = tmp_path / path
+            target.write_text((target.read_text() if target.exists() else "") + "# two\n")
+
+    def selection(*changed: str) -> tuple[set[str], str | None]:
+        edit(*changed)
+        chosen, widened = governance.selected_families(tmp_path, "reuse")
+        git("reset", "-q", "--hard", "HEAD")
+        git("clean", "-qfd")
+        return {item["id"] for item in chosen}, (widened or "").split(":")[0] or None
+
+    everything = {"vital", "mapped", "other", "records", "ledger"}
+    unknown_tree = selection()
+    governance.reuse_begin(tmp_path, "full")
+    proven = governance.reuse_finish(tmp_path, 0)
+    observed = {
+        "unchanged": selection(),
+        "records nobody reads": selection("log/entries/x.md", "EXECUTION_LOG.jsonl"),
+        "record two families cover": selection("plan/events/a.json"),
+        "covered code": selection("lib/example.py"),
+        "uncovered path": selection("new.txt"),
+        "selection inputs": selection("tests/proof-estate.yaml"),
+    }
+    (tmp_path / ".kickoff/runtime").write_text("2" * 64 + "\n")
+    observed["other runtime"] = selection()
+    (tmp_path / ".kickoff/runtime").write_text("1" * 64 + "\n")
+
+    # An uncached run fails a family that reuse would have skipped: the record is discarded.
+    edit("lib/other.py")
+    governance.reuse_begin(tmp_path, "full")
+    timing = tmp_path / governance.TIMING_RECORD
+    timing.parent.mkdir(parents=True, exist_ok=True)
+    timing.write_text(
+        '<testsuites><testsuite><testcase file="tests/test_mapped.py" name="t">'
+        "<failure/></testcase></testsuite></testsuites>"
+    )
+    unsound = governance.reuse_finish(tmp_path, 1)
+    discarded = not record.exists()
+    # A tree that moved while its tests ran is never recorded as proven.
+    governance.reuse_begin(tmp_path, "full")
+    edit("lib/example.py")
+    moved = governance.reuse_finish(tmp_path, 0)
+
+    assert (
+        unknown_tree == (everything, "no-proven-tree")
+        and proven.startswith("TEST REUSE RECORDED")
+        and observed
+        == {
+            "unchanged": (set(), None),
+            "records nobody reads": (set(), None),
+            "record two families cover": ({"records", "ledger"}, None),
+            "covered code": ({"mapped"}, None),
+            "uncovered path": (everything, "unmapped-changes"),
+            "selection inputs": (everything, "selection-inputs-changed"),
+            "other runtime": (everything, "no-proven-tree"),
+        }
+        and unsound.startswith("TEST REUSE UNSOUND mapped")
+        and discarded
+        and moved.startswith("TEST REUSE NOT RECORDED")
+        and not record.exists()
+    ), f"REUSE SKIPPED AN AFFECTED FAMILY OR RERAN AN UNAFFECTED ONE: {unknown_tree} {observed}"
+
+
+def test_a_command_family_is_inventoried_and_selected_for_its_own_runner(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Admission: only pytest families could be selected, so a deliverable in another
+    language always ran its whole suite. The oracle is the selection printed for a change
+    under the path the command family covers."""
+    files = {
+        "tests/proof-estate.yaml": "families:\n"
+        "- id: unit\n  tier: changed\n  kind: pytest\n  selectors: [tests/test_unit.py]\n"
+        "  covers: [lib/unit.py]\n  source_paths: [tests/test_unit.py]\n"
+        "- id: deliverable\n  tier: changed\n  kind: command\n"
+        "  selectors: ['project/tests/smoke.rs --quiet']\n"
+        "  covers: ['project/*']\n  source_paths: []\n",
+        "lib/unit.py": "VALUE = 1\n",
+        "project/src/lib.rs": "pub fn value() -> u8 { 1 }\n",
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+
+    def git(*arguments: str) -> None:
+        subprocess.run(["git", *arguments], cwd=tmp_path, check=True, capture_output=True)
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Test")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    (tmp_path / "project/src/lib.rs").write_text("pub fn value() -> u8 { 2 }\n")
+    status = governance.main(
+        ["--root", str(tmp_path), "select", "--changed-from", "HEAD", "--format", "lines"]
+    )
+    lines = capsys.readouterr().out.splitlines()
+    proofs = [(proof.proof_id, proof.kind) for proof in governance.collect_commands(tmp_path)]
+    assert (
+        status == 0
+        and lines[0] == "FOCUSED"
+        and lines[2:] == ["command project/tests/smoke.rs --quiet"]
+        and proofs == [("command:project/tests/smoke.rs --quiet", "command")]
+    ), f"NATIVE-RUNNER FAMILY NOT SELECTED OR NOT INVENTORIED: {lines} {proofs}"
 
 
 def test_report_counts_the_frozen_baseline_and_current_estate(estate: Path) -> None:
@@ -1079,6 +1426,41 @@ def test_outstanding_child_makes_completed_leader_incomplete(
                 pass
 
 
+def test_a_refused_liveness_probe_is_settled_before_a_finished_command_is_called_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission: under parallel load a finished two-line command was reported incomplete,
+    twice in one day in two repositories, because one refused probe was read as a live child.
+
+    The refusal is injected at the system call, so the oracle is the supervisor's own
+    result for a probe that clears after a few refusals and for one that never clears.
+    """
+    from agentic_starter import test_runner
+
+    real = os.killpg
+    refusals = {"left": 3}
+
+    def probe(group: int, signum: int) -> None:
+        if signum == 0 and refusals["left"] != 0:
+            refusals["left"] -= 1
+            raise PermissionError(1, "Operation not permitted")
+        if signum == 0:
+            raise ProcessLookupError(3, "No such process")
+        real(group, signum)
+
+    monkeypatch.setattr(test_runner.os, "killpg", probe)
+    command = [sys.executable, "-c", "print('done')"]
+    settled = test_runner.run_command(command, cwd=tmp_path, capture=True, cleanup_grace=2)
+    refusals["left"] = -1  # never clears
+    unprovable = test_runner.run_command(command, cwd=tmp_path, capture=True, cleanup_grace=0.05)
+    assert (
+        (settled.returncode, settled.stdout.strip()) == (0, "done")
+        and "INCOMPLETE" not in settled.stderr
+        and unprovable.returncode == 124
+        and "INCOMPLETE" in unprovable.stderr
+    ), f"REFUSED PROBE MISREAD: {settled.returncode} {settled.stderr!r} {unprovable.returncode}"
+
+
 def test_governance_allows_nested_supervisor_cleanup(tmp_path: Path, monkeypatch) -> None:
     import functools
     import signal
@@ -1384,3 +1766,74 @@ def test_an_operator_witness_exception_exempts_only_its_named_admitted_proof(
         if message == "names no active admitted proof":
             # The proof the operator did not name still needs its receipt.
             assert "admitted or repaired proof has no witness receipt" in str(refused.value)
+
+
+def test_script_tool_environments_are_built_before_parallel_workers_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission: parallel workers raced the first build of a script tool's environment.
+
+    A parallel run prepares exactly the tools that declare their own environment, one at a
+    time and before pytest starts; a single-worker run prepares none.
+    """
+    import agentic_starter.test_runner as runner
+
+    root = tmp_path / "repo"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin/declares").write_text("#!/usr/bin/env -S uv run --script\n# /// script\n# ///\n")
+    (root / "bin/plain").write_text("#!/usr/bin/env bash\n")
+    log = tmp_path / "uv.log"
+    stub = tmp_path / "stubs"
+    stub.mkdir()
+    (stub / "uv").write_text(f'#!/bin/sh\necho "$@" >> {log}\n')
+    (stub / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stub}:{os.environ['PATH']}")
+
+    parallel = runner.prepare_script_environments(root, ["-m", "pytest", "-n", "auto", "tests"])
+    serial = runner.prepare_script_environments(root, ["-m", "pytest", "-n", "0", "tests"])
+    order = []
+    monkeypatch.setattr(runner, "prepare_script_environments", lambda *a: order.append("prepare"))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda *a, **k: order.append("pytest") or subprocess.CompletedProcess([], 0, "", ""),
+    )
+    monkeypatch.setattr(sys, "argv", ["test_runner.py", "-m", "pytest", "tests"])
+    runner.main()
+    assert (
+        parallel == ["declares"]
+        and serial == []
+        and log.read_text().splitlines() == [f"sync --script {root / 'bin/declares'} --quiet"]
+        and order == ["prepare", "pytest"]
+    ), f"SCRIPT ENVIRONMENTS NOT PREPARED BEFORE WORKERS: {parallel} {serial} {order}"
+
+
+def test_script_environments_are_prepared_in_the_cache_the_caller_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission: a project with per-worker caches raced a cold cache inside one worker.
+
+    The supervisor's build lands in the supervisor's cache. A worker that keeps its own
+    cache passes its environment, and the build lands there instead.
+    """
+    import agentic_starter.test_runner as runner
+
+    root = tmp_path / "repo"
+    (root / "bin").mkdir(parents=True)
+    (root / "bin/declares").write_text("#!/usr/bin/env -S uv run --script\n# /// script\n# ///\n")
+    log = tmp_path / "uv.log"
+    stub = tmp_path / "stubs"
+    stub.mkdir()
+    (stub / "uv").write_text(f'#!/bin/sh\necho "$UV_CACHE_DIR" >> {log}\n')
+    (stub / "uv").chmod(0o755)
+    path = f"{stub}:{os.environ['PATH']}"
+    monkeypatch.setenv("PATH", path)
+    monkeypatch.setenv("UV_CACHE_DIR", str(tmp_path / "shared"))
+    private = {**os.environ, "UV_CACHE_DIR": str(tmp_path / "worker-3")}
+
+    runner.prepare_script_environments(root, ["-m", "pytest", "-n", "auto", "tests"])
+    runner.prepare_script_environments(root, ["-m", "pytest", "-n", "auto", "tests"], private)
+    assert log.read_text().splitlines() == [
+        str(tmp_path / "shared"),
+        str(tmp_path / "worker-3"),
+    ], f"SCRIPT ENVIRONMENT BUILT IN THE WRONG CACHE: {log.read_text()!r}"

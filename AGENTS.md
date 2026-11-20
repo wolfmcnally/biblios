@@ -26,7 +26,7 @@ Biblios builds standalone, portable knowledge bases ("shelves") that can be sear
 - [Biblios: thesis, operator requirements, the shelf design, access planes, consumers, proposals, rulings and unresolved decisions](briefs/BRIEF.md)
 - [Palace Bedrock provider requirement, read from Conric](briefs/palace-bedrock-provider-requirement.md)
 - [Castle incremental admission and replay facts, adopted from Castle v0.4.0](briefs/castle-incremental-admission-requirement.md)
-- [AWS qualification results: one approved EC2 run with shelves on EBS](briefs/aws-qualification-results.md)
+- [AWS qualification results: one approved run](briefs/aws-qualification-results.md)
 - [Metadata authority: Castle owns attributes and filenames; mirrors own content](briefs/metadata-authority.md)
 - [Provider throttling: typed failures, pacing and outcomes](briefs/provider-throttling.md)
 
@@ -56,9 +56,9 @@ Use `./bin/setup`, `./bin/test [args...]`, `./bin/check all`, `./bin/python`. `.
 - [Diagnosis and durable learning](briefs/rule-one-diagnostic-learning.md)
 - [Portable bootstrap procedure](briefs/agentic-bootstrap.md)
 - [Cross-CLI invocation contracts](briefs/cross-agent-invocation.md)
-- [Candidate-bound incremental assurance](briefs/incremental-orchestration.md)
+- [Incremental assurance](briefs/incremental-orchestration.md)
 - [Command authority and custody](briefs/deterministic-orchestration-control-plane.md)
-- [Draft deterministic workflow design](briefs/deterministic-orchestration.md)
+- [Draft workflow design](briefs/deterministic-orchestration.md)
 - [Lessons and maintenance flywheel](briefs/harness-self-improvement.md)
 - [Dated loading and continuity guidance](briefs/session-context-compaction.md)
 - [Proof-estate design](briefs/test-suite-value-governance.md)
@@ -67,6 +67,7 @@ Use `./bin/setup`, `./bin/test [args...]`, `./bin/check all`, `./bin/python`. `.
 - [Refactoring method and sources](briefs/refactoring-methodology.md)
 - [Draft multi-operator collaboration](briefs/multi-operator-collaboration.md)
 - [Open-source release design](briefs/open-source-releases.md)
+- [Draft transfer management](briefs/transfer-management.md)
 
 ## Policies catalog
 

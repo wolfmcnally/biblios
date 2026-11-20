@@ -6,8 +6,8 @@ Every methodology-following repository owns one canonical, atomic interface for 
 
 ```bash
 ./bin/setup
-./bin/test [--vital | --changed-from <ref> | focused test arguments...]
-./bin/check [all|lint|format|test|policy|vital|changed <ref>]
+./bin/test [--vital | --changed-from <ref> | --reuse | focused test arguments...]
+./bin/check [all [--no-reuse]|report|lint|format|test|policy|vital|changed <ref>]
 ```
 
 A language profile may add a repository-selected runtime entry point such as `./bin/python`. The repository—not an agent prompt, shell history, IDE task, or machine-global environment—defines what these commands mean.
@@ -19,7 +19,7 @@ The contract is one unit:
 - `bin/setup`, `bin/test`, `bin/check`, the full-gate receipt manager, and the proof-estate governance manager when governed fast lanes are present;
 - the command-zero preflight, immutable command-manifest manager, and composed log-policy gate when candidate-bound orchestration is present;
 - any runtime entry point such as `bin/python`;
-- any shared runtime resolver or dependency-chain probe used by those entry points;
+- any shared runtime resolver or dependency-chain probe used by those entry points, including its [sync exclusion of runtime state](#runtime-state-stays-out-of-file-syncing);
 - the runtime-version file, package manifest, and lockfile;
 - behavioral tests for the entry points;
 - this policy and every dependency-bearing operational caller, generated command, tracked hook, workflow, agent, and active instruction that calls repository code.
@@ -27,6 +27,14 @@ The contract is one unit:
 A partial transfer is stale and blocking. Copying `bin/check` without its version pin, teaching a raw test command without `bin/test`, or changing a lockfile without checking the wrappers is not an adoption of the contract. `learn`, `teach`, and `stamp` assess and migrate the entire bundle atomically while preserving the target repository's language, version policy, package manager, and dependencies.
 
 Adaptation may change syntax and fixtures to fit the target, but it may not weaken coverage. Behavioral execution is the minimum test floor: source-text assertions may supplement it, but do not replace tests that invoke the entrypoints with controlled toolchain stubs and prove routing, ordering, working-directory independence, single-hop and chained-symlink independence, child-status propagation, and fail-closed selection.
+
+## Runtime state stays out of file syncing
+
+Operator-ratified 2026-11-09. `.kickoff/` holds private evidence and bulky generated output, and `.gitignore` does not stop a file-syncing service from uploading it. On macOS the shared runtime resolver creates `.kickoff/` and writes both Dropbox ignore attributes to it, `com.dropbox.ignored` for the classic Dropbox folder and `com.apple.fileprovider.ignore#P` for Dropbox on File Provider, on every run of an entry point that initialises through it.
+
+The marking is unconditional. It does not ask whether the checkout is inside a Dropbox folder today, so a checkout later moved or restored into one is already excluded, and a repository that receives the resolver is marked on its next `./bin/setup`, `./bin/test` or `./bin/check` without a separate step. A failed write stops the entry point; it is never skipped silently. A target whose entry points initialise through a different resolver carries the same step there. Other platforms are unqualified, and the step does nothing on them.
+
+Dropbox removes an already-synced folder from its server and from other devices once the folder is marked, keeping the local copy. A checkout shared between machines through Dropbox therefore stops sharing `.kickoff/`, which is the intent: that evidence is recipient-local. Nothing else carries it either: Git ignores it and a clone starts without it, so the gate reports retained acceptance evidence a checkout does not hold instead of refusing ([phase status](phase-status.md)), and keeping a copy of `.kickoff/` is the operator's own backup decision. Attribute names are as of Dropbox's "ignored files" help page, updated 2025-10-07 and retrieved 2026-11-09.
 
 ## Ownership boundary
 
@@ -57,7 +65,8 @@ When the repository carries the universal proof-estate bundle, `--vital` selects
 
 `./bin/check` with no arguments is identical to `./bin/check all`. Universal named modes are:
 
-- `all` — every authoritative repository gate, in deterministic order;
+- `all` — every authoritative repository gate, in deterministic order, stopping at the first failing lane;
+- `report` — every lane run to the end whatever fails, for diagnosis only;
 - `lint` — static lint checks;
 - `format` — formatting checks without rewriting files;
 - `test` — delegates to `./bin/test`;
@@ -66,6 +75,10 @@ When the repository carries the universal proof-estate bundle, `--vital` selects
 The universal policy lane includes `policy-log`, which runs the structured phase/event/log validator. The staged pre-commit hook runs the same wrapper against the indexed record inventory, preserving committed immutable bytes. Neither substitutes for the full gate.
 
 A repository with governed proof lanes also exposes `vital` and `changed <ref>` modes that delegate to the matching `bin/test` selection; `changed` is the local-commit and implementation-candidate gate. Neither writes or satisfies a full-gate receipt.
+
+`all` stops at the first failure on purpose: no receipt can follow a failed lane, so the remaining lanes would only cost time. That makes one `all` run report one blocker. The test lane of `all` does not repeat proofs whose inputs are unchanged (operator-ratified 2026-11-10). `bin/test --reuse` compares the tree with the last tree on which every proof family is known to pass, on the same runtime, and runs the families that the changed-path selection maps to the paths that differ: one family for a new log entry, every family when the difference includes code the selection cannot attribute, and nothing when no covered or read path changed. Whenever that tree, the runtime or the selection's own inputs cannot be trusted, it runs everything. The record is one ignored file under `.kickoff/test-reuse/`, written only after a run that leaves every family passing on a tree that did not move during the run: a full run, a `--changed-from` run that widened to full, or a passing reuse run. The receipt is unchanged: it still binds the exact whole tree, so a new commit still needs a new gate run, and that run is now short when only records changed. `./bin/check all --no-reuse` and a bare `./bin/test` always run everything. When such a run fails a family that reuse would have skipped it prints `TEST REUSE UNSOUND` naming the family and discards the record, which is the measure of whether reuse can be trusted; treat any such line as a defect in the selection map, not as a flaky test. The record trusts the local test process that wrote it; it is a shortcut, not evidence, and nothing but the bracketed runs above may write it. Never run the recording command by hand against a working tree: doing so marks an untested tree as proven.
+
+`report` answers the other question, how far a tree is from passing: it runs lint, format, tests and every policy check regardless of failures, prints `CHECK REPORT FAILED:` and `CHECK REPORT INCOMPLETE:` lines naming each lane, exits non-zero if any lane did not pass, and never writes or satisfies a receipt. A clean report qualifies nothing; only `all` qualifies a push. Every lane's terminal line carries its elapsed seconds, so a run's log shows where its time went.
 
 A project may add named modes but does not remove or weaken `all`. Unknown modes and extra arguments are usage errors. Every entry point preserves child failures, emits unambiguous terminal results where applicable, hides no failure behind a pipe or fallback, and performs no commit, push, deploy, or other shared-state mutation.
 
@@ -93,7 +106,10 @@ The interface is universal; implementations are language-specific:
 - Node: the package manager selected by the committed lockfile, with immutable/frozen dependency setup and package scripts behind the wrappers;
 - Rust: the pinned toolchain when applicable and Cargo commands with `--locked`; every probe/build/test/lint/format command uses stable per-physical-checkout output. An ambient `CARGO_TARGET_DIR` chooses a base, not shared final artifacts. Preserve useful incremental output and pre-existing shared bytes; do not clear a cache as a substitute for isolation. Qualify two same-package copies in both good/bad orders, plus cwd/symlink/reentry behavior;
 - Go: the declared Go version and module reads with `-mod=readonly`;
+- Swift: the committed `Package.swift` and `Package.resolved`, with package resolution that refuses to rewrite the pin file, and the package's own test command behind `bin/test`;
 - other ecosystems: their equivalent version selection and lock-preserving modes.
+
+Parallel execution and selection follow the same split. Each profile turns on its own runner's maintained scheduler by default and records the reason when a group must stay serial; the governance environment's pytest runs parallel through the supervised runner whatever the deliverable's language. Switches to start from, named from general knowledge and not verified by this template against each tool's current documentation (as of 2026-11-10): `swift test --parallel`; `cargo test`, which runs test threads in parallel by default; `go test`, which runs packages in parallel by default; `node --test` with its concurrency option, or the project's chosen runner's worker setting. A deliverable's own suite joins changed-path selection and reuse through a proof family of kind `command`, whose selectors are argument lists for `bin/test`; without one, any change under the deliverable runs everything.
 
 `bin/mutate` belongs to the same contract with the same split. The interface is universal: `--changed-from <rev>` or `--all`; one JSON document carrying `state` (`measured`, `partial` or `unmeasured`), `tool`, `scope`, the counts `generated`, `killed`, `survived`, `timed_out` and `not_run`, and `survivors` with a `path`, `line` and `change` each; exit 0 for those three states and non-zero for any failure. The tool behind it is the language's own, a committed development dependency like any other, run so that no fault is planted in the live tree. A profile with no maintained tool declares `mutation.tool: null` with its reason and the wrapper reports `unmeasured`. The survey is never a gate member; its use is governed by [`test-suite-governance.md`](test-suite-governance.md) § Mutation survey.
 
@@ -182,4 +198,4 @@ When a formatting gate needs a mechanical rewrite, invoke the formatter from the
 
 A new project inherits the gate for each methodology contract it actually adopts, with its complete tools and portable behavioral coverage. Universal adopted contracts stay required. A capability-specific gate is selected explicitly at bootstrap with its capability and dependency closure; it is not toggled off because a required file is missing. Template-only checks and historical evidence do not travel. Build, lint and deliverable tests are adapted to the declared language and surfaces. Record applicability, credible failure risk, overlap and cost under [test governance](test-suite-governance.md#required-check-applicability-and-parallel-execution); wholesale copying alone is not justification.
 
-Required independent tests run concurrently by default using resource-conscious workers and isolated fixtures. Every serial exception names its dependency or cost reason. Parallel execution must preserve the selected test identities, failure status, resource cleanup, durable diagnostics and candidate/environment receipt binding. The Python profile uses a locked pytest-xdist dependency with the existing supervised test entry point; the receiver's governance environment carries it even when the deliverable uses another language. Keep the ordered gate seams: do not run live-tree mutations alongside candidate verification or launch competing gate runs over the same outputs.
+Required independent tests run concurrently by default using resource-conscious workers and isolated fixtures. Anything the workers would each build on first use, such as a tool's cached dependency environment, is built once before they start; the supervised runner does this for script tools under `bin/`. A project that gives each worker a private cache prepares that cache in the worker, with the same function, before the worker runs tools together. Fixtures do not borrow the machine: a throwaway repository never signs its commits or tags, whatever the operator's own configuration says, and a stand-in program that is expected to answer gets a generous clock, with a short clock reserved for the proof that a timeout fires. A deliverable whose own suite is in another language is declared by supplying `bin/test-native`, an executable that runs that suite and forwards its arguments as a selection. The full run then has two lanes: pytest in parallel, then that suite under the same hang deadline and process-group cleanup, never inside a pytest worker, since such a runner usually schedules its own pool. Every lane runs whatever an earlier one returned, the first failing status is the run's status, and a tree is recorded as proven only when every lane passed. `./bin/test native <arguments>` runs that suite alone. Every serial exception names its dependency or cost reason. Parallel execution must preserve the selected test identities, failure status, resource cleanup, durable diagnostics and candidate/environment receipt binding. The Python profile uses a locked pytest-xdist dependency with the existing supervised test entry point; the receiver's governance environment carries it even when the deliverable uses another language. Keep the ordered gate seams: do not run live-tree mutations alongside candidate verification or launch competing gate runs over the same outputs.

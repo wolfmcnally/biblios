@@ -1,7 +1,7 @@
 {
   "schema": "agentic.methodology-provenance.v1",
   "source": "agentic-coding-starter",
-  "release": null,
+  "release": "1.9.0",
   "revision": "8452604c4f80ba307e6a26ff0835af7a6178f496",
   "recorded": "2026-11-20",
   "capabilities": [

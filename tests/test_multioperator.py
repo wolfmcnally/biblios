@@ -943,7 +943,13 @@ def test_transition_and_maintenance_refuse_false_state(tmp_path: Path, source: P
     ):
         write_json(content, malformed)
         refused = run(
-            "append-terminal", "--root", output, "--writer", "operator-c", "--content", content
+            "append-terminal",
+            "--root",
+            output,
+            "--writer",
+            "operator-c",
+            "--content",
+            content,
         )
         failures.append(refused.returncode == 2 and snapshot(output / "log/entries") == published)
     assert all(failures), "TERMINAL COMPOSER INFERRED LESSONS OR MUTATED ON REFUSAL"
@@ -1090,3 +1096,607 @@ def test_constitution_version_gate_and_loading_limits(tmp_path: Path, monkeypatc
     assert primary.read_text() == "# Constitution\nKeep all rules.\n", (
         "CONSTITUTION ORIGINAL BODY LOST"
     )
+
+
+def test_transfer_equivalence_for_existing_product(tmp_path: Path) -> None:
+    """Admission: a missing receiver class and reversed source eligibility escaped old proofs.
+
+    One bounded CLI table checks both entry labels, both source directions and precise
+    partial-layout refusals. Snapshots independently guard against assessment writes.
+    """
+    from structured_fixtures import create_records
+
+    adopted = tmp_path / "adopted"
+    adopted.mkdir()
+    (adopted / "AGENTS.md").write_text("# Synthetic constitution\n")
+    create_records(adopted, {})
+    product = tmp_path / "product"
+    product.mkdir()
+    (product / "pyproject.toml").write_text('[project]\nname = "sample-product"\n')
+    (product / "src/sample_product").mkdir(parents=True)
+    (product / "src/sample_product/__init__.py").write_text('"""Existing product."""\n')
+    (product / "plan").mkdir()
+    (product / "plan/README.md").write_text("# Historical narrative roadmap\n")
+    for number in range(1, 7):
+        (product / f"plan/{number:02d}-narrative.md").write_text(f"# Historical plan {number}\n")
+    prose_source = tmp_path / "prose-source"
+    prose_source.mkdir()
+    (prose_source / "README.md").write_text("# A selected documentation capability\n")
+    before = snapshot(tmp_path)
+    observed = []
+    for donor, recipient, intent, expected in (
+        (adopted, product, "methodology", "retrofit-rehearsal"),
+        (product, adopted, "capability", "capability-learning"),
+        (prose_source, adopted, "capability", "capability-learning"),
+        (adopted, product, "capability", "capability-learning"),
+        (adopted, adopted, "methodology", "same checkout"),
+        (product, adopted, "methodology", "has not migrated"),
+    ):
+        answers = []
+        for entry in ("teach", "learn"):
+            response = run(
+                "transfer-preflight",
+                "--entry",
+                entry,
+                "--intent",
+                intent,
+                "--donor",
+                donor,
+                "--recipient",
+                recipient,
+            )
+            if response.returncode == 0:
+                value = json.loads(response.stdout)
+                value.pop("entry")
+                answers.append(value)
+                observed.append(
+                    value["route"] == expected
+                    and not value["mutation_authorized"]
+                    and not value["adoption_verified"]
+                )
+            else:
+                answers.append(response.stderr)
+                observed.append(response.returncode == 2 and expected in response.stderr)
+        observed.append(answers[0] == answers[1])
+    observed.append(snapshot(tmp_path) == before)
+    for marker, message in (
+        ("plan/events", "partial collaboration"),
+        ("plan/INDEX.md", "partial/unsupported"),
+        ("LOG.md", "partial/unsupported"),
+        ("kickoff.yaml", "partial methodology"),
+        ("AGENTS.md", "constitution requires owner"),
+        ("collaboration/manifest.json", "malformed"),
+    ):
+        target = product / marker
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if marker == "plan/events":
+            target.mkdir()
+        else:
+            target.write_text("{}")
+        frozen = snapshot(product)
+        for entry in ("teach", "learn"):
+            response = run(
+                "transfer-preflight",
+                "--entry",
+                entry,
+                "--donor",
+                adopted,
+                "--recipient",
+                product,
+            )
+            observed.append(
+                response.returncode == 2
+                and message in response.stderr
+                and snapshot(product) == frozen
+            )
+        if target.is_dir():
+            target.rmdir()
+        else:
+            target.unlink()
+        if marker.startswith("collaboration/"):
+            target.parent.rmdir()
+    unknown = tmp_path / "unknown"
+    unknown.mkdir()
+    (unknown / "README.md").write_text("Unclassified records\n")
+    response = run(
+        "transfer-preflight",
+        "--entry",
+        "teach",
+        "--donor",
+        adopted,
+        "--recipient",
+        unknown,
+    )
+    observed.append(response.returncode == 2 and "unsupported existing-project" in response.stderr)
+    assert all(observed), "TRANSFER EQUIVALENCE OR REFUSAL CONTRACT LOST: " + repr(observed)
+
+
+def test_retrofit_rehearsal_preserves_narrative_history(tmp_path: Path) -> None:
+    """Admission: canonical conversion cannot consume existing narrative-only product history.
+
+    One committed tiny product and three refusing recipes exercise the real archive/CLI
+    boundary. No network, dependency provisioning or live receiving checkout is used.
+    """
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "pyproject.toml").write_text('[project]\nname = "sample-product"\n')
+    (source / "plan").mkdir()
+    for number in range(1, 7):
+        (source / f"plan/{number:02d}-narrative.md").write_text(f"# Historical plan {number}\n")
+    (source / "plan/README.md").write_text("# Original roadmap\n")
+    for args in (
+        ("init", "-b", "master"),
+        ("add", "pyproject.toml", "plan"),
+        (
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.test",
+            "commit",
+            "-m",
+            "Synthetic existing product",
+        ),
+    ):
+        subprocess.run(["git", "-C", str(source), *args], check=True, capture_output=True)
+    head = subprocess.check_output(
+        ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+    ).strip()
+    original = snapshot(source)
+    recipe = dict(
+        mode="retrofit",
+        source_commit=head,
+        writer="fixture-operator",
+        constitution="# Reviewed receiving constitution\n",
+        historical_plans={
+            name: hashlib.sha256(body).hexdigest()
+            for name, body in original.items()
+            if name.startswith("plan/")
+        },
+    )
+    recipe_file = tmp_path / "recipe.json"
+    write_json(recipe_file, recipe)
+    # Unique dirty work must stay in place and never masquerade as committed rehearsal input.
+    (source / "plan/01-narrative.md").write_text("Unique unsettled work\n")
+    dirty = snapshot(source)
+    output = tmp_path / "rehearsal"
+    response = run("rehearse", "--source", source, "--mapping", recipe_file, "--output", output)
+    observed = [response.returncode == 0]
+    if response.returncode == 0:
+        retained = snapshot(output)
+        observed += [
+            all(retained.get(name) == body for name, body in original.items()),
+            not (output / "LOG.md").exists(),
+            not list((output / "plan/events").glob("*.json")),
+            not list((output / "plan/phases").glob("*.md")),
+            not list((output / "log/entries").glob("*.md")),
+        ]
+        state = json.loads(run("validate", "--root", output).stdout)
+        observed.append(
+            state["adopted"] is False
+            and state["phases"] == state["events"] == state["log_entries"] == 0
+        )
+        observed.append(run("render", "--root", output, "--check").returncode == 0)
+        for args in (
+            ("init", "-b", "master"),
+            ("add", "AGENTS.md", "plan", "log", "collaboration/manifest.json"),
+        ):
+            subprocess.run(["git", "-C", str(output), *args], check=True, capture_output=True)
+        observed.append(run("validate", "--root", output, "--staged").returncode == 0)
+        (output / "plan/01-narrative.md").write_text("Lost history\n")
+        subprocess.run(
+            ["git", "-C", str(output), "add", "plan/01-narrative.md"],
+            check=True,
+            capture_output=True,
+        )
+        (output / "plan/01-narrative.md").write_bytes(original["plan/01-narrative.md"])
+        refused = run("validate", "--root", output, "--staged")
+        observed.append(
+            refused.returncode == 2 and "historical plan missing or mutated" in refused.stderr
+        )
+        (output / "plan/01-narrative.md").write_text("Lost history\n")
+        refused = run("validate", "--root", output)
+        observed.append(
+            refused.returncode == 2 and "historical plan missing or mutated" in refused.stderr
+        )
+        occupied = snapshot(output)
+        refused = run("rehearse", "--source", source, "--mapping", recipe_file, "--output", output)
+        observed.append(
+            refused.returncode == 2
+            and "output must be absent" in refused.stderr
+            and snapshot(output) == occupied
+        )
+    for change, message in (
+        ({"source_commit": "unbound"}, "exact committed source"),
+        ({"historical_plans": {}}, "inventory/preimage mismatch"),
+        ({"constitution": ""}, "reviewed constitution"),
+    ):
+        write_json(recipe_file, {**recipe, **change})
+        absent = tmp_path / ("refused-" + next(iter(change)))
+        refused = run("rehearse", "--source", source, "--mapping", recipe_file, "--output", absent)
+        observed.append(
+            refused.returncode == 2 and message in refused.stderr and not absent.exists()
+        )
+    observed.append(snapshot(source) == dirty)
+    assert all(observed), "RETROFIT HISTORY OR REFUSAL CONTRACT LOST: " + repr(observed)
+
+
+def test_absent_retained_evidence_is_reported_while_altered_evidence_refuses(
+    tmp_path: Path,
+) -> None:
+    """Admission: a clean clone could not pass the gate, yet tampering must still refuse.
+
+    A hand-built historical completion gives validation real retained bytes to re-verify.
+    The oracle is the validator's own exit status and reported list for three states of
+    the same file: intact, altered and absent.
+    """
+    from structured_fixtures import create_records
+
+    def sha(data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    root = tmp_path / "held"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# Synthetic constitution\n")
+    (root / "EXECUTION_LOG.jsonl").write_bytes(b"")
+    name = "kept-work-package"
+    opened = create_records(root, {name: {"state": "in-progress"}})[name]
+    retained = root / ".kickoff/runs/fixture/gates.jsonl"
+    retained.parent.mkdir(parents=True)
+    retained.write_text("{}\n")
+    retained_name = retained.relative_to(root).as_posix()
+    body = (
+        "## 2026-01-01 00:00 — END " + name + "\n\nSynthetic historical close.\n\n"
+        "Lessons:\n- none\n"
+    ).encode()
+    bound = {
+        "phase": name,
+        "outcome": "accepted",
+        "phase_custody": {
+            "id": opened["id"],
+            "owner": opened["owner"],
+            "claim": opened["claim"],
+        },
+        "qualification": {
+            "schema": "agentic.phase-qualification.v1",
+            "files": {retained_name: sha(retained.read_bytes())},
+            "budget_prefix": None,
+            "execution_prefix": {"path": "EXECUTION_LOG.jsonl", "bytes": 0, "sha256": sha(b"")},
+        },
+        "log_sha256": sha(body),
+    }
+    closure_id = sha(json.dumps(bound, sort_keys=True, separators=(",", ":")).encode())
+    closure = retained.parent / "closure.json"
+    closure.write_text(json.dumps({**bound, "closure_id": closure_id, "status": "complete"}))
+    log_id = uuid.uuid5(uuid.NAMESPACE_URL, "log:" + opened["owner"] + ":" + closure_id).hex
+    envelope = {
+        "at": "2026-01-01T00:00:00+00:00",
+        "body_sha256": sha(body),
+        "id": log_id,
+        "previous": None,
+        "sequence": 1,
+        "writer": opened["owner"],
+    }
+    (root / "log/entries" / (log_id + ".md")).write_bytes(
+        b"---\n" + json.dumps(envelope).encode() + b"\n---\n" + body
+    )
+    completed = {
+        **opened,
+        "id": uuid.uuid4().hex,
+        "previous": opened["id"],
+        "from": "in-progress",
+        "state": "completed",
+        "reason": "Synthetic historical completion",
+        "acceptance": {
+            "path": closure.relative_to(root).as_posix(),
+            "sha256": sha(closure.read_bytes()),
+        },
+    }
+    write_json(root / "plan/events" / (completed["id"] + ".json"), completed)
+
+    intact = run("validate", "--root", root)
+    assert intact.returncode == 0, "VALID RETAINED EVIDENCE REFUSED: " + intact.stderr
+    original = retained.read_bytes()
+    retained.write_text("altered\n")
+    altered = run("validate", "--root", root)
+    retained.write_bytes(original)
+    retained.unlink()
+    absent = run("validate", "--root", root)
+    shutil.rmtree(root / ".kickoff")
+    cloned = run("validate", "--root", root)
+    assert (
+        json.loads(intact.stdout)["evidence_not_held"] == []
+        and altered.returncode == 2
+        and "missing or mutated" in altered.stderr
+        and absent.returncode == 0
+        and json.loads(absent.stdout)["evidence_not_held"] == [retained_name]
+        and "EVIDENCE NOT HELD 1" in absent.stderr
+        and cloned.returncode == 0
+        and json.loads(cloned.stdout)["evidence_not_held"] == [completed["acceptance"]["path"]]
+    ), (
+        "RETAINED EVIDENCE ABSENCE REFUSED OR ALTERATION PASSED: "
+        + altered.stderr
+        + absent.stderr
+        + cloned.stderr
+    )
+
+
+def test_methodology_close_cannot_bypass_the_lessons_contract(tmp_path: Path) -> None:
+    """Admission: closes written under a bare methodology heading carried no Lessons.
+
+    The append boundary is exercised directly: a scope record and a composed terminal
+    record are admitted, while a close under any non-terminal methodology heading refuses
+    and leaves the log bytes unchanged.
+    """
+    from structured_fixtures import create_records
+
+    root = tmp_path / "records"
+    root.mkdir()
+    (root / "AGENTS.md").write_text("# Synthetic constitution\n")
+    create_records(root, {"open-work-package": {"state": "next"}})
+    body = tmp_path / "body.md"
+
+    def append(heading: str, tail: str = "Body.\n") -> subprocess.CompletedProcess[str]:
+        body.write_text(f"## 2026-11-10 01:00 — {heading}\n\n{tail}")
+        return run(
+            "append", "--root", root, "--writer", "operator-a", "--body", body,
+            "--at", "2026-11-10T01:00:00Z",
+        )  # fmt: skip
+
+    scope = append("METHODOLOGY SCOPE")
+    before = snapshot(root / "log/entries")
+    bypasses = [append("METHODOLOGY"), append("METHODOLOGY CLOSE gate work")]
+    unchanged = snapshot(root / "log/entries") == before
+    terminal = append("END — METHODOLOGY gate work", "Done.\n\nLessons:\n- none\n")
+    assert (
+        scope.returncode == 0
+        and all(item.returncode == 2 and "append-terminal" in item.stderr for item in bypasses)
+        and unchanged
+        and terminal.returncode == 0
+    ), "METHODOLOGY CLOSE BYPASSED LESSONS OR VALID RECORD REFUSED: " + "".join(
+        item.stderr for item in (scope, *bypasses, terminal)
+    )
+
+
+def test_preflight_lists_source_releases_the_recipient_has_not_recorded(tmp_path: Path) -> None:
+    """Admission: no recipient could say which source release it held.
+
+    Real preflight runs compare a recorded baseline with the source's declared releases;
+    an absent record claims nothing, and a malformed one refuses instead of hiding a gap.
+    """
+    from structured_fixtures import create_records
+
+    roots = []
+    for name in ("source", "recipient"):
+        root = tmp_path / name
+        root.mkdir()
+        (root / "AGENTS.md").write_text("# Synthetic constitution\n")
+        create_records(root, {})
+        roots.append(root)
+    source, recipient = roots
+    (source / "RELEASES.md").write_text(
+        "# Releases\n\n## 1.1.0 — 2026-11-10\n\n## 1.0.2 — 2026-11-10\n\n## 1.0.1 — 2026-11-10\n"
+    )
+    record = recipient / "collaboration/methodology-provenance.json"
+
+    def preflight() -> subprocess.CompletedProcess[str]:
+        return run(
+            "transfer-preflight", "--entry", "teach", "--donor", source, "--recipient", recipient
+        )  # fmt: skip
+
+    unrecorded = preflight()
+    write_json(
+        record,
+        {
+            "schema": "agentic.methodology-provenance.v1",
+            "source": "synthetic-source",
+            "release": "1.0.2",
+            "revision": "a" * 40,
+            "recorded": "2026-11-10",
+            "capabilities": ["gate-report-mode"],
+        },
+    )
+    recorded = preflight()
+    record.write_text('{"release": "1.1.0"}')
+    malformed = preflight()
+    assert (
+        unrecorded.returncode == 0
+        and json.loads(unrecorded.stdout)["recipient_provenance"] is None
+        and json.loads(unrecorded.stdout)["releases_not_recorded"] == ["1.0.1", "1.0.2", "1.1.0"]
+        and recorded.returncode == 0
+        and json.loads(recorded.stdout)["releases_not_recorded"] == ["1.1.0"]
+        and malformed.returncode == 2
+        and "provenance" in malformed.stderr
+    ), "RELEASE GAP MISREPORTED OR MALFORMED PROVENANCE ACCEPTED: " + "".join(
+        item.stderr for item in (unrecorded, recorded, malformed)
+    )
+
+
+def _git(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", *args],
+        cwd=root, check=True, capture_output=True, text=True,
+    ).stdout.strip()  # fmt: skip
+
+
+def test_adoption_is_the_only_manifest_change_after_cutover(tmp_path: Path) -> None:
+    """Admission: a cutover committed undeclared could never record its owner's adoption.
+
+    The real commands run against a committed conversion: the declaration refuses while
+    the plan index still carries the rehearsal banner, then becomes the one manifest
+    change the staged validator admits; any other field change still refuses.
+    """
+    from structured_fixtures import create_records
+
+    root = tmp_path / "records"
+    (root / "collaboration").mkdir(parents=True)
+    (root / "AGENTS.md").write_text("# Synthetic constitution\n")
+    manifest = root / "collaboration/manifest.json"
+    write_json(
+        manifest,
+        {
+            "format": "starter.multioperator.v1",
+            "adopted": False,
+            "original_log_bytes": 0,
+            "original_log_sha256": hashlib.sha256(b"").hexdigest(),
+        },
+    )
+    create_records(root, {"open-work-package": {"state": "next"}})
+    index = root / "plan/INDEX.md"
+    index.write_text("# Proposed plan discovery — REHEARSAL ONLY\n\nContext.\n")
+    _git(root, "init", "-q", "-b", "master")
+    _git(root, "add", ".")
+    _git(root, "commit", "-q", "-m", "cutover")
+
+    unreviewed = run("adopt", "--root", root)
+    index.write_text("# Plan discovery\n\nContext.\n")
+    declared = run("adopt", "--root", root)
+    _git(root, "add", "collaboration/manifest.json")
+    admitted = run("validate", "--root", root, "--staged")
+    adopted = manifest.read_bytes()
+    manifest.write_bytes(adopted.replace(b'"original_log_bytes": 0', b'"original_log_bytes": 1'))
+    _git(root, "add", "collaboration/manifest.json")
+    widened = run("validate", "--root", root, "--staged")
+    manifest.write_bytes(adopted)
+    _git(root, "add", "collaboration/manifest.json")
+    _git(root, "commit", "-q", "-m", "adopt")
+    repeated = run("adopt", "--root", root)
+    assert (
+        unreviewed.returncode == 2
+        and "rehearsal banner" in unreviewed.stderr
+        and declared.returncode == 0
+        and json.loads(adopted)["adopted"] is True
+        and admitted.returncode == 0
+        and widened.returncode == 2
+        and "immutable record rewrite" in widened.stderr
+        and repeated.returncode == 2
+        and "already declared" in repeated.stderr
+    ), "ADOPTION DECLARATION REFUSED OR WIDENED: " + "".join(
+        item.stderr for item in (unreviewed, declared, admitted, widened, repeated)
+    )
+
+
+def test_transfer_ancestry_names_the_nearest_revision_and_recipient_lines(tmp_path: Path) -> None:
+    """Admission: merging against one assumed base silently dropped content a recipient never had.
+
+    A recipient that took an early donor revision and added a line of its own must be
+    reported against that early revision, with its own line named, so later donor
+    additions merge in instead of reading as recipient deletions.
+    """
+    donor, recipient = tmp_path / "donor", tmp_path / "recipient"
+    revisions = {}
+    donor.mkdir()
+    _git(donor, "init", "-q", "-b", "master")
+    for name, tracked, behind in (
+        ("early", "a\nb\nc\n", "x\n"),
+        ("middle", "a\nb2\nc\nd\n", "x\ny\n"),
+        ("late", "a\nb3\nc\nd\ne\n", "x\ny\nz\n"),
+    ):
+        (donor / "tracked.txt").write_text(tracked)
+        (donor / "behind.txt").write_text(behind)
+        (donor / "same.txt").write_text("unchanged\n")
+        _git(donor, "add", ".")
+        _git(donor, "commit", "-q", "-m", name)
+        revisions[name] = _git(donor, "rev-parse", "HEAD")
+    recipient.mkdir()
+    _git(recipient, "init", "-q", "-b", "master")
+    (recipient / "tracked.txt").write_text("a\nb\nmine\nc\n")
+    (recipient / "behind.txt").write_text("x\ny\n")
+    (recipient / "same.txt").write_text("unchanged\n")
+    _git(recipient, "add", ".")
+    _git(recipient, "commit", "-q", "-m", "recipient")
+
+    report = run("transfer-ancestry", "--donor", donor, "--recipient", recipient)
+    result(report)
+    files = {item["path"]: item for item in json.loads(report.stdout)["files"]}
+    assert (
+        set(files) == {"tracked.txt", "behind.txt"}
+        and files["tracked.txt"]["ancestor"] == revisions["early"]
+        and files["tracked.txt"]["recipient_own_lines"] == ["mine"]
+        and files["tracked.txt"]["state"] == "edited"
+        and files["behind.txt"]["state"] == "behind"
+        and files["behind.txt"]["ancestor"] == revisions["middle"]
+        and files["behind.txt"]["recipient_own_lines"] == []
+    ), "TRANSFER ANCESTRY MISREAD THE RECIPIENT: " + report.stdout
+
+
+def test_converter_reports_each_renamed_line_and_never_leaves_a_link_to_nothing(
+    tmp_path: Path,
+) -> None:
+    """Layout conversion: a migration renamed the old constitution in a sentence about both
+    names, which then said one name twice, and it left a link with no target where a retired
+    tool had been linked; its report listed paths, so neither showed.
+
+    Against the converter's own text functions and a synthetic target, the oracle is the
+    exact rewritten text, the per-line report and the lines left for a person.
+    """
+    sys.path.insert(0, str(ROOT / "lib"))
+    from agentic_starter import multioperator_transition as transition
+
+    rewritten: list[dict[str, object]] = []
+    left: list[dict[str, object]] = []
+    prose = (
+        "Read CLAUDE.md before any action.\n"
+        "Claude Code reads CLAUDE.md and Codex reads AGENTS.md.\n"
+    )
+    renamed = transition.constitution_mentions(prose, "policies/sample.md", rewritten, left)
+    code = '(root / "AGENTS.md").symlink_to("CLAUDE.md")\n'
+    code_renamed = transition.constitution_mentions(code, "tests/test_sample.py", [], [])
+    operands = "renumber-phases|log-append"
+    linked = transition.retired_tool_paths(
+        "See [the renumberer](../bin/renumber-phases) and [it](bin/log-append).\n",
+        "policies/sample.md",
+        operands,
+    )
+    listed = transition.retired_tool_paths(
+        "ruff check ../bin/renumber-phases ../bin/check\n", "bin/check", operands
+    )
+
+    target = tmp_path / "target"
+    (target / "policies").mkdir(parents=True)
+    (target / "CLAUDE.md").write_text("# Constitution\n")
+    (target / "policies/sample.md").write_text(prose)
+    report = transition.promote_constitution(target)
+
+    assert (
+        renamed == "Read AGENTS.md before any action.\n" + prose.splitlines(keepends=True)[1]
+        and rewritten
+        == [
+            {
+                "path": "policies/sample.md",
+                "line": 1,
+                "before": "Read CLAUDE.md before any action.",
+                "after": "Read AGENTS.md before any action.",
+            }
+        ]
+        and [(row["path"], row["line"]) for row in left] == [("policies/sample.md", 2)]
+        and code_renamed == '(root / "AGENTS.md").symlink_to("AGENTS.md")\n'
+        and linked == "See [the renumberer](../bin/multioperator) and [it](bin/multioperator).\n"
+        and listed == "ruff check ../bin/check\n"
+        and report["rewritten_lines"] == rewritten
+        and [row["line"] for row in report["left_for_review"]] == [2]
+        and (target / "policies/sample.md").read_text() == renamed
+    ), "CONVERTER RENAMED A TWO-NAME SENTENCE, HID A REWRITE OR LEFT AN EMPTY LINK"
+
+
+def test_a_relative_root_means_the_callers_directory(tmp_path: Path, source: Path) -> None:
+    """Record tool: run from another directory with a relative root, it validated the tool's
+    own repository instead and refused a valid tree with a message about the constitution.
+
+    The real command line is run from the parent of a converted synthetic tree; the oracle
+    is its exit status and the same result an absolute root gives.
+    """
+    target = convert(tmp_path, source, MAPPING, **checkpoint())
+    absolute = run("validate", "--root", target)
+    relative = subprocess.run(
+        [str(CLI), "validate", "--root", target.name],
+        cwd=target.parent,
+        text=True,
+        capture_output=True,
+        env={**os.environ, "UV_OFFLINE": "1"},
+        timeout=60,
+    )
+    assert (
+        absolute.returncode == 0
+        and relative.returncode == 0
+        and json.loads(relative.stdout)["events"] == json.loads(absolute.stdout)["events"]
+    ), "RELATIVE ROOT WAS READ FROM THE WRONG DIRECTORY: " + absolute.stderr + relative.stderr

@@ -8,6 +8,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,7 +16,6 @@ import time
 import uuid
 from pathlib import Path
 
-import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,9 +163,12 @@ def watch_arguments(
         ),
         "--phase",
         "test",
-        *(() if "--first-event-timeout" in extra_watch else ("--first-event-timeout", "1")),
-        *(() if "--idle-timeout" in extra_watch else ("--idle-timeout", "1")),
-        *(() if "--hard-timeout" in extra_watch else ("--hard-timeout", "2")),
+        # A stub that answers finishes at once, so a generous clock costs nothing and a
+        # loaded machine cannot turn a slow interpreter start into a false timeout. A test
+        # that proves a timeout passes its own short clock.
+        *(() if "--first-event-timeout" in extra_watch else ("--first-event-timeout", "30")),
+        *(() if "--idle-timeout" in extra_watch else ("--idle-timeout", "30")),
+        *(() if "--hard-timeout" in extra_watch else ("--hard-timeout", "60")),
     )
 
 
@@ -178,17 +181,6 @@ def test_show_validates_seed_config(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "Delegated resolution for this harness" in result.stdout
-    assert "claude turns" in result.stdout
-    config = seeded_config(tmp_path)
-    reset = run_manager(config, "reset", "timeouts")
-    assert reset.returncode == 0, reset.stderr
-    roles = yaml.safe_load(config.read_text())["role_timeouts"]["roles"]
-    assert {role: values["claude_max_turns"] for role, values in roles.items()} == {
-        "planner": 100,
-        "reviewer": 100,
-        "coder": 200,
-        "critic": 100,
-    }, "CAP SHIPPED DEFAULTS LOST"
 
 
 def test_scoped_edit_preserves_extensions_comments_and_timeouts(tmp_path: Path) -> None:
@@ -439,7 +431,12 @@ def stubborn_descendant_cli(tmp_path: Path, pid_file: Path) -> Path:
     return fake_cli(
         tmp_path,
         "claude",
-        f"""( trap '' TERM; echo $$ > {pid_file}; while :; do sleep 1; done ) &
+        # The leader waits for the descendant to record itself before it speaks and exits,
+        # so a slow start under load delays the proof instead of failing its setup.
+        # A subshell's `$$` is its parent's, so the descendant is its own shell: the recorded
+        # process is the one that ignores TERM and outlives the leader.
+        f"""sh -c 'trap "" TERM; echo $$ > {pid_file}; while :; do sleep 1; done' &
+while [ ! -s {pid_file} ]; do sleep 0.01; done
 printf '%s\\n' '{{"type":"assistant","message":{{"content":"working"}}}}'
 exit 0""",
     )
@@ -452,13 +449,16 @@ def test_timeout_kills_descendant_after_group_leader_exits(tmp_path: Path) -> No
         seeded_config(tmp_path),
         *watch_arguments(
             tmp_path,
+            # Only the idle clock is the subject: it fires once the leader has exited and
+            # the descendant stays silent. The other two clocks cover a loaded machine's
+            # process start and must not be able to end the run first.
             extra_watch=(
                 "--hard-timeout",
-                "0.2",
+                "60",
                 "--idle-timeout",
                 "0.1",
                 "--first-event-timeout",
-                "1",
+                "30",
             ),
         ),
         extra_env={"KICKOFF_TIMING_LOG": str(tmp_path / "timings.jsonl")},
@@ -466,10 +466,15 @@ def test_timeout_kills_descendant_after_group_leader_exits(tmp_path: Path) -> No
     )
     assert result.returncode == 124, result.stderr
     descendant = int(pid_file.read_text())
-    deadline = time.monotonic() + 2
-    while process_exists(descendant) and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert not process_exists(descendant)
+    try:
+        deadline = time.monotonic() + 2
+        while process_exists(descendant) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not process_exists(descendant), "DESCENDANT SURVIVED THE TIMEOUT"
+    finally:
+        # The descendant ignores TERM; a failing proof must not leave it running.
+        if process_exists(descendant):
+            os.kill(descendant, signal.SIGKILL)
 
 
 def test_watch_preserves_codex_artifact_when_terminal_stream_is_incomplete(
@@ -544,7 +549,6 @@ class TestGeneratedInvocationRecipes:
         assert coder[coder.index("--allowedTools") + 1] == (
             "Read,Grep,Glob,Write,Edit,Bash,WebFetch"
         )
-        assert coder[coder.index("--max-turns") + 1] == "200"
 
         expected = {
             "planner": "Read,Grep,Glob,WebFetch,WebSearch",
@@ -1108,282 +1112,6 @@ def _assert_primary_routing_and_usage(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "classification,turn_cap",
-    [("productive-unfinished", 150), ("completed-missing-verdict", 100)],
-    ids=["productive", "verdict"],
-)
-def test_cap_hit_continuation_requires_assessment_and_preserves_budget(
-    tmp_path: Path, classification: str, turn_cap: int
-) -> None:
-    """One real registered cap hit and assessed continuation; all refusals precede spawn."""
-    import test_kickoff_evidence as evidence
-    from agentic_starter import advisory
-    from agentic_starter.execution_telemetry import (
-        TelemetryError,
-        finalize_trace,
-        finalized_trace,
-        finish_span,
-    )
-
-    repository = evidence.repository.__wrapped__(tmp_path)
-    config = seeded_config(tmp_path)
-    source_dir, target_dir = tmp_path / "source", tmp_path / "target"
-    evidence.initialize(repository, source_dir, mode="primary")
-    native = str(uuid.uuid4())
-    calls = tmp_path / "calls.jsonl"
-    cli = tmp_path / "claude"
-    cli.write_text(
-        f"#!{sys.executable}\nimport json,sys\n"
-        "if sys.argv[1:] == ['--version']: print('stub 1.0'); sys.exit(0)\n"
-        f"with open({str(calls)!r},'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\n"
-        f"native={native!r}\n"
-        "print(json.dumps({'type':'system','subtype':'init','session_id':native}))\n"
-        "if '--resume' not in sys.argv:\n"
-        " print(json.dumps({'type':'assistant','message':{'content':["
-        "{'type':'text','text':'Partial bounded inspection'}]}}))\n"
-        " print(json.dumps({'type':'result','subtype':'error_max_turns',"
-        "'is_error':True,'session_id':native}))\n sys.exit(1)\n"
-        "print(json.dumps({'type':'result','result':'QUALIFIED SYNTHETIC RESPONSE',"
-        "'session_id':native}))\n"
-    )
-    cli.chmod(0o755)
-
-    def register(directory: Path, reason: str) -> Path:
-        path = directory / "plan-registration.json"
-        plan = tmp_path / "preserved-plan.md"
-        plan.write_text("# Plan\n\nCheck the constant and its bounded dependencies.\n")
-        captured = evidence.run("capture-plan", "--run-dir", str(directory), "--plan", str(plan))
-        assert captured.returncode == 0, captured.stderr
-        result = evidence.run(
-            "register-role-attempt",
-            "--run-dir",
-            str(directory),
-            "--operation",
-            "role.plan-review",
-            "--attempt",
-            "1",
-            "--role",
-            "reviewer",
-            "--harness",
-            "claude",
-            "--model",
-            "opus",
-            "--reason",
-            reason,
-            "--cause",
-            "Assessed prior native cap hit; no allowance reset",
-            "--output",
-            str(path),
-        )
-        assert result.returncode == 0, result.stderr
-        evidence.write_fixture_receipt(
-            directory / "role-preflight.json", mode="primary", executable=cli
-        )
-        return path
-
-    def watch(directory: Path, registration: Path, extra: tuple[str, ...] = ()):
-        args = list(
-            watch_arguments(
-                tmp_path,
-                effort="default",
-                extra_watch=(
-                    "--telemetry-role-registration",
-                    str(registration),
-                    *extra,
-                ),
-            )
-        )
-        args[args.index("--phase") + 1] = "1.1"
-        return run_manager(
-            config,
-            *args,
-            manager=directory / "tools/kickoff-config",
-            cli=cli,
-            cwd=repository,
-            extra_env={
-                "KICKOFF_TIMING_LOG": str(tmp_path / "timings.jsonl"),
-                "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
-            },
-        )
-
-    original = register(source_dir, "initial")
-    first = watch(source_dir, original)
-    assert first.returncode == 1 and "error_max_turns" in first.stdout, (
-        "CAP SOURCE WAS NOT AN ACTUAL FAILED INVOCATION: " + first.stderr
-    )
-    source_run = json.loads((source_dir / "run.json").read_text())
-    for span in (
-        source_run["initial_orchestration_span_id"],
-        source_run["telemetry_root_span_id"],
-    ):
-        finish_span(
-            engine_root=repository,
-            trace_id=source_run["telemetry_trace_id"],
-            span_id=span,
-            outcome="error",
-            exit_code=1,
-        )
-    finalize_trace(engine_root=repository, trace_id=source_run["telemetry_trace_id"])
-    sealed_source = finalized_trace(
-        engine_root=repository, trace_id=source_run["telemetry_trace_id"]
-    )
-    frozen = {p: p.read_bytes() for p in source_dir.rglob("*") if p.is_file()}
-    budget = advisory.budget_path(repository, "1.1")
-    prefix = budget.read_bytes()
-    candidate = evidence.initialize(repository, target_dir, mode="primary")
-    target = register(target_dir, "rescue")
-    stream = next(source_dir.glob("native-*-stdout.jsonl"))
-
-    def ref(p: Path) -> dict[str, str]:
-        return {"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
-
-    assessment = {
-        "source_registration": ref(original),
-        "source_stdout": ref(stream),
-        "session_id": native,
-        "classification": classification,
-        "evidence": ["Original partial-work packet: bounded dependency inspection remains"],
-        "remaining_work": "Finish the named dependency check and emit the required review JSON",
-        "instruction": "Continue only the named check, then emit the required response.",
-        "rationale": "Finite room for bounded work; activity alone does not prove productivity",
-        "candidate_delta": "Unchanged synthetic product/plan; fresh truthful same-phase run",
-        "source_candidate_id": candidate,
-        "target_candidate_id": candidate,
-        "max_turns": turn_cap,
-        "cause": "Assessed prior native cap hit; no allowance reset",
-        "clock_limits": {
-            "first_event_timeout_seconds": 1,
-            "idle_timeout_seconds": 1,
-            "hard_timeout_seconds": 2,
-        },
-    }
-    packet = tmp_path / "cap-assessment.json"
-    prompt = tmp_path / "prompt-claude-reviewer.md"
-
-    def assessed(extra: tuple[str, ...] = ()):
-        packet.write_text(json.dumps(assessment))
-        result_args = (
-            "--resume-session",
-            native,
-            "--cap-hit-assessment",
-            str(packet),
-            *extra,
-        )
-        # watch_arguments writes the prompt; retain the assessed instruction in that input.
-        args = list(
-            watch_arguments(
-                tmp_path,
-                effort="default",
-                extra_watch=(
-                    "--telemetry-role-registration",
-                    str(target),
-                    *result_args,
-                ),
-            )
-        )
-        args[args.index("--phase") + 1] = "1.1"
-        prompt.write_text(assessment["instruction"])
-        return run_manager(
-            config,
-            *args,
-            manager=target_dir / "tools/kickoff-config",
-            cli=cli,
-            cwd=repository,
-            extra_env={
-                "KICKOFF_TIMING_LOG": str(tmp_path / "timings.jsonl"),
-                "PATH": str(tmp_path) + os.pathsep + os.environ.get("PATH", ""),
-            },
-        )
-
-    cases = [
-        ("classification", "looping", "assessment holds"),
-        ("classification", "scope-expansion", "assessment holds"),
-        ("classification", "unknown", "assessment holds"),
-        ("session_id", str(uuid.uuid4()), "exact observed native session"),
-        ("max_turns", 201, "finite continuation bound"),
-        ("cause", "Different request", "cause differs"),
-        ("clock_limits", {}, "clock limits differ"),
-        ("source_candidate_id", "0" * 64, "source candidate"),
-        ("target_candidate_id", "0" * 64, "target candidate"),
-        ("source_stdout", {**ref(stream), "sha256": "0" * 64}, "digest mismatch"),
-    ]
-    for key, broken, diagnostic in cases:
-        old = assessment[key]
-        assessment[key] = broken
-        try:
-            refused = assessed()
-            assert refused.returncode != 0 and diagnostic in refused.stderr, (
-                "CAP REFUSAL GUARD MISSED: " + diagnostic + refused.stderr
-            )
-            assert len(calls.read_text().splitlines()) == 1 and budget.read_bytes() == prefix, (
-                "CAP REFUSAL SPENT A MODEL/ALLOWANCE"
-            )
-        finally:
-            assessment[key] = old
-    assessment["classification"] = "completed-missing-verdict"
-    assessment["max_turns"] = 150
-    refused = assessed()
-    assert refused.returncode != 0 and "finite continuation bound" in refused.stderr, (
-        "CAP VERDICT ENVELOPE WIDENED"
-    )
-    assessment["classification"] = classification
-    assessment["max_turns"] = turn_cap
-    assessment["clock_limits"]["hard_timeout_seconds"] = 1801
-    refused = assessed(("--hard-timeout", "1801"))
-    assert refused.returncode != 0 and "cannot widen clock" in refused.stderr, (
-        "CAP CLOCK GUARD WIDENED"
-    )
-    assessment["clock_limits"]["hard_timeout_seconds"] = 2
-    completed = assessed()
-    assert completed.returncode == 0, "CAP VALID CONTINUATION REFUSED: " + completed.stderr
-    argv = json.loads(calls.read_text().splitlines()[-1])
-    assert argv[argv.index("--resume") + 1] == native and argv[
-        argv.index("--max-turns") + 1
-    ] == str(turn_cap), "CAP SESSION OR FINITE BUDGET LOST"
-    diagnostic = read_record(tmp_path / "timings.jsonl")
-    assert (
-        diagnostic["claude_max_turns"] == turn_cap
-        and isinstance(diagnostic["cap_hit_assessment_sha256"], str)
-        and len(diagnostic["cap_hit_assessment_sha256"]) == 64
-    ), "CAP ASSESSMENT RECEIPT LOST"
-    retained = target_dir / "retained-artifacts" / diagnostic["cap_hit_assessment_sha256"]
-    assert (
-        retained.is_file()
-        and hashlib.sha256(retained.read_bytes()).hexdigest()
-        == diagnostic["cap_hit_assessment_sha256"]
-        and json.loads(retained.read_bytes())["assessment"]["session_id"] == native
-    ), "CAP RETAINED LINEAGE LOST"
-    assert (
-        budget.read_bytes().startswith(prefix)
-        and len(
-            advisory.active_launches(
-                advisory.validate_budget(repository, "1.1", budget.read_text())
-            )
-        )
-        == 2
-    ), "CAP REVIEW COUNTS RESET OR EXPANDED"
-    claims = advisory.active_launches(
-        advisory.validate_budget(repository, "1.1", budget.read_text())
-    )
-    assert [(row["run"], row["attempt"], row["pass"]) for row in claims] == [
-        (str(source_dir), 1, 1),
-        (str(target_dir), 1, 2),
-    ], "CAP LOCAL ORDINAL CONFUSED WITH PHASE INVOCATION"
-    replay = assessed()
-    assert replay.returncode != 0 and len(calls.read_text().splitlines()) == 2, (
-        "CAP CONTINUATION REPLAY LAUNCHED"
-    )
-    assert all(p.read_bytes() == body for p, body in frozen.items()), "CAP SOURCE HISTORY REWRITTEN"
-    try:
-        current_seal = finalized_trace(
-            engine_root=repository, trace_id=source_run["telemetry_trace_id"]
-        )
-    except TelemetryError as exc:
-        pytest.fail("CAP CLOSED SOURCE TRACE REOPENED OR REWRITTEN: " + str(exc))
-    assert current_seal == sealed_source, "CAP CLOSED SOURCE TRACE REOPENED OR REWRITTEN"
-
-
 def _folded_probe(work: Path, **changes: object) -> tuple[Path, str]:
     """A disposable worker's launch attempt, nonce and reply, as Folded's own records give them."""
     address = {"harness": "codex", "machine_id": "machine", "session_id": "probe-session"}
@@ -1565,7 +1293,7 @@ def test_watch_registered_review_durability_and_child_environment(
                     "--telemetry-role-registration",
                     str(registration),
                     "--hard-timeout",
-                    "10",
+                    "60",
                 ),
             )
         )
@@ -1626,3 +1354,94 @@ def test_watch_registered_review_durability_and_child_environment(
         assert argv[argv.index("--permission-mode") + 1] == "dontAsk", "REVIEW PERMISSION MODE"
         if resume:
             assert argv[argv.index("--resume") + 1] == resume, "REVIEW RESUME NOT FORWARDED"
+
+
+def test_preflight_groups_only_identical_readiness_commands(tmp_path: Path) -> None:
+    """One command's read challenge may qualify several roles, never different access/tools.
+
+    Five bounded real-manager cases cover the demonstrated duplicate cost and the
+    security-relevant separation of tool capability, effort, model and write access.
+    Existing command/role-authority proofs still own production dispatch permissions.
+    Only local stub processes run; no provider, model, credential or approval is used.
+    """
+    cases = (
+        ("codex", {"reviewer": ("sol", "high"), "critic": ("sol", "high")}, 1),
+        ("claude", {"reviewer": ("opus", "high"), "critic": ("opus", "high")}, 2),
+        ("codex", {"reviewer": ("sol", "high"), "critic": ("sol", "medium")}, 2),
+        ("codex", {"reviewer": ("sol", "high"), "coder": ("sol", "high")}, 2),
+        ("codex", {"reviewer": ("sol", "high"), "critic": ("astra", "high")}, 2),
+    )
+    for index, (venue, pins, expected) in enumerate(cases):
+        work = tmp_path / str(index)
+        work.mkdir()
+        config = seeded_config(work)
+        document = yaml.safe_load(config.read_text())
+        routing = {
+            role: {"model": "default"} for role in ("planner", "reviewer", "coder", "critic")
+        }
+        routing.update(
+            {role: dict(model=model, effort=effort) for role, (model, effort) in pins.items()}
+        )
+        document["role_models"] = {"default": routing, "claude": {}, "codex": {}}
+        config.write_text(yaml.safe_dump(document))
+        calls = work / "calls.jsonl"
+        executable = work / venue
+        executable.write_text(
+            f"#!{sys.executable}\n"
+            + r"""import json
+import os
+import sys
+from pathlib import Path
+
+if sys.argv[1:] == ["--version"]:
+    print("test-cli 1.0")
+    raise SystemExit(0)
+probe = Path(".kickoff-capability-probe")
+if probe.is_file():
+    token = probe.read_text()
+    prompt = sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv else sys.argv[-1]
+    assert token not in prompt and len(token) == 64
+    kind = "readiness"
+    answer = "KICKOFF_PREFLIGHT_OK " + token
+else:
+    kind = "toolchain"
+    answer = "KICKOFF_TOOLCHAIN_OK"
+with Path(os.environ["PREFLIGHT_CALLS"]).open("a") as handle:
+    handle.write(json.dumps({"kind": kind, "argv": sys.argv[1:]}) + "\n")
+if "--output-last-message" in sys.argv:
+    Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(answer)
+else:
+    print(json.dumps({"result": answer}))
+"""
+        )
+        executable.chmod(0o755)
+        receipt = work / "receipt.json"
+        result = run_manager(
+            config,
+            "preflight",
+            "--receipt",
+            str(receipt),
+            cli=executable,
+            extra_env={"PREFLIGHT_CALLS": str(calls)},
+        )
+        observed = (
+            []
+            if not calls.exists()
+            else [json.loads(line) for line in calls.read_text().splitlines()]
+        )
+        rows = [] if not receipt.exists() else json.loads(receipt.read_text())["targets"]
+        grouped = sorted(tuple(row["roles"]) for row in rows)
+        expected_groups = (
+            [tuple(sorted(pins))] if expected == 1 else sorted((role,) for role in pins)
+        )
+        verified = run_manager(config, "verify-preflight-receipt", "--receipt", str(receipt))
+        assert (
+            result.returncode == 0
+            and sum(call["kind"] == "readiness" for call in observed) == expected
+            and sum(call["kind"] == "toolchain" for call in observed)
+            == (1 if "coder" in pins else 0)
+            and grouped == expected_groups
+            and verified.returncode == 0
+        ), "READINESS PROBE GROUPING LOST: " + repr(
+            (index, observed, rows, result.stderr, verified.stderr)
+        )
