@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from biblios.acceleration import VectorRoute
     from biblios.core import ReadObservation
+    from biblios.distinct import DistinctReport, DistinctSources
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,9 @@ class SearchResult:
     vector_routes: tuple[VectorRoute, ...] | None = None
     """How the shelf's vector legs were served when the search was accelerated; ``None``
     when it ran the exact released search (:class:`biblios.acceleration.VectorRoute`)."""
+    distinct: DistinctReport | None = None
+    """How a one-result-per-source search went, whenever one was requested; ``None``
+    otherwise (:class:`biblios.distinct.DistinctReport`)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,9 +134,11 @@ def search(
     rerank: bool = True,
     strict: bool = False,
     _vector_cache: VectorCache | None = None,
+    _distinct: DistinctSources | None = None,
 ) -> SearchResult:
-    """``_vector_cache`` is internal to the bound seam
-    (:meth:`biblios.consumer.BoundShelf.search` passes its admitted acceleration)."""
+    """``_vector_cache`` and ``_distinct`` are internal to the bound seam
+    (:meth:`biblios.consumer.BoundShelf.search` passes its admitted acceleration and its
+    fenced distinct request)."""
     store = shelf.palace_store
     if not embedder_config_path(store).exists():
         raise UndeclaredEmbedderError(f"no embedder selector declared at {store}")
@@ -152,6 +158,7 @@ def search(
             searchable_revision,
             indexing,
             vector_routes=None if _vector_cache is None else (),
+            distinct=None if _distinct is None else _distinct_report(None, 0, limit),
         )
     # One prepared search with per-hit evidence: each returned hit carries the exact
     # stored body, embedding-input digest and vector bytes read in the retrieval's own
@@ -167,6 +174,8 @@ def search(
         injected_reranker=reranker is not None,
         evidence=True,
     )
+    if _distinct is not None:
+        return _search_distinct(shelf, prepared, reranker, _vector_cache, _distinct, limit, status)
     ranked = palace_search.execute_prepared_search(
         prepared, reranker=reranker, vector_cache=_vector_cache
     )
@@ -191,6 +200,44 @@ def search(
         observations=served.observations(),
         vector_routes=_routes(ranked.vector_cache, lambda _store: shelf.shelf_id),
     )
+
+
+def _distinct_report(outcome, returned: int, limit: int):
+    from biblios.distinct import report
+
+    return report(outcome, returned, limit)
+
+
+def _search_distinct(shelf, prepared, reranker, vector_cache, distinct, limit, status):
+    """One result per source: Palace walks its ranked pool through Biblios's key."""
+    from palace.prepared import DistinctResults
+
+    from biblios.distinct import _Selection
+
+    selection = _Selection(distinct, lambda hit: (shelf, hit, hit.chunk_id))
+    try:
+        ranked = palace_search.execute_prepared_search(
+            prepared,
+            reranker=reranker,
+            vector_cache=vector_cache,
+            distinct=DistinctResults(selection.key, limit),
+        )
+        answered = selection.assemble(ranked.hits, ranked.status)
+        served = selection.check(shelf)
+        return SearchResult(
+            hits=tuple(answered),
+            rerank_status=ranked.status,
+            withheld=served.withheld(),
+            stages=served.stages(),
+            revision=status.revision,
+            searchable_revision=status.searchable_revision,
+            indexing=status.lagging,
+            observations=served.observations(),
+            vector_routes=_routes(ranked.vector_cache, lambda _store: shelf.shelf_id),
+            distinct=_distinct_report(ranked.distinct, len(answered), limit),
+        )
+    finally:
+        selection.close()
 
 
 def _routes(outcomes, shelf_of):
@@ -442,6 +489,48 @@ class _ServingCheck:
         ):
             return "proof-invalid"
         return ManifestRow(chunk_id, position, body, inputs, vector, path)
+
+    def recheck(self, hit: Hit) -> Hit | None:
+        """A hit selected earlier, re-read at assembly: a deleted entry is ``not-live``; an
+        index commit since selection is ``commit-during-read`` (``commit-in-flight`` while
+        one is in progress); replaced content is ``not-accepted``; a mirror that is no
+        longer the accepted bytes is ``mirror-changed``; a renamed entry is served under
+        its new path. A withheld hit is not refilled."""
+        from biblios.mirrors import MirrorInvalid, digest, read_mirror
+
+        entry_id = hit.entry_id
+        entry = self._entry(entry_id)
+        record = None if entry is None else self.store.record(entry_id)
+        category = None
+        if entry is None:
+            category = "not-live"
+        elif record is None:
+            category = "not-accepted"
+        elif record.served_seq % 2:
+            category = "commit-in-flight"
+        elif record.served_seq != self._seq[entry_id]:
+            category = "commit-during-read"
+        elif (
+            record.state != "accepted"
+            or record.accepted_stage_sha256 != hit.stage_sha256
+            or record.source_cas_id != entry.cas_id
+        ):
+            category = "not-accepted"
+        else:
+            try:
+                data = read_mirror(self.shelf.mirror_path(entry_id), self.shelf.mirror_root)
+            except MirrorInvalid:
+                data = None
+            if data is None or digest(data) != hit.mirror_sha256:
+                category = "mirror-changed"
+        if category is not None:
+            # The reason a selected result is missing names the entry, even when an
+            # earlier candidate of the same entry was withheld during the walk.
+            held = self._withheld.setdefault(entry_id, [category, 0])
+            held[0] = category
+            held[1] += 1
+            return None
+        return hit if entry.path == hit.path else replace(hit, path=entry.path)
 
     def hit(self, hit, status: RerankStatus, evidence) -> Hit | None:
         entry_id = Path(hit.path).stem

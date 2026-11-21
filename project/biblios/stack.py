@@ -26,7 +26,7 @@ from palace.rerank import Reranker, RerankStatus
 from biblios.entries import Entry
 from biblios.errors import BibliosError, MixedIdentityError, UndeclaredEmbedderError
 from biblios.progress import IndexStatus, index_status
-from biblios.search import Hit, Page, ServedStage, Withheld, _routes
+from biblios.search import Hit, Page, ServedStage, Withheld, _distinct_report, _routes
 from biblios.shelf import Shelf
 
 if TYPE_CHECKING:
@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
     from biblios.acceleration import VectorRoute
     from biblios.core import ReadObservation
+    from biblios.distinct import DistinctReport, DistinctSources
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,8 @@ class StackResult:
     vector_routes: tuple[VectorRoute, ...] | None = None
     """Per built member, how its vector legs were served when the search was
     accelerated; ``None`` when it ran the exact released search."""
+    distinct: DistinctReport | None = None
+    """How a one-result-per-source search went, whenever one was requested."""
 
 
 class Stack:
@@ -99,12 +102,13 @@ class Stack:
         rerank: bool = True,
         strict: bool = False,
         _vector_cache: VectorCache | None = None,
+        _distinct: DistinctSources | None = None,
     ) -> StackResult:
         """Search the built members through Palace's multi-store search, one rerank over
         the union, naming every member whose index is still catching up.
 
-        ``_vector_cache`` is internal to the bound seam (:meth:`BoundStack.search`); an
-        unbuilt member is not searched and has no route."""
+        ``_vector_cache`` and ``_distinct`` are internal to the bound seam
+        (:meth:`BoundStack.search`); an unbuilt member is not searched and has no route."""
         status = self.status()
         indexing = tuple(
             shelf.shelf_id for shelf in self._shelves if status[shelf.shelf_id].lagging
@@ -119,6 +123,7 @@ class Stack:
                 indexing,
                 status,
                 vector_routes=None if _vector_cache is None else (),
+                distinct=None if _distinct is None else _distinct_report(None, 0, limit),
             )
         # Palace's one-shot search_stores is exactly this pair; only execute_prepared
         # takes an opt-in vector cache.
@@ -133,6 +138,10 @@ class Stack:
             injected_reranker=reranker is not None,
             evidence=True,
         )
+        if _distinct is not None:
+            return self._search_distinct(
+                prepared, reranker, _vector_cache, _distinct, limit, indexing, status
+            )
         found = multistore.execute_prepared(prepared, reranker=reranker, vector_cache=_vector_cache)
         from biblios.search import _ServingCheck
 
@@ -169,6 +178,51 @@ class Stack:
             observations=observed,
             vector_routes=_routes(found.vector_cache, lambda store: self._by_store[store].shelf_id),
         )
+
+    def _search_distinct(self, prepared, reranker, vector_cache, distinct, limit, indexing, status):
+        """One result per source over the union, each member under its own authority."""
+        from palace.prepared import DistinctResults
+
+        from biblios.distinct import _Selection
+
+        def locate(store_hit):
+            store = Path(store_hit.store).resolve()
+            return self._by_store[store], store_hit.hit, (store, store_hit.hit.chunk_id)
+
+        selection = _Selection(distinct, locate)
+        try:
+            found = multistore.execute_prepared(
+                prepared,
+                reranker=reranker,
+                vector_cache=vector_cache,
+                distinct=DistinctResults(selection.key, limit),
+            )
+            answered = selection.assemble(found.hits, found.status)
+            # Member order, as an ordinary stack search reports them.
+            checks = {
+                shelf.shelf_id: selection.checks[shelf.shelf_id]
+                for shelf in self._shelves
+                if shelf.shelf_id in selection.checks
+            }
+            return StackResult(
+                hits=tuple(answered),
+                rerank_status=found.status,
+                withheld=tuple(item for check in checks.values() for item in check.withheld()),
+                stages=tuple(item for check in checks.values() for item in check.stages()),
+                indexing=indexing,
+                status=status,
+                observations={
+                    shelf_id: check.observations()
+                    for shelf_id, check in checks.items()
+                    if check.observations()
+                },
+                vector_routes=_routes(
+                    found.vector_cache, lambda store: self._by_store[store].shelf_id
+                ),
+                distinct=_distinct_report(found.distinct, len(answered), limit),
+            )
+        finally:
+            selection.close()
 
     def resolve(self, shelf_id: str, entry_id: str) -> Entry:
         return self.shelf(shelf_id).resolve(entry_id)

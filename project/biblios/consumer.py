@@ -41,6 +41,7 @@ from biblios.curation import (
     execute,
     stable_id,
 )
+from biblios.distinct import DistinctSources, fenced
 from biblios.entries import Entry
 from biblios.progress import (
     IndexStatus,
@@ -417,10 +418,12 @@ class BoundShelf:
         limit: int = 5,
         control: CallControl = CallControl(),
         acceleration: VectorAcceleration | None = None,
+        distinct: DistinctSources | None = None,
     ) -> SearchResult:
         """Strict search. With ``acceleration`` the vector leg may be served from the
         process's exact in-memory cache (same answer); the result's ``vector_routes``
-        says how. Without it the released search runs and ``vector_routes`` is ``None``."""
+        says how. Without it the released search runs and ``vector_routes`` is ``None``.
+        ``distinct`` asks for one result per source (:class:`biblios.distinct.DistinctSources`)."""
         if embedder is None or reranker is None:
             raise ConsumerError("provider-required", stage="search")
         with self._working():
@@ -431,6 +434,7 @@ class BoundShelf:
                 limit=limit,
                 control=control,
                 acceleration=acceleration,
+                distinct=distinct,
             )
 
     def _search(
@@ -442,6 +446,7 @@ class BoundShelf:
         limit: int,
         control: CallControl,
         acceleration: VectorAcceleration | None = None,
+        distinct: DistinctSources | None = None,
     ) -> SearchResult:
         try:
             before = self._search_identity()
@@ -461,6 +466,7 @@ class BoundShelf:
                     reranker=_RerankerFence(reranker, control),
                     strict=True,
                     _vector_cache=cache,
+                    _distinct=fenced(distinct, control),
                 )
             if self._search_identity() != before:
                 raise ConsumerError("stale-view", stage="search")
@@ -785,9 +791,10 @@ class BoundStack:
         limit: int = 5,
         control: CallControl = CallControl(),
         acceleration: VectorAcceleration | None = None,
+        distinct: DistinctSources | None = None,
     ) -> StackResult:
         """One union search over the members; ``acceleration`` as in
-        :meth:`BoundShelf.search`, with one route per built member."""
+        :meth:`BoundShelf.search`, with one route per built member; ``distinct`` as there."""
         if embedder is None or reranker is None:
             raise ConsumerError("provider-required", stage="search")
         with ExitStack() as work:
@@ -800,6 +807,7 @@ class BoundStack:
                 limit=limit,
                 control=control,
                 acceleration=acceleration,
+                distinct=distinct,
             )
 
     def _search(
@@ -811,6 +819,7 @@ class BoundStack:
         limit: int,
         control: CallControl,
         acceleration: VectorAcceleration | None = None,
+        distinct: DistinctSources | None = None,
     ) -> StackResult:
         try:
             with self._locked():
@@ -829,6 +838,7 @@ class BoundStack:
                     reranker=_RerankerFence(reranker, control),
                     strict=True,
                     _vector_cache=cache,
+                    _distinct=fenced(distinct, control),
                 )
             with self._locked():
                 if tuple(member._search_identity() for member in self._members) != before:

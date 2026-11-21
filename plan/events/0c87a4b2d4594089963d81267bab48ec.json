@@ -1,0 +1,10 @@
+{
+  "from": null,
+  "id": "0c87a4b2d4594089963d81267bab48ec",
+  "owner": null,
+  "phase": "distinct-source-results",
+  "previous": null,
+  "reason": "New phase; not a claim or acceptance",
+  "state": "not-started",
+  "writer": "biblios-core-amorphous-terrier"
+}

@@ -1,0 +1,11 @@
+{
+  "claim": "foldedspace:1a8b0ab6-f0f2-4b19-9e64-c99605720038/29856e77a32830f1782ef8070534514171f0434b6eec8d99155c242960609fd9;sole-owner:9435c7a5-11ff-45ae-8b72-d17c2664149e",
+  "from": "not-started",
+  "id": "ddc39c78f84140ac833364a55806bb4f",
+  "owner": "biblios-core-amorphous-terrier",
+  "phase": "distinct-source-results",
+  "previous": "0c87a4b2d4594089963d81267bab48ec",
+  "reason": "Factotum-designated sole canonical writer for one result per source at the consumer seam through release v0.7.0 and handback, under the operator's ordered minor-release authorization; primary mode, one advisory plan review and one advisory code review; no other phase transferred",
+  "state": "in-progress",
+  "writer": "biblios-core-amorphous-terrier"
+}

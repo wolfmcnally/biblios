@@ -1,6 +1,6 @@
 # Consumer Adoption
 
-The experimental 0.6.1 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
+The experimental 0.7.0 library can operate a shelf inside storage and provider lifetimes owned by another application. This lane adds no CLI or MCP command and no security boundary. Applications retain authorization, encryption, audit and publication decisions.
 
 ## Choose the binding and lifetime
 
@@ -35,6 +35,10 @@ Palace raises a typed provider failure that records whether the provider may hav
 ## Opt in to exact vector acceleration
 
 A long-lived process may build one `VectorAcceleration(budget_bytes=..., on_unavailable="refuse" | "fallback")` and pass it as `acceleration=` to bound single-shelf or stack search. For a shelf whose index has opted in with `bound.enable_vector_feed()`, the vector leg is served from Palace's exact in-memory cache with the same answer as the exhaustive search; the result's `vector_routes` says per shelf whether legs came from memory, from the exact SQL (`oracle`), or from a visible fallback, and is `None` when no acceleration was passed. Only operational unavailability (`feed-disabled`, `budget`, `queue-full`, `snapshot`) can fall back; integrity and authorization failures always fail. Monitor stored vectors with `bound.vector_status()` (store scope, `None` when unknown), the cache's budget, owned bytes, headroom and counters with `acceleration.stats()` (the cache's own estimate), and the process's peak resident memory with `stats().process_peak_rss_bytes` (operating system). Nothing is accelerated by default. The source distribution's `ADOPTION.md` states the full contract and its limits.
+
+## Ask for one result per source
+
+Pass `distinct=DistinctSources()` to bound single-shelf or stack search to get at most `limit` results with one result per source (by default one per entry). Supply `DistinctSources(key)` to name your own source identity and accepted-version rule: the key receives a served candidate and returns a string key, or `None` to reject it. Selection walks Palace's already ranked candidates with the same single rerank call and provider budget, so a short pool returns fewer results and says so in `distinct`; a stale or rejected top candidate never hides a valid sibling, and every selected hit is re-read at assembly and withheld, not replaced, if it changed. The source distribution's `ADOPTION.md` states the full contract.
 
 ## Declare finite resource envelopes
 

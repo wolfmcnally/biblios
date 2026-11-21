@@ -68,6 +68,7 @@ from biblios.curation import (
     SetEntryMetadata,
     TakeSnapshot,
 )
+from biblios.distinct import DistinctReport, DistinctSources, SourceCandidate
 from biblios.entries import ENTRY_SCHEMA, Entry, EntryMetadata, EntryMetadataError
 from biblios.errors import (
     BibliosError,
@@ -116,6 +117,9 @@ __all__ = [
     "BoundShelf",
     "BoundStack",
     "open_bound_stack",
+    "DistinctReport",
+    "DistinctSources",
+    "SourceCandidate",
     "VectorAcceleration",
     "AccelerationStats",
     "ResidentShelf",

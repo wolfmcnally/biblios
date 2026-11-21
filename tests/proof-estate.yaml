@@ -2487,3 +2487,39 @@ families:
   tier: changed
   flake_rate: 0.0
   replacement_lineage: []
+- id: distinct-sources
+  kind: pytest
+  selectors:
+  - project/tests/test_distinct.py
+  source_paths:
+  - project/biblios/**
+  - project/tests/test_distinct.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  covers:
+  - project/biblios/**
+  - project/tests/test_distinct.py
+  - project/tests/consumer_fixtures.py
+  - project/pyproject.toml
+  - project/uv.lock
+  contract: 'One result per source at the bound seam: without the option search is
+    unchanged; with it the search''s limit counts sources, the candidate input and
+    the single rerank call are those of an ordinary search, a candidate heads a source
+    only after Biblios''s per-entry and per-hit authority and the consumer key accept
+    it, a short pool underfills without refill, every selected hit is re-read at assembly
+    and withheld without refill when it changed, stacks keep per-shelf authority,
+    acceleration returns the same answer, and consumer-key failures, cancellation
+    and malformed requests are typed.'
+  risk_class: consumer-public-contract
+  oracle: 'Public bound searches over synthetic shelves with a scripted reranker that
+    records each call''s exact texts: selected hits, DistinctReport counts, withheld
+    categories and counts, stages, rerank and embedding call counts, typed ConsumerError
+    codes, and memory-served vector routes.'
+  admission: 'As of 2026-11-21, distinct-source-results (operator authorization relayed
+    by the factotum, 2026-11-21): twenty-seven proofs, each red-witnessed. No retirement.'
+  nearest_overlap: consumer-search proves strict chunk search and its fences; vector-acceleration
+    proves cache parity; this family proves distinct-source selection and assembly.
+  tier: changed
+  flake_rate: 0.0
+  replacement_lineage: []

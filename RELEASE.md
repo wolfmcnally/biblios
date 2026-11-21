@@ -1,12 +1,24 @@
-# Biblios 0.6.1 release preparation
+# Biblios 0.7.0 release preparation
 
-Version 0.6.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a patch release after the published experimental 0.6.0. It moves the Palace dependency to the published v0.7.1 so that an installed Biblios declares the Palace release it is used with. It changes no Biblios interface, default, CLI command or storage format. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.7.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a minor release after the published experimental 0.6.1. As authorized by the operator on 2026-11-21, it pins the published Palace v0.8.0 and lets a consumer ask bound search for one result per source. It adds to the consumer library interface; defaults, CLI commands and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.6.1`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.6.1-py3-none-any.whl`, `biblios-0.6.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.7.0`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.7.0-py3-none-any.whl`, `biblios-0.7.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
+
+## Changes in 0.7.0
+
+A consumer can pass `distinct=DistinctSources(key)` to bound single-shelf or stack search to receive at most `limit` results, one per source. The key receives a served candidate (shelf, entry, accepted stage) and returns the source key or `None` to reject it; by default each entry is one source. Palace v0.8.0 walks its already ranked candidates after its snapshot closes and asks Biblios for each key: a candidate counts only after Biblios's own checks serve it and the key accepts it, so a stale or rejected top candidate never hides a valid sibling. The candidates, the single rerank call and the provider budget are those of an ordinary search; a short pool returns fewer results and `DistinctReport` says so. Every selected hit is re-read at assembly (deleted, replaced, renamed, re-indexed, or its mirror edited since selection) and a withheld hit is not refilled. The key runs behind the standard callback fence. Without the option nothing changes, except that the CLI's JSON search output, which prints the result's fields, gains a `"distinct": null` key, as it gained `vector_routes` in 0.6.0.
+
+Dependencies: Palace v0.8.0 (from v0.7.1), tag peeled to 2f96c7d390fd1bf24098e884f70d68e4a57d78e8; its release wheel and source distribution match their published checksums.
+
+Interface changes: `DistinctSources`, `SourceCandidate`, `DistinctReport`; the `distinct` keyword of `BoundShelf.search` and `BoundStack.search`; `SearchResult.distinct` and `StackResult.distinct`.
+
+One independent plan review and one independent code review (Fable High) ran on this candidate, after a preparation with its own independent plan and code advice. The plan review's eleven findings were disposed before implementation; the code review found nothing critical, high or medium, and its three low findings were adopted with new proofs. Twenty-seven proofs are each red-witnessed. The corrections made after the code review were not independently re-reviewed.
+
+Limits: the candidate pool is fixed at the ordinary search depth, so underfill is normal; only macOS ARM64 ran this release's checks; all proofs are synthetic and offline.
 
 ## Changes in 0.6.1
 
