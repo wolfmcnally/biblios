@@ -1,12 +1,18 @@
-# Biblios 0.6.0 release preparation
+# Biblios 0.6.1 release preparation
 
-Version 0.6.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a minor release after the published experimental 0.5.0. As directed by the operator on 2026-11-19, it pins the published Palace v0.7.0 and exposes its opt-in exact vector cache and memory observability at the consumer seam. It adds to the consumer library interface; defaults, CLI commands and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.6.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a patch release after the published experimental 0.6.0. It moves the Palace dependency to the published v0.7.1 so that an installed Biblios declares the Palace release it is used with. It changes no Biblios interface, default, CLI command or storage format. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.6.0`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.6.0-py3-none-any.whl`, `biblios-0.6.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.6.1`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.6.1-py3-none-any.whl`, `biblios-0.6.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
+
+## Changes in 0.6.1
+
+Dependencies: Palace v0.7.1 (from v0.7.0), tag peeled to 7d9f47c2d60d864b7b2c186e90c950045d073f1d; its release wheel and source distribution match their published checksums. Palace 0.7.1 orders equal vector distances by chunk id, nearest first, in both the released sqlite-vec search and the opt-in vector cache; a store without ties returns the same answer as before, and with ties the members and order are now deterministic. The cache now answers ties from memory, so the oracle reason `tie` no longer appears in `vector_routes`. Biblios's code is unchanged; the adoption guide's oracle reasons and two stale version lines are corrected.
+
+Limits: as for 0.6.0. Only macOS ARM64 ran this release's checks and clean installation; Biblios has no hosted CI, and no Linux or Linux ARM64 qualification is claimed.
 
 ## Changes in 0.6.0
 
