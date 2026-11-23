@@ -1,12 +1,20 @@
-# Biblios 0.7.0 release preparation
+# Biblios 0.7.1 release preparation
 
-Version 0.7.0 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a minor release after the published experimental 0.6.1. As authorized by the operator on 2026-11-21, it pins the published Palace v0.8.0 and lets a consumer ask bound search for one result per source. It adds to the consumer library interface; defaults, CLI commands and storage formats are unchanged. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.7.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a patch release after the published experimental 0.7.0. As directed by the operator on 2026-11-23, it moves the Palace dependency to the published v0.8.1, whose Bedrock embedding provider no longer reads the account's data-retention setting before embedding. It changes no Biblios code, interface, default, CLI command or storage format. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.7.0`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.7.0-py3-none-any.whl`, `biblios-0.7.0.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.7.1`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.7.1-py3-none-any.whl`, `biblios-0.7.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
+
+## Changes in 0.7.1
+
+Dependencies: Palace v0.8.1 (from v0.8.0), tag peeled to 98c8e70e34b005093bf5d8ad9ab13057048829b6; its release wheel and source distribution match their published checksums. Palace 0.8.1's Bedrock embedding provider no longer calls `bedrock:GetAccountDataRetention` or refuses on the account's retention mode; it needs only `bedrock:InvokeModel`, and Palace makes no zero-data-retention claim. No other Palace package code changed. Biblios's code is unchanged, and no Biblios code or test depended on that check. Biblios makes no data-retention claim for any provider.
+
+The repository's AWS qualification tooling, which is not part of the package, still expects the old behavior: the Bedrock lane and the runner's judge require a successful retention check in Palace's exported audit, and the qualification boundary still grants `bedrock:GetAccountDataRetention`. With Palace 0.8.1 that lane cannot pass until the tooling is updated; the hermetic, ingestion and portability lanes are unaffected. The earlier qualification results remain a record of the Palace release they ran on.
+
+Limits: as for 0.7.0. Only macOS ARM64 ran this release's checks and clean installation; Biblios has no hosted CI, and no Linux or Linux ARM64 qualification is claimed.
 
 ## Changes in 0.7.0
 
