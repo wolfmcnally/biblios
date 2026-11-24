@@ -7,8 +7,12 @@ from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
+from palace.index._errors import IndexError as PalaceRefusal
+from palace.index.embedder_config import embedder_config_path
+from palace.settings import initialize_store
 
 from biblios import BibliosError, MixedIdentityError, open_stack
+from biblios.stack import member_identity
 from biblios.testing import HashEmbedder, OverlapReranker
 from tests.support import GUIDE, NOTES, OPENROUTER_SETTINGS_TEXT, TIDE, make_shelves
 
@@ -76,6 +80,46 @@ def test_mixed_identity_is_refused_at_construction(tmp_path: Path) -> None:
             open_stack([])
         with pytest.raises(BibliosError, match="named twice"):
             open_stack([a, a])
+
+
+def test_direct_and_us_bedrock_shelves_keep_distinct_identities(tmp_path: Path) -> None:
+    """Failure mode: a stack compares only provider and dimension, so a shelf embedded
+    through the direct model and one embedded through the US profile are searched as one
+    vector space; or an omitted model and the explicit US profile record different
+    identities; or later settings reach an existing direct shelf's recorded selector."""
+    base = (
+        "palace:\n  embedding:\n    provider: bedrock\n    region: us-east-1\n    dim: 1024\n"
+        "    published_corpus: true\n    published_corpus_note: synthetic\n"
+        "    published_corpus_asserted_at: '2026-11-24T00:00:00Z'\n"
+    )
+    (direct,), _ = make_shelves(
+        tmp_path / "direct", ["direct"], settings_text=base + "    model: cohere.embed-v4:0\n"
+    )
+    (omitted,), us_settings = make_shelves(tmp_path / "omitted", ["omitted"], settings_text=base)
+    (explicit,), _ = make_shelves(
+        tmp_path / "explicit",
+        ["explicit"],
+        settings_text=base + "    model: us.cohere.embed-v4:0\n",
+    )
+    selector = embedder_config_path(direct.palace_store)
+    recorded = selector.read_bytes()
+    with ExitStack() as stack:
+        for shelf in (direct, omitted, explicit):
+            stack.enter_context(shelf)
+        identities = {shelf: member_identity(shelf) for shelf in (direct, omitted, explicit)}
+        assert {(i.provider, i.dim) for i in identities.values()} == {("bedrock:us-east-1", 1024)}
+        assert identities[direct].model == "cohere.embed-v4:0"
+        assert identities[omitted] == identities[explicit]
+        assert identities[omitted].model == "us.cohere.embed-v4:0"
+        assert open_stack([omitted, explicit]).identity == identities[omitted]
+        with pytest.raises(MixedIdentityError) as refused:
+            open_stack([direct, omitted])
+        assert "us.cohere.embed-v4:0" in str(refused.value)
+        # The omitted-model composition never reaches the existing direct shelf.
+        with pytest.raises(PalaceRefusal, match="select a different embedding"):
+            initialize_store(direct.palace_store, us_settings.palace)
+        assert selector.read_bytes() == recorded
+        assert member_identity(direct) == identities[direct]
 
 
 def test_lagging_member_is_admitted_and_named(tmp_path: Path) -> None:

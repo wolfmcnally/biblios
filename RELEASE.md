@@ -1,12 +1,22 @@
-# Biblios 0.7.1 release preparation
+# Biblios 0.7.2 release preparation
 
-Version 0.7.1 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a patch release after the published experimental 0.7.0. As directed by the operator on 2026-11-23, it moves the Palace dependency to the published v0.8.1, whose Bedrock embedding provider no longer reads the account's data-retention setting before embedding. It changes no Biblios code, interface, default, CLI command or storage format. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
+Version 0.7.2 is the next experimental release at the existing [GitHub repository](https://github.com/wolfmcnally/biblios), a patch release after the published experimental 0.7.1. As directed by the operator on 2026-11-24, it moves the Palace dependency to the published v0.8.2, whose Bedrock embedding selector accepts the US geographic inference profile and uses it when the model is omitted. It changes no Biblios code, interface, CLI command or storage format; existing shelves keep their recorded embedding. Publication follows artifact installation checks and the final exact-tree gate. This preparation record does not itself claim publication.
 
 ## Intended artifacts
 
-The version tag is `v0.7.1`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.7.1-py3-none-any.whl`, `biblios-0.7.1.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
+The version tag is `v0.7.2`; there is no `v0.4.0` tag. The attached package artifacts are `biblios-0.7.2-py3-none-any.whl`, `biblios-0.7.2.tar.gz` and their SHA-256 checksums. No PyPI upload, hosted documentation, model weights, OCR executable, private configuration or user corpus is included. The wheel and source distribution carry the same declared dependencies. Published substrate releases are selected by tag; the lockfile retains their exact resolved commits. A tag alone does not establish that an upstream release was published.
 
 Python support remains 3.12 and 3.13; the managed checkout runtime is Python 3.12. Git and uv fetch public prerequisites. macOS and Linux have development qualification; Windows is unqualified. See [installation](project/README.md) and [update/uninstall guidance](project/RELEASE.md).
+
+## Changes in 0.7.2
+
+Dependencies: Palace v0.8.2 (from v0.8.1), tag peeled to caf55a93e7331034acb8ff95e8f4f8fbdc8ea6e2; its hosted CI passed on that commit, and its release wheel and source distribution match their published checksums. Palace 0.8.2's Bedrock selector accepts exactly the direct model `cohere.embed-v4:0` and the US geographic inference profile `us.cohere.embed-v4:0`; `model` is now optional and an omitted model selects the US profile, which Palace accepts only with region us-east-1, us-east-2, us-west-1 or us-west-2. Every other model or profile is refused. The selected model is part of the embedding identity, so direct and US-profile stores never share an identity or vectors. Only Palace's selector validation changed.
+
+Biblios's code is unchanged: it hands the composed `palace` section to Palace, records the selector Palace resolves when a shelf is created, and afterwards reads only that record. A shelf created with an explicit `cohere.embed-v4:0` stays on the direct model whatever later settings say. New Bedrock settings that omit `model` create shelves on the US profile, which a direct shelf cannot share a stack with. Two proofs are added: one checks that the model choice survives a layered composition and that Palace's refusals pass through; the other checks that direct and US-profile shelves keep distinct identities and are never stacked, and that an existing direct shelf's selector is left unchanged. The getting-started chapter documents the model choice and how to move routes. No live Bedrock call was made for this release; the US-profile route is not established against AWS.
+
+The repository's AWS qualification settings pin the direct model and are unchanged; that tooling's retention-check expectation is as described for 0.7.1.
+
+Limits: as for 0.7.1. Only macOS ARM64 ran this release's checks and clean installation; Biblios has no hosted CI, and no Linux or Linux ARM64 qualification is claimed.
 
 ## Changes in 0.7.1
 

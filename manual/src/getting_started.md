@@ -50,7 +50,7 @@ drawbridge: {}
 vellric: {}
 ```
 
-Bedrock through Palace is the same section with its own fields, as Palace documents them: `provider: bedrock`, `model: cohere.embed-v4:0`, `region`, `dim` (256, 512, 1024 or 1536), the published-corpus assertion (`published_corpus`, `published_corpus_note`, `published_corpus_asserted_at`) and an optional `profile`; the instance role or the SDK's credential chain signs the requests.
+Bedrock through Palace is the same section with its own fields, as Palace documents them: `provider: bedrock`, `region`, `dim` (256, 512, 1024 or 1536), the published-corpus assertion (`published_corpus`, `published_corpus_note`, `published_corpus_asserted_at`), an optional `model` and an optional `profile`; the instance role or the SDK's credential chain signs the requests. `model` is either the US geographic inference profile `us.cohere.embed-v4:0`, which is the default when `model` is omitted and is accepted only with `region` us-east-1, us-east-2, us-west-1 or us-west-2, or the direct regional model `cohere.embed-v4:0`, which works from any Region the model is offered in; Palace refuses every other model and profile. A shelf records the route Palace resolved when it was created and keeps it: later settings never change an existing shelf, so a shelf created with `model: cohere.embed-v4:0` stays on the direct model. The route is part of the shelf's embedding identity, so a direct shelf and a US-profile shelf cannot be searched in one stack. To move to the other route, create a new shelf with the new settings and curate the same sources into it, which embeds them again.
 
 With that file at `config/settings.yaml`, use the library directly as follows; the Command-Line Tool chapter exposes the same operations from the shell:
 

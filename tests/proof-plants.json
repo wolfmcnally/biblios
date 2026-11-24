@@ -1,4 +1,22 @@
 {
+  "pytest:project/tests/test_config.py::test_bedrock_model_choice_survives_composition_and_palace_refusals": {
+    "defect": "Hand Palace only the first settings file of the composition",
+    "expect": "assert 'us.cohere.embed-v4:0' == 'cohere.embed-v4:0'",
+    "plant": {
+      "path": "project/biblios/config.py",
+      "replace": "    palace = load_palace_settings(paths, root=root)\n",
+      "with": "    palace = load_palace_settings(paths[:1], root=root)\n"
+    }
+  },
+  "pytest:project/tests/test_stack.py::test_direct_and_us_bedrock_shelves_keep_distinct_identities": {
+    "defect": "Compare stack members by provider and dimension only",
+    "expect": "DID NOT RAISE",
+    "plant": {
+      "path": "project/biblios/stack.py",
+      "replace": "    if len(distinct) > 1:\n",
+      "with": "    if len({(i.provider, i.dim) for i in distinct}) > 1:\n"
+    }
+  },
   "pytest:tests/test_check.py::test_all_is_default_locked_ordered_and_cwd_independent": {
     "defect": "Route the gate's test lane back to the uncached full suite",
     "expect": "GATE OMITTED OR REORDERED REQUIRED COMMAND",
